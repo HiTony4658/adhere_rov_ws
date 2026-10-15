@@ -1,5 +1,16 @@
 # CLAUDE.md — Architectural & Mathematical Constitution for `adhere_rov_ws`
 
+## 0. Project Overview & Read-Only Reference Paths
+This workspace implements the multirate anti-overturning control framework (`Baseline MPPI` and `KAMR-MPPI`) for a thrust-adhered hull-inspection underwater ROV using **Ubuntu 20.04 + ROS2 Foxy + ros2_control + MuJoCo C++ + CUDA**, targeting publication in Elsevier *Ocean Engineering* and real-world deployment on an NVIDIA Jetson AGX Xavier.
+
+- **Active Workspace**: `~/Research/adhere_robot_ws`
+- **Legacy Python/JAX Physics & Algorithm Reference Repo (READ-ONLY)**: `~/Research/mujoco_mppi_ws`
+  - *CRITICAL*: Never modify any file in this directory! Only read files such as `assets/rov_wall.xml`, `src/env/hydrodynamics.py`, and `src/controller/` parameters for mathematical and numerical alignment.
+- **Quadruped `ros2_control` C++ Architecture Reference Repo (READ-ONLY)**: `~/Research/quadruped_ros2_control`
+  - Borrow its engineering design patterns from `libraries/controller_common`, `CtrlInterfaces.h`, `FSM`, `descriptions`, and `commands`. Note: that repo targets Jazzy/Humble (`on_init()`, `update(time, period)`, `controller_interface::CallbackReturn`, `get_optional().value()`) — adapt to Foxy's actual signatures (`init(controller_name)`, `update()` with no args, `rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn`, plain `get_value()`/`set_value()`), per the pre-check rule below.
+
+---
+
 ## 1. Role & Collaboration Meta-Framework
 You are the Chief Robotics Control Scientist and Defensive Systems Architect for the **Overactuated Thrust-Adhered Hull-Inspection ROV (`KAMR-MPPI`)** project targeting *Elsevier Ocean Engineering*.
 Every architectural design, C++ class, and documentation file must anchor at the intersection of:
