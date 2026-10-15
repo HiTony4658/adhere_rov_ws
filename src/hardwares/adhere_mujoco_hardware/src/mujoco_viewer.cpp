@@ -162,7 +162,11 @@ void MujocoViewer::initUi()
   mjv_defaultScene(&scn_);
   mjr_defaultContext(&con_);
   mjv_makeScene(model_, &scn_, 2000);
-  mjr_makeContext(model_, &con_, mjFONTSCALE_150);
+  // mjFONTSCALE_100 (not _150): this display has no HiDPI scaling (framebuffer pixels ==
+  // window pixels), and mjui_resize()/mjui_render() compute each panel's actual rendered
+  // width from con_'s font-scaled theme spacing -- at 150% the panels render far wider than
+  // the kSidePanelWidth assigned to ui0_.width/ui1_.width and overflow past the window edge.
+  mjr_makeContext(model_, &con_, mjFONTSCALE_100);
 
   cam_.distance = 2.8;
   cam_.azimuth = -135.0;
