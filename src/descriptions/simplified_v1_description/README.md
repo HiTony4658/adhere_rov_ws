@@ -6,10 +6,16 @@
 
 1. **ROS 2 / `ros2_control` 侧**：`urdf/simplified_v1.urdf.xacro`（经 `xacro:include`
    聚合 `xacro/robot.xacro` 几何宏与 `xacro/ros2_control.xacro` 硬件接口声明），供
-   `robot_state_publisher`、`rviz2` 与 `controller_manager` 解析。
+   `robot_state_publisher`、`rviz2` 与 `controller_manager` 解析。该 URDF 是**纯机器
+   人模型**：唯一的根连杆（root link）是 `base_link`（机体 + 4 接触垫 + 8 推力器
+   标记），不包含任何 `world`/`wall` 连杆——壁面是仿真环境的一部分，不是机器人
+   本体的一部分。
 2. **MuJoCo 物理侧**：`mjcf/rov_wall.xml`，与 Python/JAX 原型仓库
    `mujoco_mppi_ws/assets/rov_wall.xml`（只读参考）逐字节一致，由
-   `adhere_mujoco_hardware` 在运行时加载。
+   `adhere_mujoco_hardware` 在运行时加载；壁面几何只存在于这一侧。
+3. **RViz2 可视化侧**：壁面仅通过 `adhere_mujoco_node` 发布的
+   `visualization_msgs/msg/Marker`（`/rov/environment_markers`，`world` 坐标系下的
+   `CUBE`）渲染，与机器人本体 URDF 完全解耦。
 
 两侧几何参数（接触垫/推力器/壁面坐标）严格对齐，详见下表。
 
@@ -19,7 +25,7 @@
 urdf/
   └── simplified_v1.urdf.xacro     # 顶层入口：include robot.xacro + ros2_control.xacro
 xacro/
-  ├── robot.xacro                   # 机体/4接触垫/8推力器标记/壁面几何宏
+  ├── robot.xacro                   # 机体/4接触垫/8推力器标记几何宏（base_link 为唯一根连杆）
   └── ros2_control.xacro            # <ros2_control> 标签：8 command + 36 state interface
 mjcf/
   └── rov_wall.xml                  # MuJoCo 物理描述（与原型仓库数值对齐，只读复制）
@@ -35,7 +41,7 @@ launch/
 
 | 名称 | 范围 |
 |---|---|
-| `thr_N1/effort` .. `thr_N4/effort` | `[22.0, 40.0] N` |
+| `thr_N1/effort` .. `thr_N4/effort` | `[-40.0, 40.0] N` |
 | `thr_T5/effort` .. `thr_T8/effort` | `[-40.0, 40.0] N` |
 
 ### 36 个 `state_interface`
@@ -51,12 +57,15 @@ launch/
 
 - 4 个被动接触垫（球体，半径 0.035 m）：`r_i = (-0.10, ±0.25, ±0.15) m`
 - 8 个推力器安装位：`X = 0.0 m`，与接触垫共用 Y/Z 角点坐标
-- 壁面：世界坐标 `X = 0` 平面（MJCF 中渲染为 `X = -0.01` 的薄壁）
+- 壁面：世界坐标 `X = 0` 平面（MJCF 中渲染为 `X = -0.01` 的薄壁；不在 URDF 中，
+  仅存在于 `mjcf/rov_wall.xml` 与 RViz2 的 `/rov/environment_markers` Marker 中）
 - 机体：质量 20.0 kg（MJCF 中为含附加质量的 26.0 kg），对角惯量 `[1.35, 0.55, 1.10] kg·m²`
 
 模型没有任何可动的 URDF 关节——唯一的真实自由度（浮动基座）由
 `AdhereMujocoHardware` 的 MuJoCo `freejoint` 驱动，而非 URDF 关节；因此本包的
-RViz 检视视图无需 `joint_state_publisher`（更不需要其 GUI 变体）。
+RViz 检视视图无需 `joint_state_publisher`（更不需要其 GUI 变体）。`base_link` 是
+整个 URDF 树的唯一根连杆（无 `world` 连杆），`check_urdf` 校验根连杆即为
+`base_link`。
 
 ## 运行
 
@@ -66,6 +75,7 @@ source install/setup.bash
 ros2 launch simplified_v1_description visualize.launch.py
 ```
 
-该命令仅做静态几何检视（`robot_state_publisher` + `rviz2`），不包含任何物理仿真；
-若需查看带 Fossen 水动力学与阵风扰动的被动随波漂流效果，请使用
+该命令仅做静态几何检视（`robot_state_publisher` + `rviz2`，Fixed Frame 设为
+`base_link`），不包含任何物理仿真，也不渲染壁面（壁面不属于机器人 URDF）；若需
+查看带 Fossen 水动力学、壁面与可运行时切换的造浪扰动的被动随波漂流效果，请使用
 `adhere_mujoco_hardware` 包的 `mujoco_sim.launch.py`。

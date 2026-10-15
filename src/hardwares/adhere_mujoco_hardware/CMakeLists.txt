@@ -22,6 +22,7 @@ find_package(nav_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
 
 # ---------------------------------------------------------------------------------------
@@ -102,6 +103,13 @@ ament_target_dependencies(adhere_mujoco_node
   sensor_msgs
   visualization_msgs
   geometry_msgs
+  std_msgs
+)
+
+add_executable(wave_console_node src/wave_console_node.cpp)
+ament_target_dependencies(wave_console_node
+  rclcpp
+  std_msgs
 )
 
 install(TARGETS ${PROJECT_NAME}
@@ -109,7 +117,7 @@ install(TARGETS ${PROJECT_NAME}
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
 )
-install(TARGETS adhere_mujoco_node
+install(TARGETS adhere_mujoco_node wave_console_node
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 

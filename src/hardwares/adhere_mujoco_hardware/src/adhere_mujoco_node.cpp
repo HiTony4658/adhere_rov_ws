@@ -15,10 +15,12 @@
 #include "controller_manager/controller_manager.hpp"
 #include "hardware_interface/resource_manager.hpp"
 
+#include "adhere_mujoco_hardware/adhere_mujoco_hardware.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
+#include "std_msgs/msg/int32.hpp"
 #include "tf2_ros/transform_broadcaster.h"
 #include "visualization_msgs/msg/marker_array.hpp"
 
@@ -82,6 +84,18 @@ int main(int argc, char ** argv)
   auto joint_state_pub = node->create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
   auto marker_pub = node->create_publisher<visualization_msgs::msg::MarkerArray>(
     "/rov/environment_markers", 10);
+
+  // Runtime wave-maker switch (CLAUDE.md Phase 2.5 Stage 2.3): wave_console_node publishes
+  // 1 (calm) / 2 (gust) here; forwarded straight to the one live AdhereMujocoHardware instance
+  // via its single-instance back-pointer (see adhere_mujoco_hardware.cpp).
+  auto wave_mode_sub = node->create_subscription<std_msgs::msg::Int32>(
+    "/rov/wave_mode_cmd", 10,
+    [](const std_msgs::msg::Int32::SharedPtr msg) {
+      auto * hw = adhere_mujoco_hardware::AdhereMujocoHardware::activeInstance();
+      if (hw) {
+        hw->setWaveMode(msg->data);
+      }
+    });
 
   auto publish_timer = node->create_wall_timer(
     std::chrono::duration<double>(1.0 / kPublishRateHz),

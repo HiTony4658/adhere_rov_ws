@@ -2,6 +2,7 @@
 #define ADHERE_MUJOCO_HARDWARE__ADHERE_MUJOCO_HARDWARE_HPP_
 
 #include <array>
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -59,6 +60,20 @@ public:
   const mjModel * model() const { return model_; }
   std::shared_ptr<MujocoVisBridge> visBridge() const { return vis_bridge_; }
 
+  // Runtime wave-maker switch (CLAUDE.md Phase 2.5 Stage 2.3/3.2): thread-safe, callable from
+  // any thread (e.g. adhere_mujoco_node's /rov/wave_mode_cmd subscriber callback, which runs
+  // on the executor thread, not the 500Hz physics thread). mode must be 1 (CalmWater) or 2
+  // (StationKeepingGust); anything else is ignored. Selecting mode 2 always re-latches
+  // t_trigger to the current sim time, so repeated "2" presses restart the gust clock.
+  void setWaveMode(int mode);
+  int waveMode() const { return wave_mode_.load(); }
+
+  // Single-instance back-pointer accessor (see the mjcb_passive rationale in
+  // adhere_mujoco_hardware.cpp): lets adhere_mujoco_node's wave-mode subscriber reach the one
+  // live AdhereMujocoHardware instance without threading a pointer through pluginlib/
+  // ResourceManager.
+  static AdhereMujocoHardware * activeInstance();
+
 private:
   // Installed as the body of the global mjcb_passive hook (see adhere_mujoco_hardware.cpp);
   // computes and injects the Fossen hydrodynamic wrench at exactly the point in mj_step
@@ -80,7 +95,15 @@ private:
   std::array<double, kNumStates> hw_states_{};
   std::array<double, kNumThrusters> hw_commands_{};
 
-  std::unique_ptr<FlowEnvironmentPlugin> flow_env_;
+  // Both wave-environment plugins are always constructed; the runtime switch below (instead
+  // of a single `flow_env_` selected once at configure()) is what makes "1"/"2" console input
+  // take effect without restarting the node.
+  std::unique_ptr<FlowEnvironmentPlugin> calm_plugin_;
+  std::unique_ptr<FlowEnvironmentPlugin> gust_plugin_;
+  std::atomic<int> wave_mode_{1};              // 1 = CalmWater (default), 2 = StationKeepingGust
+  std::atomic<double> wave_trigger_time_{0.0};  // sim time t_trigger latched when mode 2 is selected
+  std::atomic<double> sim_time_atomic_{0.0};    // lock-free mirror of sim_time_ for setWaveMode()
+
   std::shared_ptr<MujocoVisBridge> vis_bridge_;
   std::unique_ptr<MujocoViewer> viewer_;
 

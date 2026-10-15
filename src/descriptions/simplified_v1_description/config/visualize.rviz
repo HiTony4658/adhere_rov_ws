@@ -25,7 +25,7 @@ Visualization Manager:
         Value: /robot_description
       TF Prefix: ""
   Global Options:
-    Fixed Frame: world
+    Fixed Frame: base_link
     Background Color: 20; 22; 26
   Tools:
     - Class: rviz_default_plugins/MoveCamera

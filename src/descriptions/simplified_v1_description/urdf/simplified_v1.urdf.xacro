@@ -1,7 +1,6 @@
 <?xml version="1.0"?>
 <robot name="simplified_v1" xmlns:xacro="http://www.ros.org/wiki/xacro">
 
-  <xacro:arg name="wave_profile" default="calm"/>
   <xacro:arg name="headless" default="false"/>
 
   <xacro:include filename="$(find simplified_v1_description)/xacro/robot.xacro"/>

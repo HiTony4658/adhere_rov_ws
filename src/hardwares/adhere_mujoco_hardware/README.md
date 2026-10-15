@@ -7,8 +7,11 @@
 `hardware_interface::SystemInterface` 插件，由 `controller_manager` 以严格
 **`500Hz`**（`update_rate: 500`，`dt = 2.0 ms`）周期驱动。本阶段（Phase 2）尚未
 接入任何上层控制器，`hw_commands_[8]` 恒为零，用于验证"零控制输入下的被动随波
-漂流"（calm 水域下的浮力/阻力漂移，以及 station-keeping 阵风工况下的侧向/吸附
-漂移）。
+漂流"（calm 水域下的浮力/阻力漂移，以及造浪工况下的侧向/吸附漂移）。
+
+环境水流不再是启动时静态绑定的，而是**运行时可热切换**的：节点启动时恒定从
+静水（Calm Water）开始，用户可随时通过交互式终端控制台 `wave_console_node`
+开启/关闭造浪（详见"运行时造浪机切换"一节）。
 
 ## 文件结构
 
@@ -25,7 +28,8 @@ src/
 ├── fossen_hydrodynamics.cpp
 ├── flow_environment_plugin.cpp
 ├── mujoco_viewer.cpp
-└── adhere_mujoco_node.cpp          # 500Hz ControllerManager 循环 + 100Hz TF/Odom/Marker 发布
+├── adhere_mujoco_node.cpp          # 500Hz ControllerManager 循环 + 100Hz TF/Odom/Marker 发布
+└── wave_console_node.cpp           # 交互式造浪机终端控制台（发布 /rov/wave_mode_cmd）
 
 config/
 ├── hydro_wave_params.yaml          # controller_manager 运行参数 + 两套水动力预设数值参考
@@ -56,8 +60,8 @@ hardware_interface::return_type write() override;  // 无参数！Foxy 特有
 
 - **`configure(info)`**：通过 `ament_index_cpp::get_package_share_directory("simplified_v1_description")`
   解析 `mjcf/rov_wall.xml` 的绝对路径（不硬编码路径），`mj_loadXML` + `mj_makeData`；
-  从 `info.hardware_parameters["wave_profile"]` 读取环境插件名并由
-  `createFlowEnvironment()` 构造对应的 `FlowEnvironmentPlugin`。
+  同时构造好 `CalmWaterPlugin` 与 `StationKeepingGustPlugin` 两个插件实例，运行时
+  模式恒定初始化为 `1`（静水），不再由任何启动参数决定。
 - **`read()`**：从 `mjData` 提取 8 个推力器回读值、10 维 IMU（姿态四元数 + 机体系
   角速度 + 有限差分线加速度近似）、10 维位姿/机体速度、8 维接触垫数据（4 个
   `touch_pad_*` 传感器法向力 + 按 `CLAUDE.md` §4.2 公式
@@ -78,15 +82,53 @@ hardware_interface::return_type write() override;  // 无参数！Foxy 特有
 
 `flow_environment_plugin.hpp/.cpp` 提供策略模式的可插拔水流环境：
 
-| 插件 | `wave_profile` 取值 | 行为 |
+| 插件 | 运行时模式 | 行为 |
 |---|---|---|
-| `CalmWaterPlugin`（默认） | `calm` | 环境流速恒为零，仅受浮力/阻力/Venturi 吸附影响 |
-| `StationKeepingGustPlugin` | `station_keeping_gust` | 定常 `0.3 m/s` 世界系 `+Y` 侧向流 + 两段半正弦阵风（`t∈[3.0,4.2]s` 与 `t∈[7.0,8.2]s`，侧向峰值 `0.9 m/s`，法向吸附峰值 `0.2 m/s`） |
+| `CalmWaterPlugin`（默认/启动即激活） | `1` | 环境流速恒为零，仅受浮力/阻力/Venturi 吸附影响 |
+| `StationKeepingGustPlugin` | `2` | 定常 `0.3 m/s` 世界系 `+Y` 侧向流 + 两段半正弦阵风（相对造浪时钟 `τ∈[3.0,4.2]s` 与 `[7.0,8.2]s`，侧向峰值 `0.9 m/s`，法向吸附峰值 `0.2 m/s`） |
 
-两个插件的数值常量与 Python 参考逐位一致，由 `createFlowEnvironment()` 工厂函数按
-`wave_profile` 硬件参数选取。`config/hydro_wave_params.yaml` 同时承载两重内容：
-`controller_manager` 实际加载的运行参数（`update_rate: 500`），以及两套预设数值
-的人工参考记录（非运行时解析，避免引入额外 YAML 解析依赖）。
+两个插件的数值常量与 Python 参考逐位一致。`config/hydro_wave_params.yaml` 同时承载
+两重内容：`controller_manager` 实际加载的运行参数（`update_rate: 500`），以及两套
+预设数值的人工参考记录（非运行时解析，避免引入额外 YAML 解析依赖）。
+
+### 运行时造浪机切换（Runtime Wave-Maker Switching）
+
+`AdhereMujocoHardware` 不再在启动时静态绑定水流环境——节点启动时恒定从**静水
+（模式 `1`）**开始，`wave_mode_`（`std::atomic<int>`）与 `wave_trigger_time_`
+（`std::atomic<double>`）允许从任意线程安全地热切换：
+
+- **相对造浪时钟**：切换到模式 `2` 时，立即将 `t_trigger` 锁存为当前仿真时间
+  `d->time`；之后水动力评估改用相对时间 `τ = t_sim - t_trigger >= 0` 查询
+  `StationKeepingGustPlugin`，而不是原始仿真时间——这样无论用户在第几秒按下
+  `2`，两段阵风都会从造浪开始的那一刻重新播放，不会被仿真已运行的时长"吃掉"。
+- **切回模式 `1`** 时立即恢复零环境流速（`v_flow = 0`），不经过任何过渡。
+- 通过话题 `/rov/wave_mode_cmd`（`std_msgs/msg/Int32`，`1` 或 `2`）下发指令，
+  由 `adhere_mujoco_node` 转发给当前唯一存活的 `AdhereMujocoHardware` 实例
+  （`AdhereMujocoHardware::activeInstance()`，与 `mjcb_passive` 单例回调复用
+  同一条"单进程单实例"架构假设）。
+
+### 交互式终端控制台 `wave_console_node`
+
+```text
+========================================================
+  Underwater ROV Wave Environment Console (造浪机控制台)
+========================================================
+  [1] Calm Water Environment (静水环境 - 默认/停止造浪)
+  [2] Wave Gust Scenario     (开启造浪: 0.3m/s横流 + 双阵风冲击)
+  [q] Quit Console           (退出控制台)
+--------------------------------------------------------
+Current Mode: [1] Calm Water | Enter selection (1/2/q):
+```
+
+`mujoco_sim.launch.py` 默认会自动检测 `gnome-terminal`/`xterm` 并在独立终端窗口
+中启动该控制台（`spawn_wave_console:=false` 可关闭自动弹窗）；也可以在任意终端
+手动运行：
+
+```bash
+ros2 run adhere_mujoco_hardware wave_console_node
+```
+
+输入 `1` 切回静水、`2` 开启造浪、`q` 退出控制台（不影响仿真本身继续运行）。
 
 ## `MujocoVisBridge` 与 `MujocoViewer`：500Hz↔60Hz 双向解耦
 
@@ -121,11 +163,12 @@ OpenGL 渲染循环，拥有自己的 `mjData* d_vis_`（与主 `mjData*` 完全
 阵风预设）与本包的 `FossenHydrodynamics::compute()`，输出的六维力/力矩在全部
 打印精度（10 位小数）下逐位一致，满足 `CLAUDE.md` 要求的 `<1e-5` 数值一致性。
 
-在 `wave_profile:=calm` 下以 `u=0` 运行：ROV 因初始姿态与壁面重叠而被接触反力
+在默认静水模式（`1`）下以 `u=0` 运行：ROV 因初始姿态与壁面重叠而被接触反力
 推离壁面，随后因净正浮力（约 `+1.96 N`）缓慢上浮至自由液面（`z_surface=1.0`）
-附近并稳定，`Y` 方向无漂移。在 `wave_profile:=station_keeping_gust` 下，`Y`
-方向机体速度在约 `8~12s` 内收敛至定常流速 `0.300 m/s`（`X`/`Z` 方向速度趋近于
-零），阵风窗口内可观察到额外的侧向/吸附扰动，均与预期物理行为一致。
+附近并稳定，`Y` 方向无漂移。切换到造浪模式（`2`）后，`Y` 方向机体速度随定常
+流速 `0.300 m/s`（`X`/`Z` 方向速度趋近于零）持续收敛，相对造浪时钟 `τ∈[3.0,4.2]s`
+与 `[7.0,8.2]s` 的阵风窗口内可观察到额外的侧向/吸附扰动，均与预期物理行为一致；
+再次切回模式 `1` 后环境流速立即归零。
 
 ## 运行
 
@@ -133,10 +176,17 @@ OpenGL 渲染循环，拥有自己的 `mjData* d_vis_`（与主 `mjData*` 完全
 colcon build --packages-up-to adhere_mujoco_hardware --symlink-install
 source install/setup.bash
 
-# 静水被动漂流（默认），带 MuJoCo 窗口 + RViz2
+# 默认：静水启动，带 MuJoCo 窗口 + RViz2，并自动弹出造浪机控制台终端
 ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py
 
-# 站位保持阵风工况，无头模式（无 GLFW 窗口），不启动 RViz2
+# 无头模式（无 GLFW 窗口），不启动 RViz2，不自动弹出控制台终端
 ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py \
-  wave_profile:=station_keeping_gust headless:=true use_rviz:=false
+  headless:=true use_rviz:=false spawn_wave_console:=false
+
+# 在任意终端手动启动造浪机控制台（若自动弹窗被关闭，或想在已运行的仿真上手动控制）
+ros2 run adhere_mujoco_hardware wave_console_node
+
+# 不使用控制台，直接发送一次性造浪切换指令
+ros2 topic pub /rov/wave_mode_cmd std_msgs/msg/Int32 "{data: 2}" --once   # 开启造浪
+ros2 topic pub /rov/wave_mode_cmd std_msgs/msg/Int32 "{data: 1}" --once   # 切回静水
 ```

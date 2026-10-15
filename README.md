@@ -39,7 +39,7 @@
   `r_i = (-0.10, ±a, ±b) m`，其中 `a = 0.15 m`（Y 方向半宽），`b = 0.25 m`（Z 方向半高）。
 - **8 个推力器**：
   - `thr_N1..N4`（法向推力器，索引 `0:4`）：与 4 个接触垫共位，产生 `-X` 压紧力与
-    `T_y, T_z` 力矩，限幅 `[22.0, 40.0] N`；
+    `T_y, T_z` 力矩，限幅 `[-40.0, 40.0] N`；
   - `thr_T5..T8`（切向推力器，索引 `4:8`）：产生 `F_y, F_z, T_x`，限幅 `[-40.0, 40.0] N`，
     安装于 `X = -0.10 m` 偏置处，因此会耦合产生寄生倾覆力矩 `T_y, T_z`。
 - **菱形核判据**：压力中心 `p_z = T_y / F_press`、`p_y = -T_z / F_press` 须满足
@@ -180,8 +180,8 @@ source install/setup.bash
 ros2 launch simplified_v1_description visualize.launch.py
 
 # 3b. 零控制输入（u=0）被动随波漂流仿真，MuJoCo 窗口 + RViz2 双可视化同步
+# 默认静水启动，并自动弹出造浪机控制台终端（输入 1/2 可在运行时随时切换静水/造浪）
 ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py
-ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py wave_profile:=station_keeping_gust
 ```
 
 各命令的完整参数说明见 [`src/descriptions/simplified_v1_description/README.md`](src/descriptions/simplified_v1_description/README.md)

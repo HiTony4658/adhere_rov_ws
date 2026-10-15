@@ -8,9 +8,10 @@ controller_manager:
     update_rate: 500  # Hz, matches AdhereMujocoHardware's 500Hz physics tick (dt=2.0ms)
 
 # ---------------------------------------------------------------------------------------
-# Reference only, not parsed at runtime. Select the active profile via the `wave_profile`
-# hardware param (xacro/ros2_control.xacro) or the `wave_profile` launch argument of
-# mujoco_sim.launch.py.
+# Reference only, not parsed at runtime. The active profile is selected at runtime (not at
+# launch) via the /rov/wave_mode_cmd topic (1=calm, 2=station_keeping_gust), e.g. through the
+# interactive wave_console_node terminal console. AdhereMujocoHardware always starts in
+# "calm" mode regardless of this file.
 # ---------------------------------------------------------------------------------------
 wave_profiles:
   calm:

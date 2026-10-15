@@ -83,7 +83,7 @@ Modeled after `ros-controls/mujoco_ros2_control` and `quadruped_ros2_control`, t
    - Corner separation velocity kinematics: `v_sep,i = v_x,b + omega_y * z_i - omega_z * y_i`.
 3. **8-Thruster Configuration & Wrench Allocation Matrix `B` (6x8)**:
    - `NU = 8` thrusters, rail limit `+/-40.0 N` (saturation threshold `|u_i| >= 39.0 N`).
-   - `thr_N1..4` (indices `0:4`): 4 corner normal thrusters co-located with the 4 pads, generating `-X` pressing force and moments `T_y, T_z`. Bounds: `u_{0:4} in [22.0, 40.0] N`.
+   - `thr_N1..4` (indices `0:4`): 4 corner normal thrusters co-located with the 4 pads, generating `-X` pressing force and moments `T_y, T_z`. Bounds: `u_{0:4} in [-40.0, 40.0] N`.
    - `thr_T5..8` (indices `4:8`): 4 tangential thrusters generating `F_y, F_z, T_x`. Bounds: `u_{4:8} in [-40.0, 40.0] N`. **Critical Coupling**: Mounted at `X = -0.10 m` offset from CoM, so tangential forces `F_y, F_z` induce parasitic overturning moments `T_z, T_y`.
    - `rank(B) = 6`, `dim ker(B) = 2`. Quasi-static compliant contact map: `A_contact = -G_pinv * B_{[F_x, T_y, T_z]}` (4x8).
 4. **Rhombic Kern Admissibility**:

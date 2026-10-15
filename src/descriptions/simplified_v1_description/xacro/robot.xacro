@@ -3,10 +3,12 @@
 
   <!--
     Geometry mirrors mjcf/rov_wall.xml (and the read-only mujoco_mppi_ws reference) exactly:
-    wall at world X=0, rov_base chassis box 0.2x0.6x0.4 m, 4 spherical contact pads at
-    (-0.10, +/-0.25, +/-0.15) m, 8 thruster mount sites at X=0.0 with the same corner layout.
-    All non-base links are rigidly fixed; the only real DOF is the world->base_link floating
-    base, which is driven by AdhereMujocoHardware's free joint, not by any URDF joint.
+    rov_base chassis box 0.2x0.6x0.4 m, 4 spherical contact pads at (-0.10, +/-0.25, +/-0.15) m,
+    8 thruster mount sites at X=0.0 with the same corner layout. `base_link` is the sole root
+    link of this tree (no world/wall links here: the wall is MuJoCo-only geometry in
+    mjcf/rov_wall.xml and is rendered in RViz2 purely via the /rov/environment_markers topic).
+    All non-base links are rigidly fixed; the only real DOF is the floating base, which is
+    driven by AdhereMujocoHardware's free joint, not by any URDF joint.
   -->
 
   <material name="chassis_orange">
@@ -18,17 +20,6 @@
   <material name="thruster_grey">
     <color rgba="0.6 0.6 0.6 1.0"/>
   </material>
-  <material name="wall_grey">
-    <color rgba="0.25 0.25 0.3 1.0"/>
-  </material>
-
-  <link name="world"/>
-
-  <joint name="world_to_base" type="fixed">
-    <parent link="world"/>
-    <child link="base_link"/>
-    <origin xyz="0.125 0 0.5" rpy="0 0 0"/>
-  </joint>
 
   <link name="base_link">
     <visual>
@@ -97,21 +88,5 @@
   <xacro:thruster_marker name="thr_T6" x="0.0" y="-0.25" z="0.15"/>
   <xacro:thruster_marker name="thr_T7" x="0.0" y="0.25" z="-0.15"/>
   <xacro:thruster_marker name="thr_T8" x="0.0" y="-0.25" z="-0.15"/>
-
-  <!-- Static wall plane, world X=0, outward normal +X, matching the MJCF's wall body at X=-0.01 -->
-  <link name="wall">
-    <visual>
-      <origin xyz="-0.01 0 0" rpy="0 0 0"/>
-      <geometry>
-        <box size="0.02 4.0 4.0"/>
-      </geometry>
-      <material name="wall_grey"/>
-    </visual>
-  </link>
-  <joint name="world_to_wall" type="fixed">
-    <parent link="world"/>
-    <child link="wall"/>
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-  </joint>
 
 </robot>

@@ -1,5 +1,6 @@
 #include "adhere_mujoco_hardware/adhere_mujoco_hardware.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <mutex>
 #include <utility>
@@ -32,14 +33,6 @@ bool parseBoolParam(
   }
   return it->second == "true" || it->second == "1";
 }
-
-std::string paramOrDefault(
-  const std::unordered_map<std::string, std::string> & params, const std::string & key,
-  const std::string & default_value)
-{
-  const auto it = params.find(key);
-  return it == params.end() ? default_value : it->second;
-}
 }  // namespace
 
 AdhereMujocoHardware::~AdhereMujocoHardware()
@@ -62,7 +55,6 @@ hardware_interface::return_type AdhereMujocoHardware::configure(
     return hardware_interface::return_type::ERROR;
   }
 
-  const std::string wave_profile = paramOrDefault(info_.hardware_parameters, "wave_profile", "calm");
   const bool headless = parseBoolParam(info_.hardware_parameters, "headless", false);
 
   const std::string pkg_share =
@@ -101,9 +93,14 @@ hardware_interface::return_type AdhereMujocoHardware::configure(
     actuator_id_[i] = act_id;
   }
 
-  flow_env_ = createFlowEnvironment(wave_profile);
+  // Always starts in Calm Water (CLAUDE.md Phase 2.5 Stage 2.3): both plugins are constructed
+  // up front and selected at runtime via setWaveMode(), never by a static launch-time param.
+  calm_plugin_ = std::make_unique<CalmWaterPlugin>();
+  gust_plugin_ = std::make_unique<StationKeepingGustPlugin>();
+  wave_mode_.store(1);
+  wave_trigger_time_.store(0.0);
   RCLCPP_INFO(
-    logger(), "AdhereMujocoHardware: wave_profile='%s', headless=%s", flow_env_->profileName().c_str(),
+    logger(), "AdhereMujocoHardware: starting in Calm Water mode, headless=%s",
     headless ? "true" : "false");
 
   vis_bridge_ = std::make_shared<MujocoVisBridge>(model_->nq, model_->nv);
@@ -179,8 +176,11 @@ hardware_interface::return_type AdhereMujocoHardware::start()
   };
 
   sim_time_ = 0.0;
+  sim_time_atomic_.store(0.0);
   step_count_ = 0;
   have_prev_vel_ = false;
+  wave_mode_.store(1);
+  wave_trigger_time_.store(0.0);
 
   viewer_->start();
   status_ = hardware_interface::status::STARTED;
@@ -204,6 +204,27 @@ hardware_interface::return_type AdhereMujocoHardware::stop()
   return hardware_interface::return_type::OK;
 }
 
+void AdhereMujocoHardware::setWaveMode(int mode)
+{
+  if (mode != 1 && mode != 2) {
+    RCLCPP_WARN(logger(), "Ignoring invalid wave mode %d (expected 1=calm or 2=gust)", mode);
+    return;
+  }
+  const int previous = wave_mode_.exchange(mode);
+  if (mode == 2) {
+    // Whenever mode 2 is (re-)selected, latch t_trigger to the current sim time so the gust
+    // profile always replays from its own tau=0, no matter when the user pressed "2".
+    wave_trigger_time_.store(sim_time_atomic_.load());
+  }
+  if (previous != mode) {
+    RCLCPP_INFO(
+      logger(), "Wave mode switched: %s -> %s", previous == 2 ? "gust" : "calm",
+      mode == 2 ? "gust" : "calm");
+  }
+}
+
+AdhereMujocoHardware * AdhereMujocoHardware::activeInstance() { return g_active_instance; }
+
 void AdhereMujocoHardware::applyHydrodynamics(const mjModel * m, mjData * d)
 {
   RigidBodyState state;
@@ -217,7 +238,15 @@ void AdhereMujocoHardware::applyHydrodynamics(const mjModel * m, mjData * d)
   state.lin_vel_world = Eigen::Vector3d(
     d->cvel[6 * body_id_ + 3], d->cvel[6 * body_id_ + 4], d->cvel[6 * body_id_ + 5]);
 
-  const Wrench wrench = FossenHydrodynamics::compute(state, d->time, flow_env_->getHydroParams());
+  // Relative wave clock (CLAUDE.md Phase 2.5 Stage 2.3/3.2): mode 2 evaluates the gust
+  // profile at tau = t_sim - t_trigger (>= 0) instead of raw sim time, so switching into the
+  // gust scenario at an arbitrary sim time always replays the gusts from their own t=0.
+  const bool gust_active = wave_mode_.load() == 2;
+  const HydroParams & params =
+    gust_active ? gust_plugin_->getHydroParams() : calm_plugin_->getHydroParams();
+  const double t_eval = gust_active ? std::max(0.0, d->time - wave_trigger_time_.load()) : d->time;
+
+  const Wrench wrench = FossenHydrodynamics::compute(state, t_eval, params);
 
   const mjtNum force[3] = {wrench.force_world.x(), wrench.force_world.y(), wrench.force_world.z()};
   const mjtNum torque[3] = {
@@ -314,6 +343,7 @@ hardware_interface::return_type AdhereMujocoHardware::write()
 
   mj_step(model_, data_);
   sim_time_ = data_->time;
+  sim_time_atomic_.store(sim_time_);
   ++step_count_;
 
   // Every 8 steps (~60Hz at dt=2ms), snapshot state into the vis bridge via try_lock() so a
@@ -329,7 +359,12 @@ hardware_interface::return_type AdhereMujocoHardware::write()
       for (size_t i = 0; i < kPadNames.size(); ++i) {
         vis_bridge_->pad_force[i] = data_->sensordata[pad_touch_sensor_adr_[i]];
       }
-      const Eigen::Vector3d flow = flow_env_->ambientVelocityWorld(sim_time_);
+      const bool gust_active = wave_mode_.load() == 2;
+      const double t_eval =
+        gust_active ? std::max(0.0, sim_time_ - wave_trigger_time_.load()) : sim_time_;
+      const FlowEnvironmentPlugin & active_plugin =
+        gust_active ? *gust_plugin_ : *calm_plugin_;
+      const Eigen::Vector3d flow = active_plugin.ambientVelocityWorld(t_eval);
       vis_bridge_->flow_vel_world = {flow.x(), flow.y(), flow.z()};
       vis_bridge_->valid = true;
     }

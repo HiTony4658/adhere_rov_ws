@@ -124,3 +124,72 @@
   前将 `/usr/bin` 置于 `PATH` 前部（或 `conda deactivate`）方可正常构建。
 - `ros-foxy-joint-state-publisher-gui`/`joint_state_publisher` 均未安装；因模型
   无可动 URDF 关节，`visualize.launch.py` 不依赖它们。
+
+---
+
+## Phase 2.5（2026-10-15）：URDF 壁面解耦、`.gitkeep` 清理、运行时造浪机切换
+
+### 目标
+
+修正 Phase 2 遗留的三个工程/易用性问题：机器人 URDF 污染了环境几何（壁面）、
+已有实际文件的目录仍残留 `.gitkeep`、水流环境只能在启动时静态绑定。
+
+### 包 1：`src/descriptions/simplified_v1_description`
+
+- `xacro/robot.xacro`：删除 `<link name="world"/>`、`<joint name="world_to_base">`、
+  `<link name="wall">`、`<joint name="world_to_wall">`。`base_link` 成为整个 URDF
+  树的唯一根连杆（`check_urdf` 校验：`root Link: base_link has 12 child(ren)`）。
+  壁面几何只保留在 `mjcf/rov_wall.xml`（MuJoCo 物理）与 `adhere_mujoco_node` 发布的
+  `/rov/environment_markers`（RViz2 可视化）两处。
+- `urdf/simplified_v1.urdf.xacro`、`xacro/ros2_control.xacro`：删除不再需要的
+  `wave_profile` xacro 参数/硬件 param（环境切换改为运行时话题，见下）。
+- `config/visualize.rviz`：`Fixed Frame` 由 `world` 改为 `base_link`（URDF 不再有
+  `world` 连杆）。
+
+### 包 2：`src/hardwares/adhere_mujoco_hardware`
+
+- `AdhereMujocoHardware`：`configure()` 不再按 `wave_profile` 硬件参数在启动时
+  选择环境插件，而是始终同时构造 `CalmWaterPlugin`/`StationKeepingGustPlugin`
+  两个实例，并在 `start()`/`configure()` 中把运行时模式恒定初始化为 `1`
+  （静水）。新增 `std::atomic<int> wave_mode_`、`std::atomic<double>
+  wave_trigger_time_`、`std::atomic<double> sim_time_atomic_` 三个原子状态，
+  以及线程安全的 `setWaveMode(int)` / `waveMode()` / 静态 `activeInstance()`
+  （复用既有的 `mjcb_passive` 单实例回调指针模式）。
+- 相对造浪时钟：`applyHydrodynamics()`/`write()` 在模式为 `2` 时，一律用
+  `τ = max(0, d->time - wave_trigger_time_)` 而非原始仿真时间查询
+  `StationKeepingGustPlugin`，确保在仿真运行到任意时刻切换造浪都能从阵风
+  `τ=0` 重新播放；`setWaveMode(2)` 每次调用都会重新锁存 `t_trigger`。
+- 新增 `wave_console_node.cpp`：交互式终端控制台，发布 `/rov/wave_mode_cmd`
+  （`std_msgs/msg/Int32`，`1`=静水/`2`=造浪），本地维护当前模式用于显示提示符，
+  `q` 退出。
+- `adhere_mujoco_node.cpp`：新增 `/rov/wave_mode_cmd` 订阅者，通过
+  `AdhereMujocoHardware::activeInstance()` 转发给当前存活的硬件实例。
+- `CMakeLists.txt`/`package.xml`：新增 `std_msgs` 依赖、`wave_console_node`
+  可执行目标。
+- `launch/mujoco_sim.launch.py`：删除 `wave_profile` 启动参数；新增
+  `spawn_wave_console`（默认 `true`）参数，自动检测 `gnome-terminal`/`xterm`
+  并在独立终端窗口中启动 `wave_console_node`（均不可用时静默跳过，用户可手动
+  `ros2 run adhere_mujoco_hardware wave_console_node`）。
+
+### 仓库清理
+
+- 删除 6 个已有真实文件、残留 `.gitkeep` 占位符的目录下的 `.gitkeep`
+  （`simplified_v1_description/{urdf,config,xacro,launch}`、
+  `adhere_mujoco_hardware/{src,include/adhere_mujoco_hardware}`）；其余仍为空的
+  骨架目录（`adhere_controller_common`/`adhere_kamr_controller`/
+  `adhere_keyboard_input`/`adhere_control_msgs` 的子目录）保留 `.gitkeep`。
+
+### 闭环验证结果（`headless:=true use_rviz:=false spawn_wave_console:=false`）
+
+- `xacro src/descriptions/simplified_v1_description/urdf/simplified_v1.urdf.xacro | check_urdf`：
+  `root Link: base_link has 12 child(ren)`（单根连杆契约通过）。
+- `colcon build --symlink-install`（全工作空间 6/6 包）与
+  `colcon build --packages-up-to simplified_v1_description adhere_mujoco_hardware`
+  均零警告通过。
+- 启动日志确认默认模式：`AdhereMujocoHardware: starting in Calm Water mode`。
+- 向 `/rov/wave_mode_cmd` 发布 `{data: 2}` 后，日志立即打印
+  `Wave mode switched: calm -> gust`；`/rov/odom` 的 `twist.twist.linear.y`
+  从切换前的 `~0`（静水下仅 Z 方向净浮力漂移）在触发后数秒内明显抬升至
+  `0.4~0.5 m/s` 量级（随后随阵风窗口波动），确认相对造浪时钟从切换时刻`τ=0`
+  正确重放两段阵风，而非被已运行的仿真时长"吃掉"触发窗口。再次发布
+  `{data: 1}` 后日志打印 `Wave mode switched: gust -> calm`，环境流速立即归零。
