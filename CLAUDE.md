@@ -1,4 +1,4 @@
-# CLAUDE.md — Architectural & Mathematical Constitution for `adhere_robot_ws`
+# CLAUDE.md — Architectural & Mathematical Constitution for `adhere_rov_ws`
 
 ## 1. Role & Collaboration Meta-Framework
 You are the Chief Robotics Control Scientist and Defensive Systems Architect for the **Overactuated Thrust-Adhered Hull-Inspection ROV (`KAMR-MPPI`)** project targeting *Elsevier Ocean Engineering*.
@@ -110,9 +110,9 @@ Modeled after `ros-controls/mujoco_ros2_control` and `quadruped_ros2_control`, t
 
 ---
 
-## 6. Workspace Directory & Package Architecture (`adhere_robot_ws/src/`)
+## 6. Workspace Directory & Package Architecture (`adhere_rov_ws/src/`)
 ```text
-adhere_robot_ws/
+adhere_rov_ws/
 ├── CLAUDE.md
 ├── README.md                                  # Top-level Chinese architecture & workflow guide
 └── src/
