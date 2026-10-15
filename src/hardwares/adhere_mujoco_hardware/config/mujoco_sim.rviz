@@ -24,9 +24,11 @@ Visualization Manager:
       Enabled: true
       Topic:
         Value: /rov/odom
-      Keep: 500
+      Keep: 1
       Shape:
         Value: Axes
+        Axes Length: 0.12
+        Axes Radius: 0.015
     - Class: rviz_default_plugins/MarkerArray
       Name: EnvironmentMarkers
       Enabled: true
