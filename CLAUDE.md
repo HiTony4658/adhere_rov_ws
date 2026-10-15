@@ -118,21 +118,27 @@ adhere_rov_ws/
 └── src/
     ├── interfaces/
     │   ├── adhere_control_msgs/               # FSM commands, target pose/trajectory, KAMR-MPPI telemetry & 500Hz metrics msgs
+    │   │   └── README.md
     │   └── README.md
     ├── descriptions/
-    │   ├── adhere_rov_description/            # URDF/Xacro (ros2_control tags), MuJoCo MJCF (rov_wall.xml), meshes, rviz & control yaml
+    │   ├── simplified_v1_description/            # URDF/Xacro (ros2_control tags), MuJoCo MJCF (rov_wall.xml), meshes, rviz & control yaml
+    │   │   └── README.md
     │   └── README.md
-    ├── libraries/
-    │   ├── adhere_controller_common/          # CtrlInterfaces, FSMState base class, common states (Passive, PreloadAttach, EmergencyDetach), mathTypes/mathTools, Fossen hydrodynamics
+    ├── libraries/                             # 3-rd Party Libraries
     │   └── README.md
     ├── hardwares/
     │   ├── adhere_mujoco_hardware/            # AdhereMujocoHardware (500Hz SystemInterface: read cmd -> Fossen hydro -> mj_step -> update state) + MujocoVisBridge + 60Hz MujocoViewer
+    │   │   └── README.md
     │   └── README.md
     ├── controllers/
     │   ├── adhere_kamr_controller/            # ROS2 ControllerInterface plugin: FSM manager + 200Hz Inner Loop (PD + DOB + 12D OSQP) + 20Hz Async CUDA/C++ KAMR-MPPI Outer Loop
+    │   │   └── README.md
+    │   ├── adhere_controller_common/          # CtrlInterfaces, FSMState base class, common states (Passive, PreloadAttach, EmergencyDetach), mathTypes/mathTools, Fossen hydrodynamics
+    │   │   └── README.md
     │   └── README.md
     └── commands/
         ├── adhere_keyboard_input/             # Teleop & benchmark trigger node (station-keeping, trajectory tracking, gust injection, FSM switching)
+        │   └── README.md
         └── README.md
 ```
 *(Note: Physical hardware interface `adhere_real_hardware` is deferred to the future Jetson AGX Xavier deployment phase; focus 100% on `adhere_mujoco_hardware` now.)*
