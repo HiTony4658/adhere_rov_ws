@@ -81,6 +81,21 @@ void MujocoViewer::layoutRects(int fb_width, int fb_height)
   ui1_.width = kSidePanelWidth;
   mjui_resize(&ui0_, &con_);
   mjui_resize(&ui1_, &con_);
+
+  // mjUI panels render into dedicated aux framebuffers (mjUI::auxid indexes con_.auxFBO[]);
+  // mjr_makeContext() does not allocate these on its own -- mjr_addAux() must be called
+  // explicitly, and only when the panel's pixel dimensions actually change (it is relatively
+  // expensive and must not run every frame).
+  if (left_w > 0 && (uistate_.rect[1].width != aux0_w_ || uistate_.rect[1].height != aux0_h_)) {
+    aux0_w_ = uistate_.rect[1].width;
+    aux0_h_ = uistate_.rect[1].height;
+    mjr_addAux(ui0_.auxid, aux0_w_, aux0_h_, 0, &con_);
+  }
+  if (right_w > 0 && (uistate_.rect[2].width != aux1_w_ || uistate_.rect[2].height != aux1_h_)) {
+    aux1_w_ = uistate_.rect[2].width;
+    aux1_h_ = uistate_.rect[2].height;
+    mjr_addAux(ui1_.auxid, aux1_w_, aux1_h_, 0, &con_);
+  }
 }
 
 void MujocoViewer::buildUi0()

@@ -1,0 +1,2 @@
+ERROR Thu Oct 15 17:11:12 2026: auxFBO 0 does not exist
+

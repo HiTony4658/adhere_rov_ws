@@ -83,6 +83,11 @@ private:
   bool ui0_visible_ = true;
   bool ui1_visible_ = true;
 
+  // Cached aux-FBO dims (mjr_addAux is relatively expensive and must not be called every
+  // frame): layoutRects() only re-creates ui0_/ui1_'s aux buffers when these actually change.
+  int aux0_w_ = -1, aux0_h_ = -1;
+  int aux1_w_ = -1, aux1_h_ = -1;
+
   // mjUI-bound storage (mjITEM_* pdata must be plain, directly-addressable members).
   int ui_running_ = 1;         // 1 = running, 0 = paused (mirrors bridge_->paused, inverted)
   int ui_wave_mode_ = 0;       // radio index: 0 = Calm, 1 = Gust
