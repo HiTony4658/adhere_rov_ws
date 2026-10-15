@@ -173,7 +173,10 @@ hardware_interface::return_type write() override;  // 无参数！Foxy 特有
 （不调用 `mj_step`，因为渲染线程不拥有权威物理状态）。`headless:=true` 时跳过
 GLFW 窗口创建，仅空转等待停止信号。
 
-**鼠标（中央 3D 视口）**：
+### 鼠标与键盘操作一览
+
+**鼠标（中央 3D 视口内）**：
+
 | 操作 | 效果 |
 |---|---|
 | 左键拖拽 | 相机环绕（orbit） |
@@ -181,22 +184,57 @@ GLFW 窗口创建，仅空转等待停止信号。
 | 滚轮 | 缩放（zoom） |
 | 左键双击 | 选中物体（`mjv_select`）并初始化 `mjvPerturb` |
 | `Ctrl` + 左键拖拽 | 对已选中物体施加外部力矩（torque） |
-| `Ctrl` + 右键拖拽 | 对已选中物体施加外部力（force），二者均实时写回
-  `MujocoVisBridge::xfrc_perturb` 并在 `AdhereMujocoHardware::applyHydrodynamics()`
-  中与水动力合并注入 `qfrc_passive` |
+| `Ctrl` + 右键拖拽 | 对已选中物体施加外部力（force） |
 
-**键盘**：`Space` 运行/暂停，`Backspace` 复位仿真，`1`/`2` 切换静水/造浪，
-`Tab` 隐藏/显示左侧边栏。
+`Ctrl` 拖拽产生的力/力矩会实时写回 `MujocoVisBridge::xfrc_perturb`，并在
+`AdhereMujocoHardware::applyHydrodynamics()` 中与水动力合并注入
+`qfrc_passive`——松开鼠标按键后自动归零。左右两侧边栏内的点击/拖拽（滑条、
+复选框、单选按钮、按钮）与 3D 视口的相机/扰动操作互不干扰，由
+`MujocoViewer` 按点击位置落在哪个 `mjrRect` 自动路由。
 
-**左侧边栏（`ui0`，仿真/造浪/渲染选项）**：Running 复选框、Reset 按钮、
-Calm/Gust 造浪模式单选、接触垫受力柱状图/环境流速箭头/透明船体/线框/接触点
-显示开关、坐标系显示模式（None/Body/Site）单选。
+**键盘（任意焦点下）**：
 
-**右侧边栏（`ui1`，推力器与遥测）**：8 个 `thr_N1..4`/`thr_T5..8` 推力器滑条
-（`[-40, 40] N`，叠加写入 `MujocoVisBridge::manual_ctrl`，可在无控制器时手动
-测试单个推力器）+ 一个指向左上角实时遥测浮层（`mjr_overlay`）的说明项，浮层
-内容包括：物理频率（Hz）、仿真时间、造浪模式与 `τ`、环境流速、4 个接触垫受力、
-ROV 位姿 `(X,Y,Z,φ,θ,ψ)`、机体速度 `(vx,vy,vz)`。
+| 按键 | 效果 |
+|---|---|
+| `Space` | 运行/暂停切换 |
+| `S` | 单步执行一个 `2.0 ms` 物理 tick（若当前未暂停，会先自动暂停，再前进一拍——与左侧边栏
+  "Step Once" 按钮等价，适合逐帧调试接触力建立/碰撞响应过程） |
+| `Backspace` | 复位仿真（`mj_resetData` + `mj_step1`，回到初始状态） |
+| `1` / `2` | 切换静水 / 造浪模式（与左侧边栏 "Wave Environment" 单选按钮等价） |
+| `Tab` | 隐藏/显示左侧边栏（腾出视口空间） |
+
+**左侧边栏（`ui0`：仿真 / 造浪 / 渲染调试选项）**：
+
+| 分组 | 控件 | 说明 |
+|---|---|---|
+| Simulation | `Running` 复选框 | 与 `Space` 等价 |
+| | `Step Once` 按钮 | 与 `S` 等价 |
+| | `Reset` 按钮 | 与 `Backspace` 等价 |
+| | `Reset Camera View` 按钮 | 相机环绕/拖拽"迷路"后一键恢复默认视角（`distance=2.8, azimuth=-135°, elevation=-20°`） |
+| Wave Environment | `Mode` 单选 | Calm Water / Station-Keeping Gust，与 `1`/`2` 键等价 |
+| Rendering | `Pad Contact Forces` | 4 个接触垫受力柱状图开关（绿色胶囊，长度正比于法向力） |
+| | `Flow Velocity Arrow` | 环境流速箭头开关（蓝色，从机体质心指向流速方向） |
+| | `Transparent Hull` | 船体半透明（便于观察内部接触点/质心） |
+| | `Wireframe` | 线框渲染 |
+| | `Contact Points` | MuJoCo 原生接触点 + 接触力标记（调试碰撞检测用） |
+| | `Center of Mass` | 显示每个刚体的质心标记（验证浮力/重力作用点） |
+| | `Inertia Box` | 显示等效惯量长方体（核对 `diaginertia` 是否符合预期） |
+| | `Coord Frames` | None / Body / Site 三态单选——坐标系标记长度/线宽已按
+  `model_->vis.scale.framelength/framewidth` 整体缩小至 MuJoCo 默认值的 `1/50`
+  （`0.02`/`0.002`），避免在这个 `~0.2-0.6m` 尺度的 ROV 上喧宾夺主 |
+
+**右侧边栏（`ui1`：推力器手动控制 + 实时遥测）**：
+
+| 分组 | 控件 | 说明 |
+|---|---|---|
+| Thrusters (Manual) | `Zero All` 按钮 | 一键将全部 8 个滑条归零 |
+| | `thr_N1..4` / `thr_T5..8` 滑条 | `[-40, 40] N`，叠加写入
+  `MujocoVisBridge::manual_ctrl`（与上层控制器指令相加），可在未挂载控制器时
+  手动测试单个推力器——例如把 4 个 `thr_N*` 拉到正值可将 ROV 压向壁面，
+  用于验证接触力/`Pad Contact Forces` 可视化是否随指令动态响应 |
+| Telemetry | （说明性条目，指向视口左上角的实时数值浮层） | 浮层内容：物理频率（Hz）、
+  仿真时间、造浪模式与 `τ`、环境流速、4 个接触垫受力、ROV 位姿
+  `(X,Y,Z,φ,θ,ψ)`、机体线速度 `(vx,vy,vz)`、机体角速度 `(ωx,ωy,ωz)` |
 
 ## `adhere_mujoco_node`：单进程宿主 + RViz2 同步
 

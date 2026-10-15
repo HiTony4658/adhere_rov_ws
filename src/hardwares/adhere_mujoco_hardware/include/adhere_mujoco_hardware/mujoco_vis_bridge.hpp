@@ -45,6 +45,7 @@ struct MujocoVisBridge
   // --- GUI -> hardware control requests (lock-free atomics) ---
   std::atomic<bool> paused{false};
   std::atomic<bool> reset_request{false};
+  std::atomic<bool> step_once_request{false};  // single-tick advance while paused (debugging)
   std::atomic<int> wave_mode_cmd{0};  // 0 = no request pending; 1/2 = switch request from GUI
   std::array<std::atomic<double>, 8> manual_ctrl{};  // additive manual slider thrust, N
   std::array<std::atomic<double>, 6> xfrc_perturb{};  // [Fx,Fy,Fz,Tx,Ty,Tz] on rov_base, world

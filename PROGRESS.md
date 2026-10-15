@@ -335,3 +335,47 @@ mjUI 面板宽度是**固定像素值**（`kSidePanelWidth = 310`），不是窗
   正确变为点击位置对应的 `34.4`，随后依次点击 `thr_N2..N4` 并观察到
   `Pad TL/TR/BL/BR` 遥测从全零变为 `12.5/12.5/55.3/55.3 N`（ROV 被压向壁面
   产生真实接触反力），证明侧边栏滑条点击已能正确驱动物理仿真。
+
+---
+
+## Phase 2.8（2026-10-15）：坐标系尺寸修复、调试面板增强、操作文档
+
+### 目标
+
+Phase 2.7 之后进一步实际操作 MuJoCo 窗口发现："Coord Frames" 显示的坐标系
+标记依然偏大；同时希望借此机会为后续 ROV 仿真调试补充更多面板功能，并把
+鼠标/键盘操作整理成一份清晰的 README 参考文档。
+
+### 修复与新增内容
+
+1. **坐标系标记整体缩小 `1/50`**（`adhere_mujoco_hardware.cpp::configure()`）：
+   在 `mj_loadXML` 之后、而不是修改 `mjcf/rov_wall.xml`（该文件按约定与只读
+   参考仓库保持字节一致）直接覆写
+   `model_->vis.scale.framelength = 0.02`、`framewidth = 0.002`
+   （MuJoCo 默认为 `1.0`/`0.1`）。因为 `vis.scale.*` 是纯可视化参数、不参与
+   任何物理计算，这个运行时覆写不影响数值一致性契约。
+2. **修复 "Reset" 按钮从未真正生效的潜藏 bug**：`buildUi0()` 早在 Phase 2.6
+   就给 Reset 按钮分配了 `userid=kUidReset`，但 `onMouseButton()`/
+   `onCursorPos()` 调用 `mjui_event()` 后从未检查返回的 `mjuiItem*`，导致
+   按钮即使能被正确命中（Phase 2.7 修复点击坐标翻转之后）也不会触发任何
+   动作。新增统一的 `handleUiAction(int userid)` 分发函数，在两处调用点都
+   接住 `mjui_event()` 的返回值并分发。
+3. **左侧边栏新增调试控件**：`Step Once`（`S` 键等价，暂停时单步前进
+   `2.0 ms`，通过新增的 `MujocoVisBridge::step_once_request` 原子标志传给
+   `AdhereMujocoHardware::write()`，仅消费一次）、`Reset Camera View`
+   （一键恢复默认相机参数）、`Center of Mass`/`Inertia Box` 显示开关
+   （`mjVIS_COM`/`mjVIS_INERTIA`，用于核对浮力作用点与惯量箱是否符合预期）。
+4. **右侧边栏新增 `Zero All` 按钮**：一键把 8 个推力器滑条清零。
+5. **遥测浮层新增机体角速度行** `Body AngVel (wx wy wz)`（取自 MuJoCo
+   自由关节 `qvel[3:6]`，机体系），便于单独观察翻滚/失稳趋势。
+6. **README 补全"鼠标与键盘操作一览"**：三张表格分别列出 3D 视口鼠标操作、
+   全局键盘快捷键、左/右侧边栏每个控件的作用，替换此前零散分布的描述段落。
+
+### 验证结果
+
+- `colcon build --symlink-install`（全工作空间 6/6 包）零警告通过。
+- 真实桌面会话截图确认：选中 "Coord Frames: Body" 后，场景中的坐标系标记
+  缩小为一个几乎看不清的红色小短线（相比 Phase 2.6 时跨越数个 `0.5m` 网格
+  的巨大三色坐标轴，符合"至少缩小到 1/50"的要求）；左右两侧边栏新增的
+  `Step Once`/`Reset Camera View`/`Center of Mass`/`Inertia Box`/
+  `Zero All` 控件与 `Body AngVel` 遥测行均正确渲染。

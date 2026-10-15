@@ -25,6 +25,9 @@ constexpr double kFlowScale = 1.0;    // m per (m/s), for the flow-velocity arro
 
 // mjUI userid codes for action buttons (distinguished in the mjui_event result).
 constexpr int kUidReset = 100;
+constexpr int kUidStepOnce = 101;
+constexpr int kUidResetView = 102;
+constexpr int kUidZeroThrusters = 103;
 }  // namespace
 
 MujocoViewer::MujocoViewer(
@@ -106,9 +109,13 @@ void MujocoViewer::buildUi0()
   mjuiDef def_sim[] = {
     {mjITEM_SECTION, "Simulation", mjSECT_OPEN, nullptr, "", 0},
     {mjITEM_CHECKINT, "Running (Space)", 1, &ui_running_, "", 0},
+    {mjITEM_BUTTON, "Step Once (S)", 1, nullptr, "", 0},
     {mjITEM_BUTTON, "Reset (Backspace)", 1, nullptr, "", 0},
+    {mjITEM_BUTTON, "Reset Camera View", 1, nullptr, "", 0},
     {mjITEM_END, "", 0, nullptr, "", 0}};
-  def_sim[2].otherint = kUidReset;
+  def_sim[2].otherint = kUidStepOnce;
+  def_sim[3].otherint = kUidReset;
+  def_sim[4].otherint = kUidResetView;
   mjui_add(&ui0_, def_sim);
 
   mjuiDef def_wave[] = {
@@ -124,6 +131,8 @@ void MujocoViewer::buildUi0()
     {mjITEM_CHECKBYTE, "Transparent Hull", 1, &ui_transparent_, "", 0},
     {mjITEM_CHECKBYTE, "Wireframe", 1, &ui_wireframe_, "", 0},
     {mjITEM_CHECKBYTE, "Contact Points", 1, &ui_show_contact_, "", 0},
+    {mjITEM_CHECKBYTE, "Center of Mass", 1, &ui_show_com_, "", 0},
+    {mjITEM_CHECKBYTE, "Inertia Box", 1, &ui_show_inertia_, "", 0},
     {mjITEM_RADIO, "Coord Frames", 3, &ui_coord_frames_, "None\nBody\nSite", 0},
     {mjITEM_END, "", 0, nullptr, "", 0}};
   mjui_add(&ui0_, def_render);
@@ -135,7 +144,9 @@ void MujocoViewer::buildUi1()
 
   mjuiDef def_thrust_header[] = {
     {mjITEM_SECTION, "Thrusters (Manual)", mjSECT_OPEN, nullptr, "", 0},
+    {mjITEM_BUTTON, "Zero All", 1, nullptr, "", 0},
     {mjITEM_END, "", 0, nullptr, "", 0}};
+  def_thrust_header[1].otherint = kUidZeroThrusters;
   mjui_add(&ui1_, def_thrust_header);
   for (int i = 0; i < 8; ++i) {
     mjuiDef def_slider[2] = {};
@@ -168,12 +179,7 @@ void MujocoViewer::initUi()
   // the kSidePanelWidth assigned to ui0_.width/ui1_.width and overflow past the window edge.
   mjr_makeContext(model_, &con_, mjFONTSCALE_100);
 
-  cam_.distance = 2.8;
-  cam_.azimuth = -135.0;
-  cam_.elevation = -20.0;
-  cam_.lookat[0] = 0.0;
-  cam_.lookat[1] = 0.0;
-  cam_.lookat[2] = 0.6;
+  resetCameraView();
 
   ui0_.userdata = this;
   ui1_.userdata = this;
@@ -266,7 +272,9 @@ void MujocoViewer::onCursorPos(double x, double y)
   } else if (uistate_.mouserect == 2) {
     it = mjui_event(&ui1_, &uistate_, &con_);
   }
-  (void)it;
+  if (it) {
+    handleUiAction(it->userid);
+  }
 
   if (uistate_.mouserect == 0 || uistate_.mouserect == 3) {
     const double reldx = dx / fb_h;
@@ -332,9 +340,15 @@ void MujocoViewer::onMouseButton(int button, int act, int mods)
     uistate_.buttontime = now;
 
     if (uistate_.mouserect == 1) {
-      mjui_event(&ui0_, &uistate_, &con_);
+      mjuiItem * it = mjui_event(&ui0_, &uistate_, &con_);
+      if (it) {
+        handleUiAction(it->userid);
+      }
     } else if (uistate_.mouserect == 2) {
-      mjui_event(&ui1_, &uistate_, &con_);
+      mjuiItem * it = mjui_event(&ui1_, &uistate_, &con_);
+      if (it) {
+        handleUiAction(it->userid);
+      }
     } else if (doubleclick && button == GLFW_MOUSE_BUTTON_LEFT) {
       // Double-click body selection + mjvPerturb initialization.
       const mjrRect & vp = uistate_.rect[3];
@@ -418,9 +432,53 @@ void MujocoViewer::onKey(int key, int act, int mods)
         layoutRects(fb_w, fb_h);
       }
       break;
+    case GLFW_KEY_S:
+      stepOnce();
+      break;
     default:
       break;
   }
+}
+
+void MujocoViewer::handleUiAction(int userid)
+{
+  switch (userid) {
+    case kUidReset:
+      bridge_->reset_request.store(true);
+      break;
+    case kUidStepOnce:
+      stepOnce();
+      break;
+    case kUidResetView:
+      resetCameraView();
+      break;
+    case kUidZeroThrusters:
+      for (auto & v : thruster_slider_) {
+        v = 0.0;
+      }
+      break;
+    default:
+      break;  // not an action button (slider/checkbox/radio changes are read directly via pdata)
+  }
+}
+
+void MujocoViewer::stepOnce()
+{
+  // Only meaningful while paused -- AdhereMujocoHardware::write() only honors
+  // step_once_request when vis_bridge_->paused is true (CLAUDE.md Phase 2.7 debugging aid).
+  ui_running_ = 0;
+  bridge_->paused.store(true);
+  bridge_->step_once_request.store(true);
+}
+
+void MujocoViewer::resetCameraView()
+{
+  cam_.distance = 2.8;
+  cam_.azimuth = -135.0;
+  cam_.elevation = -20.0;
+  cam_.lookat[0] = 0.0;
+  cam_.lookat[1] = 0.0;
+  cam_.lookat[2] = 0.6;
 }
 
 void MujocoViewer::drawOverlayTelemetry(mjrRect viewport)
@@ -441,6 +499,7 @@ void MujocoViewer::drawOverlayTelemetry(mjrRect viewport)
 
   double px = 0.0, py = 0.0, pz = 0.0, phi = 0.0, theta = 0.0, psi = 0.0;
   double vx = 0.0, vy = 0.0, vz = 0.0;
+  double wx = 0.0, wy = 0.0, wz = 0.0;
   if (model_->nq >= 7) {
     px = d_vis_->qpos[0];
     py = d_vis_->qpos[1];
@@ -455,6 +514,12 @@ void MujocoViewer::drawOverlayTelemetry(mjrRect viewport)
     vx = d_vis_->qvel[0];
     vy = d_vis_->qvel[1];
     vz = d_vis_->qvel[2];
+    // MuJoCo freejoint qvel convention: [0:3] world-frame linear velocity, [3:6] body-frame
+    // angular velocity (gyro-equivalent) -- useful on its own for spotting tumbling/instability
+    // while debugging, independent of the linear Body Vel row above.
+    wx = d_vis_->qvel[3];
+    wy = d_vis_->qvel[4];
+    wz = d_vis_->qvel[5];
   }
 
   const double hz = bridge_->actual_physics_hz.load();
@@ -465,14 +530,16 @@ void MujocoViewer::drawOverlayTelemetry(mjrRect viewport)
   std::snprintf(
     title, sizeof(title),
     "Physics Rate\nSim Time\nWave Mode\nFlow Velocity\n"
-    "Pad TL / TR / BL / BR\nPose (X Y Z)\nPose (phi theta psi)\nBody Vel (vx vy vz)");
+    "Pad TL / TR / BL / BR\nPose (X Y Z)\nPose (phi theta psi)\nBody Vel (vx vy vz)\n"
+    "Body AngVel (wx wy wz)");
   std::snprintf(
     content, sizeof(content),
     "%.1f Hz\n%.2f s\n%s (tau=%.2fs)\n[%.2f, %.2f, %.2f] m/s\n"
-    "%.1f / %.1f / %.1f / %.1f N\n[%.3f, %.3f, %.3f] m\n[%.1f, %.1f, %.1f] deg\n[%.3f, %.3f, %.3f] m/s",
+    "%.1f / %.1f / %.1f / %.1f N\n[%.3f, %.3f, %.3f] m\n[%.1f, %.1f, %.1f] deg\n[%.3f, %.3f, %.3f] m/s\n"
+    "[%.3f, %.3f, %.3f] rad/s",
     hz, sim_t, wave_mode == 2 ? "Gust" : "Calm", tau, flow[0], flow[1], flow[2], pad_force[0],
     pad_force[1], pad_force[2], pad_force[3], px, py, pz, phi * 57.2958, theta * 57.2958,
-    psi * 57.2958, vx, vy, vz);
+    psi * 57.2958, vx, vy, vz, wx, wy, wz);
 
   mjr_overlay(mjFONT_NORMAL, mjGRID_TOPLEFT, viewport, title, content, &con_);
 }
@@ -493,6 +560,8 @@ void MujocoViewer::renderFrame()
   opt_.flags[mjVIS_TRANSPARENT] = ui_transparent_;
   opt_.flags[mjVIS_CONTACTPOINT] = ui_show_contact_;
   opt_.flags[mjVIS_CONTACTFORCE] = ui_show_contact_;
+  opt_.flags[mjVIS_COM] = ui_show_com_;
+  opt_.flags[mjVIS_INERTIA] = ui_show_inertia_;
   opt_.frame = (ui_coord_frames_ == 1) ? mjFRAME_BODY : (ui_coord_frames_ == 2) ? mjFRAME_SITE : mjFRAME_NONE;
 
   if (pert_.active) {

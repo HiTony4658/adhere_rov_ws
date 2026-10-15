@@ -58,6 +58,16 @@ hardware_interface::return_type AdhereMujocoHardware::configure(
     return hardware_interface::return_type::ERROR;
   }
 
+  // Visual-only override, applied after loading rather than editing mjcf/rov_wall.xml (which
+  // is kept byte-identical to the read-only mujoco_mppi_ws reference for physics parity): the
+  // default body/site coordinate-frame gizmo (model_->vis.scale.framelength/framewidth, used
+  // whenever MujocoViewer's "Coord Frames" option is Body/Site) is sized relative to the
+  // model's auto-computed mean extent and renders many times larger than this ~0.2-0.6m ROV.
+  // Shrunk by >50x (MuJoCo defaults are 1.0 / 0.1) so frame gizmos read as thin markers instead
+  // of dominating the scene.
+  model_->vis.scale.framelength = 0.02;
+  model_->vis.scale.framewidth = 0.002;
+
   body_id_ = mj_name2id(model_, mjOBJ_BODY, "rov_base");
   if (body_id_ < 0) {
     RCLCPP_ERROR(logger(), "Body 'rov_base' not found in MJCF");
@@ -383,8 +393,12 @@ hardware_interface::return_type AdhereMujocoHardware::write()
 
   // Run/Pause (Space in MujocoViewer): when paused, skip stepping entirely so the scene stays
   // frozen at the last mj_step1()-settled state; ctrl writes above still land so slider
-  // tweaks are visible immediately next time the sim resumes.
-  if (!vis_bridge_->paused.load()) {
+  // tweaks are visible immediately next time the sim resumes. "Step Once" (debugging: advance
+  // exactly one 2.0ms tick while paused) is the one exception -- it consumes its own request
+  // flag so it only ever fires once per button press/key tap, not every tick it stays true.
+  const bool paused = vis_bridge_->paused.load();
+  const bool single_step = paused && vis_bridge_->step_once_request.exchange(false);
+  if (!paused || single_step) {
     mj_step2(model_, data_);
     mj_step1(model_, data_);
     sim_time_ = data_->time;

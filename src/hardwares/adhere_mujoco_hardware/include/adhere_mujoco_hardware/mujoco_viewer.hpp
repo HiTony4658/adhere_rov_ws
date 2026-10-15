@@ -63,6 +63,9 @@ private:
   void onMouseButton(int button, int act, int mods);
   void onScroll(double xoffset, double yoffset);
   void onKey(int key, int act, int mods);
+  void handleUiAction(int userid);
+  void stepOnce();
+  void resetCameraView();
 
   const mjModel * model_;
   mjData * d_vis_ = nullptr;
@@ -96,8 +99,14 @@ private:
   mjtByte ui_transparent_ = 0;
   mjtByte ui_wireframe_ = 0;
   mjtByte ui_show_contact_ = 0;
+  mjtByte ui_show_com_ = 0;
+  mjtByte ui_show_inertia_ = 0;
   int ui_coord_frames_ = 0;    // radio index: 0 = None, 1 = Body, 2 = All
   double thruster_slider_[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+
+  // Debug-step request: Step Once only ever acts while paused, taking exactly one 2.0ms
+  // physics tick. Set here by the button/key handler, consumed (and cleared) by
+  // AdhereMujocoHardware::write() via MujocoVisBridge::step_once_request.
 
   int pad_site_id_[4] = {-1, -1, -1, -1};
   int body_id_ = -1;
