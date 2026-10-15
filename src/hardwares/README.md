@@ -29,7 +29,3 @@ Architect"职责要求的**严格 Sim-to-Real 一致性**的工程落地方式�
 |---|---|
 | [`adhere_mujoco_hardware`](adhere_mujoco_hardware/README.md) | 500Hz MuJoCo `SystemInterface` 后端 + `MujocoVisBridge` + 60Hz `MujocoViewer` 可视化前端 |
 
-## Phase 1 状态
-
-仅搭建 `CMakeLists.txt`/`package.xml`/`*.xml`（pluginlib 插件描述占位）骨架，
-`AdhereMujocoHardware` 源码留待 Phase 2 实现。

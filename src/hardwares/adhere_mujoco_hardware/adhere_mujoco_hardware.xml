@@ -1,7 +1,4 @@
 <library path="adhere_mujoco_hardware">
-  <!-- TODO(Phase 2): uncomment once AdhereMujocoHardware is implemented in
-       src/adhere_mujoco_hardware.cpp and exported via PLUGINLIB_EXPORT_CLASS.
-
   <class name="adhere_mujoco_hardware/AdhereMujocoHardware"
          type="adhere_mujoco_hardware::AdhereMujocoHardware"
          base_class_type="hardware_interface::SystemInterface">
@@ -9,5 +6,4 @@
       500Hz MuJoCo-backed SystemInterface for the thrust-adhered hull-inspection ROV.
     </description>
   </class>
-  -->
 </library>

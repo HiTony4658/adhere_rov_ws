@@ -1,0 +1,118 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!--
+    ros2_control contract for AdhereMujocoHardware (ROS 2 Foxy hardware_interface::SystemInterface).
+    8 command_interface (thruster effort) + 36 state_interface, matching CLAUDE.md Sec.3/4 and
+    this package's README interface table exactly:
+      - 8  thruster effort readback
+      - 10 imu_sensor      (orientation.w/x/y/z, angular_velocity.x/y/z, linear_acceleration.x/y/z)
+      - 10 rov_odom        (pos.x/y/z, quat.w/x/y/z, vel_body.x/y/z)
+      - 8  pad_contact     (pad_*/force x4, pad_*/v_sep x4)
+  -->
+  <xacro:arg name="wave_profile" default="calm"/>
+  <xacro:arg name="headless" default="false"/>
+
+  <ros2_control name="AdhereMujocoSystem" type="system">
+    <hardware>
+      <plugin>adhere_mujoco_hardware/AdhereMujocoHardware</plugin>
+      <param name="wave_profile">$(arg wave_profile)</param>
+      <param name="headless">$(arg headless)</param>
+    </hardware>
+
+    <joint name="thr_N1">
+      <command_interface name="effort">
+        <param name="min">22.0</param>
+        <param name="max">40.0</param>
+      </command_interface>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="thr_N2">
+      <command_interface name="effort">
+        <param name="min">22.0</param>
+        <param name="max">40.0</param>
+      </command_interface>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="thr_N3">
+      <command_interface name="effort">
+        <param name="min">22.0</param>
+        <param name="max">40.0</param>
+      </command_interface>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="thr_N4">
+      <command_interface name="effort">
+        <param name="min">22.0</param>
+        <param name="max">40.0</param>
+      </command_interface>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="thr_T5">
+      <command_interface name="effort">
+        <param name="min">-40.0</param>
+        <param name="max">40.0</param>
+      </command_interface>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="thr_T6">
+      <command_interface name="effort">
+        <param name="min">-40.0</param>
+        <param name="max">40.0</param>
+      </command_interface>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="thr_T7">
+      <command_interface name="effort">
+        <param name="min">-40.0</param>
+        <param name="max">40.0</param>
+      </command_interface>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="thr_T8">
+      <command_interface name="effort">
+        <param name="min">-40.0</param>
+        <param name="max">40.0</param>
+      </command_interface>
+      <state_interface name="effort"/>
+    </joint>
+
+    <sensor name="imu_sensor">
+      <state_interface name="orientation.w"/>
+      <state_interface name="orientation.x"/>
+      <state_interface name="orientation.y"/>
+      <state_interface name="orientation.z"/>
+      <state_interface name="angular_velocity.x"/>
+      <state_interface name="angular_velocity.y"/>
+      <state_interface name="angular_velocity.z"/>
+      <state_interface name="linear_acceleration.x"/>
+      <state_interface name="linear_acceleration.y"/>
+      <state_interface name="linear_acceleration.z"/>
+    </sensor>
+
+    <sensor name="rov_odom">
+      <state_interface name="pos.x"/>
+      <state_interface name="pos.y"/>
+      <state_interface name="pos.z"/>
+      <state_interface name="quat.w"/>
+      <state_interface name="quat.x"/>
+      <state_interface name="quat.y"/>
+      <state_interface name="quat.z"/>
+      <state_interface name="vel_body.x"/>
+      <state_interface name="vel_body.y"/>
+      <state_interface name="vel_body.z"/>
+    </sensor>
+
+    <sensor name="pad_contact">
+      <state_interface name="pad_TL/force"/>
+      <state_interface name="pad_TR/force"/>
+      <state_interface name="pad_BL/force"/>
+      <state_interface name="pad_BR/force"/>
+      <state_interface name="pad_TL/v_sep"/>
+      <state_interface name="pad_TR/v_sep"/>
+      <state_interface name="pad_BL/v_sep"/>
+      <state_interface name="pad_BR/v_sep"/>
+    </sensor>
+  </ros2_control>
+
+</robot>

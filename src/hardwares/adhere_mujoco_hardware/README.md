@@ -5,42 +5,36 @@
 `AdhereMujocoHardware` 是本工作空间中唯一直接持有 MuJoCo `mjModel*`/`mjData*` 的
 类，扮演"真实 ROV + 水下环境"的角色。它是一个 ROS 2 Foxy
 `hardware_interface::SystemInterface` 插件，由 `controller_manager` 以严格
-**`500Hz`**（`update_rate: 500`，`dt = 2.0 ms`）周期驱动，对上层控制器
-（`AdhereKamrController`）的实际更新速率（200Hz 内环 / 20Hz 外环）完全无感知，
-从而保证 `CLAUDE.md` §1.3 要求的"Defensive Systems Architect"核心约束：
-**Sim-to-Real 一致性**。
+**`500Hz`**（`update_rate: 500`，`dt = 2.0 ms`）周期驱动。本阶段（Phase 2）尚未
+接入任何上层控制器，`hw_commands_[8]` 恒为零，用于验证"零控制输入下的被动随波
+漂流"（calm 水域下的浮力/阻力漂移，以及 station-keeping 阵风工况下的侧向/吸附
+漂移）。
 
-## 类与文件规划
+## 文件结构
 
 ```text
 include/adhere_mujoco_hardware/
-├── adhere_mujoco_hardware.hpp      # AdhereMujocoHardware 主类声明
-├── mujoco_vis_bridge.hpp           # MujocoVisBridge 结构体（60Hz<->500Hz 快照桥）
-├── mujoco_viewer.hpp               # MujocoViewer 类声明（GLFW/OpenGL 渲染线程）
-└── fossen_hydro_adapter.hpp        # 对 adhere_controller_common::FossenHydrodynamics 的薄封装
+├── adhere_mujoco_hardware.hpp      # AdhereMujocoHardware 主类
+├── fossen_hydrodynamics.hpp        # HydroParams / GustEvent / FossenHydrodynamics
+├── flow_environment_plugin.hpp     # FlowEnvironmentPlugin 策略接口 + 2 个具体插件 + 工厂函数
+├── mujoco_vis_bridge.hpp           # MujocoVisBridge：500Hz<->60Hz 快照桥（POD + mutex）
+└── mujoco_viewer.hpp               # MujocoViewer：GLFW/OpenGL 60Hz 渲染线程
 
 src/
-├── adhere_mujoco_hardware.cpp      # 500Hz read()/write() 主体实现
-├── mujoco_vis_bridge.cpp
-└── mujoco_viewer.cpp
+├── adhere_mujoco_hardware.cpp
+├── fossen_hydrodynamics.cpp
+├── flow_environment_plugin.cpp
+├── mujoco_viewer.cpp
+└── adhere_mujoco_node.cpp          # 500Hz ControllerManager 循环 + 100Hz TF/Odom/Marker 发布
+
+config/
+├── hydro_wave_params.yaml          # controller_manager 运行参数 + 两套水动力预设数值参考
+└── mujoco_sim.rviz
+
+launch/
+└── mujoco_sim.launch.py
 
 adhere_mujoco_hardware.xml           # pluginlib 插件描述文件（hardware_interface 导出）
-```
-
-## `AdhereMujocoHardware` 类职责与成员
-
-```text
-class AdhereMujocoHardware
-  : public hardware_interface::BaseInterface<hardware_interface::SystemInterface>
-{
-  mjModel*  m_;                       // 主物理模型（configure() 阶段 mj_loadXML 加载）
-  mjData*   d_;                       // 主物理数据
-  FossenHydrodynamics  hydro_;        // 复用 adhere_controller_common，保证与控制器一致
-  double    hw_states_[36];           // 导出为 36 个 StateInterface 的裸内存
-  double    hw_commands_[8];          // 导出为 8 个 CommandInterface 的裸内存
-  std::unique_ptr<MujocoVisBridge> vis_bridge_;  // 60Hz 可视化快照桥（见下）
-  int       step_counter_ = 0;        // 用于 "每 8 步同步一次可视化" 的节拍计数
-};
 ```
 
 ## ROS 2 Foxy 生命周期方法签名（严格遵守，无 `time, period` 参数）
@@ -55,109 +49,94 @@ hardware_interface::return_type read() override;   // 无参数！Foxy 特有
 hardware_interface::return_type write() override;  // 无参数！Foxy 特有
 ```
 
-> 与 Humble/Jazzy 的 `read(time, period)`/`write(time, period)` 不同，Foxy 的
-> `SystemInterface::read()`/`write()` **不接受任何参数**；`dt` 通过
-> `controller_manager` 的 `update_rate` 参数隐式保证，`AdhereMujocoHardware`
-> 内部若需要精确 `dt`，应从 `m_->opt.timestep`（MJCF 中配置为 `0.002`）读取，
-> 而不是依赖外部传入的 `period`。
+`dt` 不依赖外部传入的 `period`，而是从 `mjModel::opt.timestep`（MJCF 中为
+`0.002`）读取；`BaseInterface<SystemInterface>` 这一层包装是 Foxy 特有的。
 
-## 500Hz 主循环深度剖析
+## 500Hz 主循环
 
-### `configure(info)`
+- **`configure(info)`**：通过 `ament_index_cpp::get_package_share_directory("simplified_v1_description")`
+  解析 `mjcf/rov_wall.xml` 的绝对路径（不硬编码路径），`mj_loadXML` + `mj_makeData`；
+  从 `info.hardware_parameters["wave_profile"]` 读取环境插件名并由
+  `createFlowEnvironment()` 构造对应的 `FlowEnvironmentPlugin`。
+- **`read()`**：从 `mjData` 提取 8 个推力器回读值、10 维 IMU（姿态四元数 + 机体系
+  角速度 + 有限差分线加速度近似）、10 维位姿/机体速度、8 维接触垫数据（4 个
+  `touch_pad_*` 传感器法向力 + 按 `CLAUDE.md` §4.2 公式
+  `v_sep,i = v_x,b + omega_y*z_i - omega_z*y_i` 实时计算的分离速度）。
+- **`write()`**：把 `hw_commands_[0:8]`（本阶段恒为零）写入 `d_->ctrl`；通过一个
+  仅在本进程内安装的 `mjcb_passive` 回调（与 Python 原型 `setup_hydrodynamics_
+  callback` 完全相同的调用时机与目标累加数组 `qfrc_passive`，用于保证数值一致性）
+  注入 `FossenHydrodynamics::compute()` 算出的水动力合力/合力矩；随后 `mj_step`
+  推进 2.0 ms；每 8 步通过 `std::mutex::try_lock()`（绝不阻塞主循环）向
+  `MujocoVisBridge` 写入一次渲染快照。
 
-1. 解析 `info.hardware_parameters["mjcf_path"]`（通过
-   `ament_index_cpp::get_package_share_directory("adhere_rov_description")`
-   拼接绝对路径，**禁止硬编码绝对路径**）。
-2. `m_ = mj_loadXML(...)`，`d_ = mj_makeData(m_)`。
-3. 校验 `info.joints`/`info.sensors` 与 MJCF 的推力器/传感器数量一致（8 推力器、
-   36 态）。
-4. 构造 `hydro_`（`FossenHydrodynamics`，来自 `adhere_controller_common`），加载
-   质量、惯量、浮力偏置（`58.86 N`）、Morison 阻力系数等参数。
+## 水动力学与可插拔水流环境
 
-### `read()`（@ 500Hz，每次 `controller_manager` 调用一次）
+`fossen_hydrodynamics.hpp/.cpp` 是 `~/Research/mujoco_mppi_ws/src/env/hydrodynamics.py`
+的逐条等价 C++ 移植（附加质量重力偏置、Morison 耦合二次阻力、近壁 Venturi 吸附、
+自由液面渐变、CoB 回正力矩），已通过 3 组随机状态与 Python 参考实现数值比对，
+误差远小于 `1e-5`（详见下方"数值校验"）。
 
-```text
-1. hw_states_[0:8]   = d_->ctrl[0:8]                         // 推力器回读
-2. hw_states_[8:18]  = IMU: d_->sensordata[imu段]              // 姿态四元数+角速度+线加速度
-3. hw_states_[18:28] = 位姿: d_->xpos/xquat + 机体速度         // pos.xyz, quat.wxyz, vel_body.xyz
-4. hw_states_[28:36] = 4个接触垫: F_N,i (d_->sensordata[contact段])
-                        v_sep,i = v_x,b + omega_y*z_i - omega_z*y_i   // 按 CLAUDE.md §4.2 公式实时计算
-5. 计算 500Hz ground-truth 遥测：
-     M_kern = 1 - K_val   （K_val 由 F_N,i 反算压力中心 p_y,p_z 得出）
-     liftoff_i = (F_N,i <= 0)
-   写入诊断缓冲（供可选的 adhere_control_msgs::RhombicKernMetrics 发布，走独立低频线程）
-```
+`flow_environment_plugin.hpp/.cpp` 提供策略模式的可插拔水流环境：
 
-### `write()`（@ 500Hz，每次 `controller_manager` 调用一次）
-
-```text
-1. 读取 hw_commands_[0:8] 的"当前值"——无论这是上一次 200Hz/20Hz tick 写入的新值，
-   还是维持了若干个 500Hz tick 未变的旧值，write() 都一视同仁。
-   这天然模拟了真实 ESC 的零阶保持（ZOH）特性，是 Sim-to-Real 一致性的关键。
-2. 对每个推力器施加一阶滞后 tau_T（可选）与死区（可选）：
-     u_filtered_i = u_prev_i + (dt/tau_T) * (hw_commands_[i] - u_prev_i)
-3. hydro_.compute(d_->qpos, d_->qvel, t) 计算 6-DOF Fossen 水动力
-   （附加质量 + Morison 二次阻力 + 近壁 Venturi 吸附效应 + 浮力偏置）
-   + 标准 12.0s 阵风扰动 profile（若处于 benchmark 模式）
-   写入 d_->xfrc_applied[rov_body]。
-4. 将 u_filtered_i 映射为推力器施力方向向量，叠加进 d_->xfrc_applied 或
-   d_->qfrc_applied（取决于推力器是否建模为独立 body）。
-5. mj_step(m_, d_)   // 推进物理 2.0 ms
-6. 若 (++step_counter_ % 8 == 0)：尝试 std::mutex::try_lock()（<10us），
-   将 d_->qpos/qvel/ctrl + 4个F_N,i + 菱形核CoP 拷贝进 MujocoVisBridge 快照区；
-   若加锁失败（MujocoViewer 正在读取上一帧），直接跳过，绝不阻塞 500Hz 主循环。
-```
-
-## `MujocoVisBridge`：500Hz ↔ 60Hz 指针桥
-
-```cpp
-struct MujocoVisBridge {
-  std::mutex mtx;                 // try_lock() 保护，非阻塞
-  double qpos_snapshot[...];
-  double qvel_snapshot[...];
-  double ctrl_snapshot[8];
-  double pad_force_snapshot[4];
-  double kern_cop_snapshot[2];    // p_y, p_z
-  double xfrc_perturb[6];         // 60Hz -> 500Hz 反向通道：鼠标扰动力
-};
-```
-
-- **写方向（500Hz → 60Hz）**：`AdhereMujocoHardware::write()` 末尾，每 8 步写一次
-  快照（见上），用 `try_lock()` 保证绝不阻塞物理主循环。
-- **读方向（60Hz → 500Hz）**：`MujocoViewer` 渲染线程中若 `mjvPerturb` 检测到用户
-  鼠标拖拽，将扰动力写入 `xfrc_perturb`；`AdhereMujocoHardware::write()` 的下一次
-  500Hz tick 会读取该字段并叠加进 `d_->xfrc_applied`。
-
-## `MujocoViewer`：60Hz 可视化前端
-
-- 独立线程运行 GLFW/OpenGL 渲染循环，拥有自己的 `mjData* d_vis_ = mj_makeData(m_)`
-  （与主 `d_` 完全隔离，避免渲染读取与物理写入的数据竞争）。
-- 每帧：从 `MujocoVisBridge` 拷贝快照到 `d_vis_`，调用 `mj_forward(m_, d_vis_)`
-  重新计算运动学/碰撞几何（**不调用 `mj_step`**，因为渲染线程不拥有权威物理状态），
-  渲染 3D ROV/壁面/4 个接触垫力柱状图/菱形核 CoP 轨迹。
-- 该线程的渲染延迟、VSync 等待、OpenGL 上下文切换**绝不会**影响 500Hz 主循环的
-  实时性，这是本架构相较于"仿真与渲染同步阻塞"方案的核心优势。
-
-## 线程安全机制小结
-
-| 共享数据 | 保护机制 | 访问方 |
+| 插件 | `wave_profile` 取值 | 行为 |
 |---|---|---|
-| `hw_states_[36]` / `hw_commands_[8]` | 无锁（单生产者单消费者，`controller_manager` 保证 `read→update→write` 串行调用顺序，天然无竞争） | `AdhereMujocoHardware` ↔ `AdhereKamrController`（via `CtrlInterfaces`） |
-| `MujocoVisBridge` 快照区 | `std::mutex::try_lock()`（非阻塞，失败即跳过本次同步） | `AdhereMujocoHardware`（500Hz 写）↔ `MujocoViewer`（60Hz 读） |
-| `MujocoVisBridge::xfrc_perturb` | 同上互斥锁 | `MujocoViewer`（60Hz 写）↔ `AdhereMujocoHardware`（500Hz 读） |
+| `CalmWaterPlugin`（默认） | `calm` | 环境流速恒为零，仅受浮力/阻力/Venturi 吸附影响 |
+| `StationKeepingGustPlugin` | `station_keeping_gust` | 定常 `0.3 m/s` 世界系 `+Y` 侧向流 + 两段半正弦阵风（`t∈[3.0,4.2]s` 与 `t∈[7.0,8.2]s`，侧向峰值 `0.9 m/s`，法向吸附峰值 `0.2 m/s`） |
 
-## ROS 2 Foxy 特有注意事项
+两个插件的数值常量与 Python 参考逐位一致，由 `createFlowEnvironment()` 工厂函数按
+`wave_profile` 硬件参数选取。`config/hydro_wave_params.yaml` 同时承载两重内容：
+`controller_manager` 实际加载的运行参数（`update_rate: 500`），以及两套预设数值
+的人工参考记录（非运行时解析，避免引入额外 YAML 解析依赖）。
 
-- `pluginlib_export_plugin_description_file(hardware_interface adhere_mujoco_hardware.xml)`
-  必须在 `CMakeLists.txt` 中调用，且 `package.xml` 的
-  `<export><hardware_interface plugin=.../></export>` 标签名为 `hardware_interface`
-  （Foxy 与后续版本一致）。
-- `BaseInterface<SystemInterface>` 这一层包装是 Foxy 特有的（Humble 起已移除），
-  直接继承 `hardware_interface::SystemInterface` 在 Foxy 下会导致纯虚函数未实现
-  的编译错误。
+## `MujocoVisBridge` 与 `MujocoViewer`：500Hz↔60Hz 双向解耦
 
-## Phase 1 状态
+`MujocoVisBridge` 是一个裸数据结构（`qpos`/`qvel`/`ctrl`/`pad_force`/
+`flow_vel_world` + `std::mutex`），由 `AdhereMujocoHardware::write()` 每 8 步
+（约 60Hz）用 `try_lock()` 写入一次快照；`MujocoViewer` 在独立线程中运行 GLFW/
+OpenGL 渲染循环，拥有自己的 `mjData* d_vis_`（与主 `mjData*` 完全隔离），每帧
+拷贝快照、调用 `mj_forward`（不调用 `mj_step`，因为渲染线程不拥有权威物理状态）
+并渲染 ROV/壁面/4 个接触垫受力柱状图/环境流速箭头。`headless:=true` 时
+`MujocoViewer` 跳过 GLFW 窗口创建，仅空转等待停止信号。
 
-仅搭建头文件/源文件目录骨架与注释掉的 `CMakeLists.txt` 构建目标、空的
-`adhere_mujoco_hardware.xml` 插件描述占位。真实 MuJoCo/GLFW 依赖发现与源码实现
-留待 Phase 2。
+## `adhere_mujoco_node`：单进程宿主 + RViz2 同步
+
+`adhere_mujoco_node` 在同一进程内：
+
+1. 用传入的 `robot_description` 构造 `hardware_interface::ResourceManager` 并
+   `start_components()`（触发 `AdhereMujocoHardware::configure()`/`start()`）；
+2. 以该 `ResourceManager` 构造标准 `controller_manager::ControllerManager`，在专属
+   线程里以 `500Hz` 循环调用 `read()`/`update()`/`write()`（本阶段无控制器挂载，
+   `update()` 为空操作）；
+3. 额外在 `100Hz` 定时器中，通过 `claim_state_interface()` 拿到的位姿/速度/接触力
+   状态接口，发布 `tf2_ros::TransformBroadcaster`（`world -> base_link`）、
+   `nav_msgs/msg/Odometry`（`/rov/odom`）、`sensor_msgs/msg/JointState`（`/joint_states`，
+   因模型无可动关节而恒为空）、`visualization_msgs/msg/MarkerArray`
+   （`/rov/environment_markers`：壁面 + 4 个接触垫受力柱状图），使 RViz2 与内嵌
+   MuJoCo 窗口实时同步。
+
+## 数值校验
+
+用 3 组随机 `(com_pos_world, orientation, ang_vel_world, lin_vel_world, t)` 状态
+分别调用 Python 参考实现（`mujoco_mppi_ws/src/env/hydrodynamics.py`，站位保持
+阵风预设）与本包的 `FossenHydrodynamics::compute()`，输出的六维力/力矩在全部
+打印精度（10 位小数）下逐位一致，满足 `CLAUDE.md` 要求的 `<1e-5` 数值一致性。
+
+在 `wave_profile:=calm` 下以 `u=0` 运行：ROV 因初始姿态与壁面重叠而被接触反力
+推离壁面，随后因净正浮力（约 `+1.96 N`）缓慢上浮至自由液面（`z_surface=1.0`）
+附近并稳定，`Y` 方向无漂移。在 `wave_profile:=station_keeping_gust` 下，`Y`
+方向机体速度在约 `8~12s` 内收敛至定常流速 `0.300 m/s`（`X`/`Z` 方向速度趋近于
+零），阵风窗口内可观察到额外的侧向/吸附扰动，均与预期物理行为一致。
+
+## 运行
+
+```bash
+colcon build --packages-up-to adhere_mujoco_hardware --symlink-install
+source install/setup.bash
+
+# 静水被动漂流（默认），带 MuJoCo 窗口 + RViz2
+ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py
+
+# 站位保持阵风工况，无头模式（无 GLFW 窗口），不启动 RViz2
+ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py \
+  wave_profile:=station_keeping_gust headless:=true use_rviz:=false
+```

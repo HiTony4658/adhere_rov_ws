@@ -32,9 +32,5 @@
 
 | 软件包 | 职责 |
 |---|---|
-| [`adhere_rov_description`](adhere_rov_description/README.md) | URDF/Xacro + MJCF + RViz/控制器参数配置 + 启动文件 |
+| [`simplified_v1_description`](simplified_v1_description/README.md) | URDF/Xacro + MJCF + RViz/控制器参数配置 + 启动文件 |
 
-## Phase 1 状态
-
-仅搭建目录骨架（`urdf/ xacro/ mjcf/ meshes/ config/ launch/`），尚未填充具体
-几何/惯量/接口声明内容。

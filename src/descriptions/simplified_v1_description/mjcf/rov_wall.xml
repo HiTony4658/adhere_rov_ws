@@ -1,0 +1,134 @@
+<mujoco model="rov_wall">
+  <!--
+    World frame: wall is a vertical plane at X=0, outward normal = +X.
+    Body frame: +X_B away from wall (pressing = -X_B toward wall), +Y_B left (horizontal sway),
+    +Z_B up (vertical climb/surge along the wall face). rov_base has identity orientation, so
+    body axes coincide with world axes. Global gravity remains 0 0 -9.81 (world -Z).
+    rov_base origin = vehicle CoM, starts at X = 0.125 (very close to the wall) and settles
+    under gravity + normal-thruster pressing force (-X) onto the 4 contact pads.
+  -->
+  <compiler angle="radian" autolimits="true"/>
+
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast" cone="elliptic"/>
+
+  <visual>
+    <!-- MuJoCo's <global> element has no "ambient" attribute; ambient illumination is set
+         via <headlight> (and per-light "ambient" below) instead. -->
+    <global elevation="-20"/>
+    <headlight ambient="0.3 0.3 0.3" diffuse="0.6 0.6 0.6" specular="0.3 0.3 0.3"/>
+  </visual>
+
+  <default>
+    <geom contype="1" conaffinity="1"/>
+    <joint damping="0.0"/>
+  </default>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.45 0.6 0.85" rgb2="0.05 0.08 0.15" width="256" height="256"/>
+    <texture type="2d" name="wall_tex" builtin="checker" rgb1="0.2 0.2 0.25" rgb2="0.3 0.3 0.35" width="128" height="128"/>
+    <material name="wall_mat" texture="wall_tex" texrepeat="4 4" reflectance="0.0"/>
+    <texture type="2d" name="floor_tex" builtin="checker" rgb1="0.9 0.9 0.9" rgb2="0.1 0.1 0.1" width="256" height="256"/>
+    <material name="floor_mat" texture="floor_tex" texrepeat="10 10" reflectance="0.1"/>
+    <material name="chassis_mat" rgba="1.0 0.5 0.0 1.0"/>
+    <material name="pad_mat" rgba="1.0 0.1 0.1 1.0"/>
+  </asset>
+
+  <worldbody>
+    <!-- Key light: directional, angled to light both the wall face and the ROV -->
+    <light name="key_light" pos="2 2 3" dir="-1 -1 -1.5" directional="true" diffuse="0.9 0.9 0.85" specular="0.3 0.3 0.3" ambient="0.1 0.1 0.1"/>
+    <!-- Fill light: opposite side, keeps the far side of the ROV from going dark -->
+    <light name="fill_light" pos="2 -2 1.5" dir="-1 1 -0.5" directional="true" diffuse="0.5 0.5 0.55" specular="0.1 0.1 0.1"/>
+
+    <!-- Default viewer camera: angled view of the vertical wall and the ROV -->
+    <camera name="wall_view" pos="2.5 2.0 1.5" xyaxes="-0.6441 0.7649 0 -0.2345 -0.1975 0.9519"/>
+
+    <!-- Visual reference floor: large horizontal grid plane at Z = -2.0 (ground reference only, not a physics constraint on the wall) -->
+    <geom name="floor_geom" type="plane" pos="0 0 -2.0" size="5 5 0.1" material="floor_mat" contype="1" conaffinity="0"/>
+
+    <!-- Water surface reference plane at Z = 1.0, matching HydroParams.z_surface. Visual only
+         (no collision), semi-transparent so the submerged/above-water region reads clearly. -->
+    <geom name="water_surface" type="plane" pos="0 0 1.0" size="3 3 0.01" rgba="0.2 0.6 0.9 0.25" contype="0" conaffinity="0"/>
+
+    <!-- Wall: static vertical plane at X=0, outward normal +X. Rendered as a thin box. -->
+    <body name="wall" pos="-0.01 0 0">
+      <geom name="wall_geom" type="box" size="0.01 2.0 2.0" material="wall_mat" friction="0.005 0.002 0.0001"/>
+      <!-- Water-boundary warning buoy: small sphere on the wall face marking Z = 1.0 -->
+      <geom name="water_boundary_marker" type="sphere" size="0.04" pos="0.02 0 1.0" rgba="1.0 0.6 0.0 0.9" contype="0" conaffinity="0"/>
+    </body>
+
+    <!-- ROV chassis: flat box, thin along X (wall-normal), L x W x H = 0.2 x 0.6 x 0.4 m (wide Y, narrow Z), mass ~20 kg -->
+    <body name="rov_base" pos="0.125 0 0.5">
+      <freejoint name="rov_free"/>
+      <!-- Augmented inertial mass (20 kg dry + hydrodynamic added mass ~6 kg mean) and
+           diaginertia augmented with hydrodynamic added rotational inertia, per CLAUDE.md
+           added-mass treatment avoids a separate added-mass numerical acceleration loop. -->
+      <inertial pos="0 0 0" mass="26.0" diaginertia="1.35 0.55 1.10"/>
+      <geom name="chassis_geom" type="box" size="0.1 0.3 0.2" material="chassis_mat" friction="0.005 0.002 0.0001"/>
+
+      <!-- 4 spherical contact pads at the 4 corners facing the wall, radius 0.035 m, bright
+           red/white for visibility. Named by wall-plane quadrant: Top/Bottom (Z),
+           Left/Right (Y, with +Y = left). -->
+      <!-- Anisotropic omni-wheel contact impedance: friction = [sliding, rolling-1, rolling-2]
+           captures directional rolling vs. lateral resistance; solref/solimp tuned for
+           realistic contact stiffness without penetration chatter or numerical instability. -->
+      <geom name="pad_TL" type="sphere" size="0.035" pos="-0.1 0.25 0.15" material="pad_mat"
+            friction="0.04 0.008 0.001" solref="0.005 1" solimp="0.9 0.98 0.001 2 2"/>
+      <geom name="pad_TR" type="sphere" size="0.035" pos="-0.1 -0.25 0.15" material="pad_mat"
+            friction="0.04 0.008 0.001" solref="0.005 1" solimp="0.9 0.98 0.001 2 2"/>
+      <geom name="pad_BL" type="sphere" size="0.035" pos="-0.1 0.25 -0.15" material="pad_mat"
+            friction="0.04 0.008 0.001" solref="0.005 1" solimp="0.9 0.98 0.001 2 2"/>
+      <geom name="pad_BR" type="sphere" size="0.035" pos="-0.1 -0.25 -0.15" material="pad_mat"
+            friction="0.04 0.008 0.001" solref="0.005 1" solimp="0.9 0.98 0.001 2 2"/>
+
+      <!-- Normal (pressing) thruster mount sites at the 4 corners, thrust toward wall (-X) -->
+      <site name="thr_N1_site" pos="0.0 0.25 0.15" size="0.025" rgba="1 0 0 1"/>
+      <site name="thr_N2_site" pos="0.0 -0.25 0.15" size="0.025" rgba="1 0 0 1"/>
+      <site name="thr_N3_site" pos="0.0 0.25 -0.15" size="0.025" rgba="1 0 0 1"/>
+      <site name="thr_N4_site" pos="0.0 -0.25 -0.15" size="0.025" rgba="1 0 0 1"/>
+
+      <!-- Vectored tangential thrusters at the 4 corners, acting in the Y-Z (wall) plane,
+           angled 30 deg from horizontal: cos(30)=0.8660, sin(30)=0.5000.
+           TL points Right-Up, TR points Left-Up, BL points Right-Down, BR points Left-Down
+           (Right = -Y, since +Y = left). Local zaxis is set to the thrust direction so the
+           gear can simply push along the site's local +Z, which also makes the site frame's
+           Z-axis arrow (rendered in the viewer) point along the true thrust direction. -->
+      <site name="thr_T5_site" pos="0.0 0.25 0.15" size="0.025" rgba="1 1 0 1" zaxis="0 -0.8660 0.5000"/>
+      <site name="thr_T6_site" pos="0.0 -0.25 0.15" size="0.025" rgba="0 1 1 1" zaxis="0 0.8660 0.5000"/>
+      <site name="thr_T7_site" pos="0.0 0.25 -0.15" size="0.025" rgba="1 1 0 1" zaxis="0 -0.8660 -0.5000"/>
+      <site name="thr_T8_site" pos="0.0 -0.25 -0.15" size="0.025" rgba="0 1 1 1" zaxis="0 0.8660 -0.5000"/>
+
+      <!-- Touch-sensor zones colocated with the 4 contact pads, used by batched MPPI rollouts
+           (mujoco.rollout) to read per-pad normal contact force via sensordata without needing
+           per-contact mj_contactForce parsing (which the rollout API does not expose). Computed
+           from actual contact normal forces, not penetration depth, same as get_contact_normal_forces. -->
+      <site name="pad_TL_site" type="sphere" size="0.035" pos="-0.1 0.25 0.15"/>
+      <site name="pad_TR_site" type="sphere" size="0.035" pos="-0.1 -0.25 0.15"/>
+      <site name="pad_BL_site" type="sphere" size="0.035" pos="-0.1 0.25 -0.15"/>
+      <site name="pad_BR_site" type="sphere" size="0.035" pos="-0.1 -0.25 -0.15"/>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <!-- Normal (pressing) thrusters: force along -X (toward wall), bounds [-40, 40] N -->
+    <general name="thr_N1" site="thr_N1_site" gear="-1 0 0 0 0 0" ctrlrange="-40 40" gaintype="fixed" gainprm="1" biastype="none"/>
+    <general name="thr_N2" site="thr_N2_site" gear="-1 0 0 0 0 0" ctrlrange="-40 40" gaintype="fixed" gainprm="1" biastype="none"/>
+    <general name="thr_N3" site="thr_N3_site" gear="-1 0 0 0 0 0" ctrlrange="-40 40" gaintype="fixed" gainprm="1" biastype="none"/>
+    <general name="thr_N4" site="thr_N4_site" gear="-1 0 0 0 0 0" ctrlrange="-40 40" gaintype="fixed" gainprm="1" biastype="none"/>
+
+    <!-- Vectored tangential thrusters: thrust direction baked into each site's zaxis, so the
+         gear simply acts along the oriented site's local +Z, bounds [-40, 40] N -->
+    <general name="thr_T5" site="thr_T5_site" gear="0 0 1 0 0 0" ctrlrange="-40 40" gaintype="fixed" gainprm="1" biastype="none"/>
+    <general name="thr_T6" site="thr_T6_site" gear="0 0 1 0 0 0" ctrlrange="-40 40" gaintype="fixed" gainprm="1" biastype="none"/>
+    <general name="thr_T7" site="thr_T7_site" gear="0 0 1 0 0 0" ctrlrange="-40 40" gaintype="fixed" gainprm="1" biastype="none"/>
+    <general name="thr_T8" site="thr_T8_site" gear="0 0 1 0 0 0" ctrlrange="-40 40" gaintype="fixed" gainprm="1" biastype="none"/>
+  </actuator>
+
+  <sensor>
+    <!-- Pad normal contact-force magnitude (N), order fixed [TL, TR, BL, BR] matching
+         PAD_GEOM_NAMES / F_N1..4. Read via sensordata in batched MPPI rollouts. -->
+    <touch name="touch_pad_TL" site="pad_TL_site"/>
+    <touch name="touch_pad_TR" site="pad_TR_site"/>
+    <touch name="touch_pad_BL" site="pad_BL_site"/>
+    <touch name="touch_pad_BR" site="pad_BR_site"/>
+  </sensor>
+</mujoco>

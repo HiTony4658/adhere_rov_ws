@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>adhere_rov_description</name>
+  <name>simplified_v1_description</name>
   <version>0.1.0</version>
   <description>
     URDF/Xacro (ros2_control tags) and MuJoCo MJCF (rov_wall.xml) description of the
@@ -15,12 +15,19 @@
 
   <exec_depend>urdf</exec_depend>
   <exec_depend>xacro</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>rviz2</exec_depend>
   <exec_depend>ros2_control</exec_depend>
   <exec_depend>ros2_controllers</exec_depend>
   <exec_depend>controller_manager</exec_depend>
-  <exec_depend>adhere_mujoco_hardware</exec_depend>
+  <!-- adhere_mujoco_hardware is referenced by name as a pluginlib hardware plugin from
+       xacro/ros2_control.xacro, and in turn reads this package's mjcf/ share directory at
+       runtime: a genuine mutual runtime coupling. It is intentionally left undeclared
+       here (and on the other side) because declaring it in both package.xml files creates
+       a build-order cycle colcon cannot resolve; pluginlib/ament_index resolve both
+       directions purely from the installed package index, not from package.xml. -->
+
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

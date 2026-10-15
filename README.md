@@ -145,7 +145,7 @@ adhere_rov_ws/
     ├── interfaces/            # 消息/服务接口层
     │   └── adhere_control_msgs/
     ├── descriptions/          # URDF/Xacro/MJCF 机器人描述层
-    │   └── adhere_rov_description/
+    │   └── simplified_v1_description/
     ├── hardwares/             # ros2_control 硬件接口层（MuJoCo 500Hz 后端）
     │   └── adhere_mujoco_hardware/
     ├── controllers/           # 控制算法层（基础设施 + KAMR-MPPI 插件）
@@ -172,20 +172,20 @@ adhere_rov_ws/
 cd ~/Research/adhere_rov_ws
 rosdep install --from-paths src --ignore-src -r -y
 
-# 2. 构建整个工作空间
+# 2. 构建整个工作空间（MuJoCo 需预先安装在 $MUJOCO_DIR / ~/.mujoco/mujoco-* / /opt/mujoco）
 colcon build --symlink-install
-
-# 3. Source 并启动（Phase 2 起提供真实 launch 文件）
 source install/setup.bash
-# ros2 launch adhere_mujoco_hardware adhere_mujoco_node.launch.py   # TODO(Phase 2)
+
+# 3a. 静态几何检视（RobotModel + TF，无物理仿真）
+ros2 launch simplified_v1_description visualize.launch.py
+
+# 3b. 零控制输入（u=0）被动随波漂流仿真，MuJoCo 窗口 + RViz2 双可视化同步
+ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py
+ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py wave_profile:=station_keeping_gust
 ```
 
-Phase 1 阶段（当前）：仅搭建目录骨架、`package.xml`/`CMakeLists.txt`（源码以
-`# TODO(Phase 2)` 占位，保证 `colcon build` 在空骨架下可成功通过）与中文文档。
-
-```bash
-colcon list      # 验证 6 个软件包清单均可被正确解析
-```
+各命令的完整参数说明见 [`src/descriptions/simplified_v1_description/README.md`](src/descriptions/simplified_v1_description/README.md)
+与 [`src/hardwares/adhere_mujoco_hardware/README.md`](src/hardwares/adhere_mujoco_hardware/README.md)。
 
 ---
 
@@ -193,8 +193,8 @@ colcon list      # 验证 6 个软件包清单均可被正确解析
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| **Phase 1** | 工作空间骨架、6 个包清单、全量中文 README | ✅ 当前阶段 |
-| **Phase 2** | `AdhereMujocoHardware` 500Hz 读写循环 + Fossen 水动力 + `MujocoViewer` | 待开始 |
+| **Phase 1** | 工作空间骨架、6 个包清单、全量中文 README | ✅ 完成 |
+| **Phase 2** | `AdhereMujocoHardware` 500Hz 读写循环 + Fossen 水动力 + 可插拔水流环境 + `MujocoViewer`/RViz2 双可视化 | ✅ 当前阶段 |
 | **Phase 3** | `adhere_controller_common`（`CtrlInterfaces`/FSM/数学工具）实现 | 待开始 |
 | **Phase 4** | `AdhereKamrController` 200Hz 内环（PD + DOB + 12D OSQP） | 待开始 |
 | **Phase 5** | 20Hz 异步 CUDA MPPI 外环滚动线程（`sm_72`/`sm_75` 双架构） | 待开始 |
