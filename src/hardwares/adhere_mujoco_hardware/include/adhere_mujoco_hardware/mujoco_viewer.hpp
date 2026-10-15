@@ -104,6 +104,11 @@ private:
 
   int pert_select_body_ = -1;
 
+  // Previous raw (top-down, GLFW-native) cursor position, used to compute motion deltas
+  // independent of the bottom-up flip applied to uistate_.y for mj*/mjUI consumers.
+  double last_raw_x_ = 0.0;
+  double last_raw_y_ = 0.0;
+
   std::thread thread_;
   std::atomic<bool> running_{false};
 };

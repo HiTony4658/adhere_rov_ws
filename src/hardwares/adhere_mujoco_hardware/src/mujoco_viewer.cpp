@@ -240,12 +240,23 @@ void MujocoViewer::framebufferSizeCallback(GLFWwindow * window, int width, int h
 
 void MujocoViewer::onCursorPos(double x, double y)
 {
-  const double dx = x - uistate_.x;
-  const double dy = y - uistate_.y;
+  const int fb_h = std::max(1, uistate_.rect[0].height);
+
+  // GLFW's cursor callback is top-down (y=0 at the window's top edge), but mjrRect/mjuiState
+  // use MuJoCo's bottom-up (OpenGL) convention -- mjrRect's own field is literally named
+  // "bottom", not "top". Without this flip, mjui_event()'s internal item/section hit-testing
+  // silently picks the wrong row (or nothing), which is why clicks inside the panels appeared
+  // to do nothing.
+  const double dx = x - last_raw_x_;
+  const double dy_raw = y - last_raw_y_;
+  last_raw_x_ = x;
+  last_raw_y_ = y;
+  const double y_mj = fb_h - y;
+
   uistate_.dx = dx;
-  uistate_.dy = dy;
+  uistate_.dy = -dy_raw;
   uistate_.x = x;
-  uistate_.y = y;
+  uistate_.y = y_mj;
   uistate_.type = mjEVENT_MOVE;
 
   // Route to whichever UI panel currently owns the mouse (or none, for the 3D viewport).
@@ -258,9 +269,8 @@ void MujocoViewer::onCursorPos(double x, double y)
   (void)it;
 
   if (uistate_.mouserect == 0 || uistate_.mouserect == 3) {
-    const int fb_h = uistate_.rect[0].height;
-    const double reldx = dx / std::max(1, fb_h);
-    const double reldy = dy / std::max(1, fb_h);
+    const double reldx = dx / fb_h;
+    const double reldy = dy_raw / fb_h;
 
     if (uistate_.control && pert_.active) {
       const int action = uistate_.left ? mjMOUSE_MOVE_H : (uistate_.right ? mjMOUSE_MOVE_H : 0);
@@ -292,8 +302,11 @@ void MujocoViewer::onMouseButton(int button, int act, int mods)
 
   double x = 0.0, y = 0.0;
   glfwGetCursorPos(window_, &x, &y);
+  const int fb_h = std::max(1, uistate_.rect[0].height);
+  last_raw_x_ = x;
+  last_raw_y_ = y;
   uistate_.x = x;
-  uistate_.y = y;
+  uistate_.y = fb_h - y;  // see onCursorPos: mjrRect/mjuiState are bottom-up, GLFW is top-down.
 
   // Resolve which rectangle (left UI / right UI / viewport) owns this click.
   uistate_.mouserect = 3;

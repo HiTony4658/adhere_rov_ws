@@ -275,3 +275,63 @@
   交付数据样本（`ros2 topic echo`/`rclpy` 订阅者在能通过 `ros2 topic info`
   看到已匹配的 publisher 的情况下仍收到 0 条消息），判定为本次会话沙箱环境
   的进程间网络发现限制，与本次代码改动无关（已用进程内诊断日志绕过验证）。
+
+---
+
+## Phase 2.7（2026-10-15）：移除终端造浪控制台、mjUI 面板尺寸/点击修复
+
+### 目标
+
+Phase 2.6 发布后，在真实桌面会话中实际操作 MuJoCo 交互式窗口时发现两个新问题，
+外加一项简化需求：
+
+1. **终端造浪控制台冗余**：`MujocoViewer` 左侧边栏已提供等效的 `1`/`2` 键与
+   "Wave Environment" 单选按钮，`wave_console_node`（独立终端 + 轮询输入）不再
+   必要。
+2. **左右侧边栏溢出窗口**：`mjr_makeContext(model_, &con_, mjFONTSCALE_150)`
+   在非 HiDPI 显示器上误用 150% 字体主题缩放——`mjui_resize()`/`mjui_render()`
+   按该缩放后的主题间距计算面板的真实渲染宽度，与 `ui0_.width`/`ui1_.width`
+   指定的 `310px` 不一致，导致两侧面板实际渲染宽度远超 `310px` 并溢出窗口
+   右边缘。
+3. **点击侧边栏内控件无响应**：`MujocoViewer::onCursorPos`/`onMouseButton` 把
+   GLFW 原生的顶部起点（top-down）`y` 坐标直接写入 `uistate_.y`，而
+   `mjrRect`/`mjuiState` 系列 API 全部遵循 MuJoCo/OpenGL 的底部起点
+   （bottom-up）约定（`mjrRect` 的字段字面上就叫 `bottom` 而非 `top`）。
+   未做翻转时，`mjui_event()` 内部按 `y` 坐标做的"命中测试"（判断点击落在
+   哪一个条目上）系统性地算错，导致点击在侧边栏内几乎总是找不到对应控件、
+   看起来"没有响应"。
+
+### 修复内容
+
+1. **删除 `wave_console_node`**：`git rm src/.../src/wave_console_node.cpp`；
+   `CMakeLists.txt` 删除其 `add_executable`/`ament_target_dependencies`/
+   `install(TARGETS ...)` 条目；`launch/mujoco_sim.launch.py` 删除
+   `spawn_wave_console` 参数与自动弹出终端的 `OpaqueFunction`
+   （`gnome-terminal`/`xterm` 探测逻辑整体移除）。`/rov/wave_mode_cmd` 话题
+   订阅本身保留在 `adhere_mujoco_node.cpp` 中，作为脚本化/远程控制的入口
+   （与 `MujocoViewer` 的 `1`/`2` 键是两个等价入口，都调用同一个
+   `AdhereMujocoHardware::setWaveMode(int)`）。
+2. **`mjFONTSCALE_150` -> `mjFONTSCALE_100`**（`mujoco_viewer.cpp`）：本机显示器
+   framebuffer 像素与窗口像素 1:1（非 HiDPI），没有使用 150% 缩放的依据。
+3. **GLFW top-down -> MuJoCo bottom-up 的 `y` 坐标翻转**（`mujoco_viewer.cpp`
+   `onCursorPos`/`onMouseButton`）：新增 `last_raw_x_`/`last_raw_y_` 成员，
+   单独保存"原始"（未翻转）光标位置供相机环绕/平移/缩放与 `mjvPerturb`
+   拖拽增量计算使用（这部分不受此 bug 影响，继续用原始 delta）；同时计算
+   `y_mj = framebuffer_height - y` 写入 `uistate_.y`，专供 `mjui_event()` 使用。
+
+### 面板宽度行为说明（非 bug，设计既如此）
+
+mjUI 面板宽度是**固定像素值**（`kSidePanelWidth = 310`），不是窗口宽度的百分比；
+这是 MuJoCo 官方 `simulate` 应用本身的惯例，侧边栏不会随窗口拉伸而连续缩放
+宽度，拉伸窗口时多出/减少的空间全部由中间 3D 视口吸收。唯一的例外是极窄窗口
+下的降级保护：`layoutRects()` 用 `min(310, fb_width/3)` 做上限截断，避免窗口
+宽度小于 `3*310=930px` 时两侧面板把 3D 视口完全挤没。
+
+### 验证结果
+
+- `colcon build --symlink-install`（全工作空间 6/6 包）零警告通过。
+- 真实桌面会话（`:0`，非 headless）手动截图验证：两侧面板完全落在
+  `1280x900` 窗口边界内，不再溢出；点击 `thr_N1` 滑条后其数值从 `0`
+  正确变为点击位置对应的 `34.4`，随后依次点击 `thr_N2..N4` 并观察到
+  `Pad TL/TR/BL/BR` 遥测从全零变为 `12.5/12.5/55.3/55.3 N`（ROV 被压向壁面
+  产生真实接触反力），证明侧边栏滑条点击已能正确驱动物理仿真。

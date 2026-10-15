@@ -132,9 +132,10 @@ int main(int argc, char ** argv)
   auto marker_pub = node->create_publisher<visualization_msgs::msg::MarkerArray>(
     "/rov/environment_markers", 10);
 
-  // Runtime wave-maker switch (CLAUDE.md Phase 2.5 Stage 2.3): wave_console_node publishes
-  // 1 (calm) / 2 (gust) here; forwarded straight to the one live AdhereMujocoHardware instance
-  // via its single-instance back-pointer (see adhere_mujoco_hardware.cpp).
+  // Runtime wave-maker switch (CLAUDE.md Phase 2.5 Stage 2.3): a scripted/remote-control entry
+  // point alongside MujocoViewer's own in-window 1/2 keys (the primary interactive control,
+  // CLAUDE.md Phase 2.6). Forwarded straight to the one live AdhereMujocoHardware instance via
+  // its single-instance back-pointer (see adhere_mujoco_hardware.cpp).
   auto wave_mode_sub = node->create_subscription<std_msgs::msg::Int32>(
     "/rov/wave_mode_cmd", 10,
     [](const std_msgs::msg::Int32::SharedPtr msg) {

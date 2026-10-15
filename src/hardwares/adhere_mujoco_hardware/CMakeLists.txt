@@ -106,18 +106,12 @@ ament_target_dependencies(adhere_mujoco_node
   std_msgs
 )
 
-add_executable(wave_console_node src/wave_console_node.cpp)
-ament_target_dependencies(wave_console_node
-  rclcpp
-  std_msgs
-)
-
 install(TARGETS ${PROJECT_NAME}
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
 )
-install(TARGETS adhere_mujoco_node wave_console_node
+install(TARGETS adhere_mujoco_node
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -10,8 +10,8 @@
 漂流"（calm 水域下的浮力/阻力漂移，以及造浪工况下的侧向/吸附漂移）。
 
 环境水流不再是启动时静态绑定的，而是**运行时可热切换**的：节点启动时恒定从
-静水（Calm Water）开始，用户可随时通过交互式终端控制台 `wave_console_node`
-开启/关闭造浪（详见"运行时造浪机切换"一节）。
+静水（Calm Water）开始，用户可随时在内嵌 MuJoCo 窗口中按 `1`/`2` 键或点击左侧
+边栏的 "Wave Environment" 单选按钮开启/关闭造浪（详见"运行时造浪机切换"一节）。
 
 ## 文件结构
 
@@ -28,8 +28,7 @@ src/
 ├── fossen_hydrodynamics.cpp
 ├── flow_environment_plugin.cpp
 ├── mujoco_viewer.cpp
-├── adhere_mujoco_node.cpp          # 500Hz ControllerManager 循环 + 100Hz TF/Odom/Marker 发布
-└── wave_console_node.cpp           # 交互式造浪机终端控制台（发布 /rov/wave_mode_cmd）
+└── adhere_mujoco_node.cpp          # 500Hz ControllerManager 循环 + 100Hz TF/Odom/Marker 发布
 
 config/
 └── mujoco_sim.rviz                 # RViz2 显示配置（Odometry + EnvironmentMarkers，TF 坐标系缩放 0.12）
@@ -141,33 +140,18 @@ hardware_interface::return_type write() override;  // 无参数！Foxy 特有
   `StationKeepingGustPlugin`，而不是原始仿真时间——这样无论用户在第几秒按下
   `2`，两段阵风都会从造浪开始的那一刻重新播放，不会被仿真已运行的时长"吃掉"。
 - **切回模式 `1`** 时立即恢复零环境流速（`v_flow = 0`），不经过任何过渡。
-- 通过话题 `/rov/wave_mode_cmd`（`std_msgs/msg/Int32`，`1` 或 `2`）下发指令，
-  由 `adhere_mujoco_node` 转发给当前唯一存活的 `AdhereMujocoHardware` 实例
-  （`AdhereMujocoHardware::activeInstance()`，与 `mjcb_passive` 单例回调复用
-  同一条"单进程单实例"架构假设）。
-
-### 交互式终端控制台 `wave_console_node`
-
-```text
-========================================================
-  Underwater ROV Wave Environment Console (造浪机控制台)
-========================================================
-  [1] Calm Water Environment (静水环境 - 默认/停止造浪)
-  [2] Wave Gust Scenario     (开启造浪: 0.3m/s横流 + 双阵风冲击)
-  [q] Quit Console           (退出控制台)
---------------------------------------------------------
-Current Mode: [1] Calm Water | Enter selection (1/2/q):
-```
-
-`mujoco_sim.launch.py` 默认会自动检测 `gnome-terminal`/`xterm` 并在独立终端窗口
-中启动该控制台（`spawn_wave_console:=false` 可关闭自动弹窗）；也可以在任意终端
-手动运行：
-
-```bash
-ros2 run adhere_mujoco_hardware wave_console_node
-```
-
-输入 `1` 切回静水、`2` 开启造浪、`q` 退出控制台（不影响仿真本身继续运行）。
+- 两个等价的指令入口，都会调用同一个 `AdhereMujocoHardware::setWaveMode(int)`：
+  - **`MujocoViewer`**（主要入口）：按 `1`/`2` 键或点击左侧边栏 "Wave Environment"
+    单选按钮，经 `MujocoVisBridge::wave_mode_cmd`（边沿触发的原子请求槽位）
+    直接送达 `write()`，无需经过 ROS 话题/DDS。
+  - 话题 `/rov/wave_mode_cmd`（`std_msgs/msg/Int32`，`1` 或 `2`）：供脚本化/
+    远程场景下发指令，由 `adhere_mujoco_node` 转发给当前唯一存活的
+    `AdhereMujocoHardware` 实例（`AdhereMujocoHardware::activeInstance()`，
+    与 `mjcb_passive` 单例回调复用同一条"单进程单实例"架构假设），例如：
+    ```bash
+    ros2 topic pub /rov/wave_mode_cmd std_msgs/msg/Int32 "{data: 2}" --once   # 开启造浪
+    ros2 topic pub /rov/wave_mode_cmd std_msgs/msg/Int32 "{data: 1}" --once   # 切回静水
+    ```
 
 ## `MujocoVisBridge` 与 `MujocoViewer`：500Hz↔60Hz 双向解耦 + 完整交互式 GUI
 
@@ -273,17 +257,13 @@ ROV 位姿 `(X,Y,Z,φ,θ,ψ)`、机体速度 `(vx,vy,vz)`。
 colcon build --packages-up-to adhere_mujoco_hardware --symlink-install
 source install/setup.bash
 
-# 默认：静水启动，带 MuJoCo 窗口 + RViz2，并自动弹出造浪机控制台终端
+# 默认：静水启动，带 MuJoCo 窗口 + RViz2；在 MuJoCo 窗口中按 1/2 切换造浪
 ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py
 
-# 无头模式（无 GLFW 窗口），不启动 RViz2，不自动弹出控制台终端
-ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py \
-  headless:=true use_rviz:=false spawn_wave_console:=false
+# 无头模式（无 GLFW 窗口），不启动 RViz2
+ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py headless:=true use_rviz:=false
 
-# 在任意终端手动启动造浪机控制台（若自动弹窗被关闭，或想在已运行的仿真上手动控制）
-ros2 run adhere_mujoco_hardware wave_console_node
-
-# 不使用控制台，直接发送一次性造浪切换指令
+# 无 GUI 窗口时，用话题一次性切换造浪（例如配合 headless:=true 做脚本化测试）
 ros2 topic pub /rov/wave_mode_cmd std_msgs/msg/Int32 "{data: 2}" --once   # 开启造浪
 ros2 topic pub /rov/wave_mode_cmd std_msgs/msg/Int32 "{data: 1}" --once   # 切回静水
 ```
