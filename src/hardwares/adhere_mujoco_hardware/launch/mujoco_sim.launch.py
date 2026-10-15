@@ -42,18 +42,28 @@ def generate_launch_description():
     xacro_file = os.path.join(description_share, "urdf", "simplified_v1.urdf.xacro")
 
     def _make_robot_description(context):
-        processed = xacro.process_file(
-            xacro_file,
-            mappings={"headless": context.launch_configurations["headless"]},
-        ).toxml()
+        # Pure-xacro decoupling (CLAUDE.md Phase 2.6 Stage 2.1): simplified_v1.urdf.xacro takes
+        # no `headless` argument -- it is a 100% simulation-agnostic robot description.
+        # `headless` is instead passed as a plain ROS 2 node parameter to adhere_mujoco_node,
+        # which forwards it to AdhereMujocoHardware::setHeadless() after configure() but before
+        # start_components() triggers start() (where MujocoViewer is actually constructed).
+        processed = xacro.process_file(xacro_file).toxml()
+        headless_value = context.launch_configurations["headless"] == "true"
         return [
+            Node(
+                package="robot_state_publisher",
+                executable="robot_state_publisher",
+                name="robot_state_publisher",
+                output="screen",
+                parameters=[{"robot_description": processed}],
+            ),
             Node(
                 package="adhere_mujoco_hardware",
                 executable="adhere_mujoco_node",
                 name="adhere_mujoco_node",
                 output="screen",
-                parameters=[{"robot_description": processed}],
-            )
+                parameters=[{"robot_description": processed, "headless": headless_value}],
+            ),
         ]
 
     adhere_mujoco_node = OpaqueFunction(function=_make_robot_description)

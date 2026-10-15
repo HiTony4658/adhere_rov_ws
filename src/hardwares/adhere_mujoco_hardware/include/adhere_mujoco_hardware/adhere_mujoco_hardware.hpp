@@ -5,6 +5,7 @@
 #include <atomic>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <mujoco/mujoco.h>
@@ -71,8 +72,16 @@ public:
   // Single-instance back-pointer accessor (see the mjcb_passive rationale in
   // adhere_mujoco_hardware.cpp): lets adhere_mujoco_node's wave-mode subscriber reach the one
   // live AdhereMujocoHardware instance without threading a pointer through pluginlib/
-  // ResourceManager.
+  // ResourceManager. Also used by adhere_mujoco_node to call setHeadless() between
+  // ResourceManager construction (which runs configure()) and start_components() (which runs
+  // start()), since pure-xacro decoupling (CLAUDE.md Phase 2.6 Stage 2.1) means headless is no
+  // longer a <ros2_control> hardware_parameters entry.
   static AdhereMujocoHardware * activeInstance();
+
+  // Must be called after configure() (i.e. after the ResourceManager that owns this instance
+  // has been constructed) and before start_components() triggers start(), since start() is
+  // what constructs MujocoViewer with the requested headless flag.
+  void setHeadless(bool headless) { headless_ = headless; }
 
 private:
   // Installed as the body of the global mjcb_passive hook (see adhere_mujoco_hardware.cpp);
@@ -110,6 +119,13 @@ private:
   int body_id_ = -1;
   std::array<int, 4> pad_touch_sensor_adr_{};
   std::array<int, kNumThrusters> actuator_id_{};
+
+  // Body-local (y, z) of the 4 pad sites, resolved at configure() time from
+  // model_->site_pos[pad_*_site] instead of being hardcoded (CLAUDE.md Phase 2.6 Stage 2.1
+  // bug #6): used by read()'s v_sep,i = v_x,b + omega_y*z_i - omega_z*y_i formula.
+  std::array<std::pair<double, double>, 4> pad_yz_{};
+
+  bool headless_ = false;
 
   double sim_time_ = 0.0;
   long long step_count_ = 0;

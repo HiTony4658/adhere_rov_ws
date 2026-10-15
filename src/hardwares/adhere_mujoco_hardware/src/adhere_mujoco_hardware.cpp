@@ -23,16 +23,8 @@ rclcpp::Logger logger() { return rclcpp::get_logger("adhere_mujoco_hardware"); }
 // required for <1e-5 numerical parity.
 AdhereMujocoHardware * g_active_instance = nullptr;
 
-bool parseBoolParam(
-  const std::unordered_map<std::string, std::string> & params, const std::string & key,
-  bool default_value)
-{
-  const auto it = params.find(key);
-  if (it == params.end()) {
-    return default_value;
-  }
-  return it->second == "true" || it->second == "1";
-}
+constexpr const char * kPadSiteNames[4] = {
+  "pad_TL_site", "pad_TR_site", "pad_BL_site", "pad_BR_site"};
 }  // namespace
 
 AdhereMujocoHardware::~AdhereMujocoHardware()
@@ -54,8 +46,6 @@ hardware_interface::return_type AdhereMujocoHardware::configure(
   if (configure_default(info) != hardware_interface::return_type::OK) {
     return hardware_interface::return_type::ERROR;
   }
-
-  const bool headless = parseBoolParam(info_.hardware_parameters, "headless", false);
 
   const std::string pkg_share =
     ament_index_cpp::get_package_share_directory("simplified_v1_description");
@@ -82,6 +72,16 @@ hardware_interface::return_type AdhereMujocoHardware::configure(
       return hardware_interface::return_type::ERROR;
     }
     pad_touch_sensor_adr_[i] = model_->sensor_adr[sensor_id];
+
+    // CLAUDE.md Phase 2.6 Stage 2.1 bug #6: resolve pad body-local (y, z) from the MJCF site
+    // definition at runtime instead of hardcoding it, so this hardware plugin never silently
+    // drifts out of sync with mjcf/rov_wall.xml's pad_*_site positions.
+    const int site_id = mj_name2id(model_, mjOBJ_SITE, kPadSiteNames[i]);
+    if (site_id < 0) {
+      RCLCPP_ERROR(logger(), "Site '%s' not found in MJCF", kPadSiteNames[i]);
+      return hardware_interface::return_type::ERROR;
+    }
+    pad_yz_[i] = {model_->site_pos[3 * site_id + 1], model_->site_pos[3 * site_id + 2]};
   }
 
   for (size_t i = 0; i < kThrusterNames.size(); ++i) {
@@ -99,15 +99,20 @@ hardware_interface::return_type AdhereMujocoHardware::configure(
   gust_plugin_ = std::make_unique<StationKeepingGustPlugin>();
   wave_mode_.store(1);
   wave_trigger_time_.store(0.0);
-  RCLCPP_INFO(
-    logger(), "AdhereMujocoHardware: starting in Calm Water mode, headless=%s",
-    headless ? "true" : "false");
+  RCLCPP_INFO(logger(), "AdhereMujocoHardware: configured, starting in Calm Water mode");
 
   vis_bridge_ = std::make_shared<MujocoVisBridge>(model_->nq, model_->nv);
-  viewer_ = std::make_unique<MujocoViewer>(model_, vis_bridge_, headless);
+  // MujocoViewer is deferred to start(): pure-xacro decoupling (CLAUDE.md Phase 2.6 Stage 2.1)
+  // means `headless` is no longer known at configure() time -- it arrives later via
+  // setHeadless(), called by adhere_mujoco_node through activeInstance() after this configure()
+  // call returns but before resource_manager->start_components() triggers start().
 
   hw_states_.fill(0.0);
   hw_commands_.fill(0.0);
+
+  // Set before start()/stop() so setHeadless() can reach this instance even though
+  // mjcb_passive (which also needs data_ to exist) is only installed in start().
+  g_active_instance = this;
 
   return hardware_interface::return_type::OK;
 }
@@ -166,14 +171,19 @@ hardware_interface::return_type AdhereMujocoHardware::start()
   if (!data_) {
     return hardware_interface::return_type::ERROR;
   }
-  mj_forward(model_, data_);
 
-  g_active_instance = this;
   mjcb_passive = [](const mjModel * m, mjData * d) {
     if (g_active_instance && g_active_instance->data_ == d) {
       g_active_instance->applyHydrodynamics(m, d);
     }
   };
+
+  // Zero-delay two-stage MuJoCo step contract (CLAUDE.md Phase 2.6 Stage 3.1): mj_step1() here
+  // seeds xipos/xquat/cvel/sensordata for the first read() call; write() then alternates
+  // mj_step2() (finish current step) + mj_step1() (recompute kinematics/sensors for the new
+  // state) so read() never observes 1-tick-stale derived quantities.
+  mj_resetData(model_, data_);
+  mj_step1(model_, data_);
 
   sim_time_ = 0.0;
   sim_time_atomic_.store(0.0);
@@ -182,6 +192,10 @@ hardware_interface::return_type AdhereMujocoHardware::start()
   wave_mode_.store(1);
   wave_trigger_time_.store(0.0);
 
+  // Deferred from configure() (CLAUDE.md Phase 2.6 Stage 2.1): headless_ is only known now,
+  // set by adhere_mujoco_node via setHeadless() between ResourceManager construction and
+  // start_components().
+  viewer_ = std::make_unique<MujocoViewer>(model_, vis_bridge_, headless_);
   viewer_->start();
   status_ = hardware_interface::status::STARTED;
   return hardware_interface::return_type::OK;
@@ -191,10 +205,10 @@ hardware_interface::return_type AdhereMujocoHardware::stop()
 {
   if (viewer_) {
     viewer_->stop();
+    viewer_.reset();
   }
   if (g_active_instance == this) {
     mjcb_passive = nullptr;
-    g_active_instance = nullptr;
   }
   if (data_) {
     mj_deleteData(data_);
@@ -248,9 +262,18 @@ void AdhereMujocoHardware::applyHydrodynamics(const mjModel * m, mjData * d)
 
   const Wrench wrench = FossenHydrodynamics::compute(state, t_eval, params);
 
-  const mjtNum force[3] = {wrench.force_world.x(), wrench.force_world.y(), wrench.force_world.z()};
+  // Interactive mouse perturbation (CLAUDE.md Phase 2.6 Stage 3.1): MujocoViewer writes the
+  // Ctrl+drag wrench it computed on its own secondary d_vis_ into vis_bridge_->xfrc_perturb;
+  // folded into the same mj_applyFT call as the hydrodynamic wrench so both land in
+  // qfrc_passive at the same point in the step.
+  const mjtNum force[3] = {
+    wrench.force_world.x() + vis_bridge_->xfrc_perturb[0].load(),
+    wrench.force_world.y() + vis_bridge_->xfrc_perturb[1].load(),
+    wrench.force_world.z() + vis_bridge_->xfrc_perturb[2].load()};
   const mjtNum torque[3] = {
-    wrench.torque_world.x(), wrench.torque_world.y(), wrench.torque_world.z()};
+    wrench.torque_world.x() + vis_bridge_->xfrc_perturb[3].load(),
+    wrench.torque_world.y() + vis_bridge_->xfrc_perturb[4].load(),
+    wrench.torque_world.z() + vis_bridge_->xfrc_perturb[5].load()};
   const mjtNum point[3] = {
     state.com_pos_world.x(), state.com_pos_world.y(), state.com_pos_world.z()};
   mj_applyFT(m, d, force, torque, point, body_id_, d->qfrc_passive);
@@ -312,14 +335,12 @@ hardware_interface::return_type AdhereMujocoHardware::read()
   hw_states_[kOdom + 9] = lin_vel_body.z();
 
   // pad_contact: normal force (touch sensor) + separation velocity, CLAUDE.md Sec.4.2:
-  // v_sep,i = v_x,b + omega_y * z_i - omega_z * y_i.
-  static constexpr std::array<std::pair<double, double>, 4> kPadYZ = {
-    std::make_pair(0.25, 0.15), std::make_pair(-0.25, 0.15), std::make_pair(0.25, -0.15),
-    std::make_pair(-0.25, -0.15)};
+  // v_sep,i = v_x,b + omega_y * z_i - omega_z * y_i. (y_i, z_i) come from pad_yz_, resolved at
+  // configure() time from model_->site_pos -- never hardcoded (CLAUDE.md Phase 2.6 bug #6).
   for (size_t i = 0; i < kPadNames.size(); ++i) {
     hw_states_[kPadContact + i] = data_->sensordata[pad_touch_sensor_adr_[i]];
-    const double y_i = kPadYZ[i].first;
-    const double z_i = kPadYZ[i].second;
+    const double y_i = pad_yz_[i].first;
+    const double z_i = pad_yz_[i].second;
     hw_states_[kPadContact + 4 + i] =
       lin_vel_body.x() + ang_vel_body.y() * z_i - ang_vel_body.z() * y_i;
   }
@@ -333,18 +354,44 @@ hardware_interface::return_type AdhereMujocoHardware::write()
     return hardware_interface::return_type::ERROR;
   }
 
-  // hw_commands_ stays all-zero with no controller spawned -- this is exactly the "u=0
-  // passive drift" condition this phase verifies. AdhereMujocoHardware reads whatever value
-  // currently sits in hw_commands_ regardless of which rate last wrote it (ESC zero-order
-  // hold emulation per CLAUDE.md Sec.3).
-  for (size_t i = 0; i < kThrusterNames.size(); ++i) {
-    data_->ctrl[actuator_id_[i]] = hw_commands_[i];
+  // GUI reset request (Backspace in MujocoViewer) takes priority over everything else this
+  // tick: re-seed the authoritative mjData and re-latch mj_step1 so read() stays zero-delay.
+  if (vis_bridge_->reset_request.exchange(false)) {
+    mj_resetData(model_, data_);
+    mj_step1(model_, data_);
+    sim_time_ = data_->time;
+    sim_time_atomic_.store(sim_time_);
+    step_count_ = 0;
+    have_prev_vel_ = false;
   }
 
-  mj_step(model_, data_);
-  sim_time_ = data_->time;
-  sim_time_atomic_.store(sim_time_);
-  ++step_count_;
+  // GUI wave-mode request (1/2 keys in MujocoViewer): reuses the same setWaveMode() logic the
+  // /rov/wave_mode_cmd topic subscriber calls, so both entry points stay consistent.
+  const int wave_cmd = vis_bridge_->wave_mode_cmd.exchange(0);
+  if (wave_cmd != 0) {
+    setWaveMode(wave_cmd);
+  }
+
+  // hw_commands_ stays all-zero with no controller spawned (the "u=0 passive drift"
+  // verification condition); manual_ctrl is the GUI's per-thruster slider override, additive
+  // so a controller and manual testing never silently fight over the same channel without the
+  // user noticing. AdhereMujocoHardware reads whatever value currently sits in hw_commands_
+  // regardless of which rate last wrote it (ESC zero-order hold emulation per CLAUDE.md Sec.3).
+  for (size_t i = 0; i < kThrusterNames.size(); ++i) {
+    data_->ctrl[actuator_id_[i]] = hw_commands_[i] + vis_bridge_->manual_ctrl[i].load();
+  }
+
+  // Run/Pause (Space in MujocoViewer): when paused, skip stepping entirely so the scene stays
+  // frozen at the last mj_step1()-settled state; ctrl writes above still land so slider
+  // tweaks are visible immediately next time the sim resumes.
+  if (!vis_bridge_->paused.load()) {
+    mj_step2(model_, data_);
+    mj_step1(model_, data_);
+    sim_time_ = data_->time;
+    sim_time_atomic_.store(sim_time_);
+    ++step_count_;
+  }
+  vis_bridge_->sim_time.store(sim_time_);
 
   // Every 8 steps (~60Hz at dt=2ms), snapshot state into the vis bridge via try_lock() so a
   // slow/blocked renderer can never stall this 500Hz loop.
@@ -358,6 +405,7 @@ hardware_interface::return_type AdhereMujocoHardware::write()
       }
       for (size_t i = 0; i < kPadNames.size(); ++i) {
         vis_bridge_->pad_force[i] = data_->sensordata[pad_touch_sensor_adr_[i]];
+        vis_bridge_->pad_v_sep[i] = hw_states_[kPadContact + 4 + i];
       }
       const bool gust_active = wave_mode_.load() == 2;
       const double t_eval =
@@ -368,6 +416,9 @@ hardware_interface::return_type AdhereMujocoHardware::write()
       vis_bridge_->flow_vel_world = {flow.x(), flow.y(), flow.z()};
       vis_bridge_->valid = true;
     }
+    vis_bridge_->wave_mode_active.store(wave_mode_.load());
+    vis_bridge_->wave_tau.store(
+      wave_mode_.load() == 2 ? std::max(0.0, sim_time_ - wave_trigger_time_.load()) : 0.0);
   }
 
   return hardware_interface::return_type::OK;

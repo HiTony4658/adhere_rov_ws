@@ -10,12 +10,9 @@
       - 10 rov_odom        (pos.x/y/z, quat.w/x/y/z, vel_body.x/y/z)
       - 8  pad_contact     (pad_*/force x4, pad_*/v_sep x4)
   -->
-  <xacro:arg name="headless" default="false"/>
-
   <ros2_control name="AdhereMujocoSystem" type="system">
     <hardware>
       <plugin>adhere_mujoco_hardware/AdhereMujocoHardware</plugin>
-      <param name="headless">$(arg headless)</param>
     </hardware>
 
     <joint name="thr_N1">

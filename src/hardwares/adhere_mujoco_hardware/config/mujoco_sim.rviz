@@ -18,6 +18,7 @@ Visualization Manager:
       Show Names: true
       Show Axes: true
       Show Arrows: false
+      Marker Scale: 0.12
     - Class: rviz_default_plugins/Odometry
       Name: Odometry
       Enabled: true

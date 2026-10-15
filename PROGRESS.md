@@ -193,3 +193,85 @@
   `0.4~0.5 m/s` 量级（随后随阵风窗口波动），确认相对造浪时钟从切换时刻`τ=0`
   正确重放两段阵风，而非被已运行的仿真时长"吃掉"触发窗口。再次发布
   `{data: 1}` 后日志打印 `Wave mode switched: gust -> calm`，环境流速立即归零。
+
+---
+
+## Phase 2.6（2026-10-15）：预控制器校验、纯 Xacro 解耦、完整交互式 MuJoCo GUI、500Hz 物理管线修复
+
+### 目标
+
+在进入 Phase 3（实现控制器包）之前，修复代码审计中发现的 4 个用户可见问题与
+5 个隐藏工程 bug，确保 `500Hz` 仿真基础零延迟、零耦合。
+
+### 四个用户可见问题的修复
+
+1. **Xacro 不再携带 `headless`**：`simplified_v1.urdf.xacro`/`ros2_control.xacro`
+   删除 `<xacro:arg name="headless"/>` 与 `<param name="headless">`；`headless`
+   改为 `adhere_mujoco_node` 的标准 ROS 2 节点参数，经新增的
+   `AdhereMujocoHardware::setHeadless(bool)` 在 `configure()` 之后、
+   `start_components()`/`start()` 之前到达硬件插件（`MujocoViewer` 的构造也
+   随之从 `configure()` 推迟到 `start()`）。
+2. **删除 `config/hydro_wave_params.yaml`**（`git rm`）：其两套水流预设数值表
+   迁移为 `adhere_mujoco_hardware/README.md` 中的 Markdown 表格。
+3. **RViz TF 坐标系缩放**：`visualize.rviz`/`mujoco_sim.rviz` 的 `TF` 显示新增
+   `Marker Scale: 0.12`，与推力器/接触垫坐标系尺度一致，不再遮挡机体。
+4. **`MujocoViewer` 升级为完整交互式窗口**：仿照官方 `simulate` 应用，新增
+   鼠标相机环绕/平移/缩放、双击选中物体 + `Ctrl`+拖拽施加外部力/力矩
+   （`mjvPerturb`）、左侧边栏（仿真运行/暂停/复位、造浪模式切换、渲染选项）、
+   右侧边栏（8 个推力器手动滑条 + 实时遥测浮层）。详见该包 README 的
+   "`MujocoViewer`：仿照官方 `simulate` 的完整交互式窗口"一节。
+
+### 五个隐藏工程 bug 的修复
+
+5. **零延迟两段式 `mj_step`**：`start()` 改为 `mj_resetData` + `mj_step1`；
+   `write()` 改为 `mj_step2` + `mj_step1`（而非单次整体式 `mj_step`），使
+   `read()` 读到的 `xipos`/`xquat`/`cvel`/`sensordata` 永远是零延迟的"当前拍"
+   数据，而非落后一拍。
+6. **接触垫坐标不再硬编码**：`configure()` 新增对 `pad_TL_site..pad_BR_site`
+   的 `model_->site_pos` 查询，缓存进新增成员 `pad_yz_`，`read()` 的
+   `v_sep,i` 计算改用该成员而非本地 `constexpr` 数组。
+7. **`robot_state_publisher` + 环境流速箭头 Marker**：`mujoco_sim.launch.py`
+   新增 `robot_state_publisher` 节点（发布 `/robot_description` 与完整静态
+   TF 树）；`adhere_mujoco_node.cpp` 的 `/rov/environment_markers` 新增
+   `ns="flow_velocity"` 的世界系蓝色箭头，与 `MujocoViewer` 自绘箭头同源。
+8. **消除 `claim_state_interface` 跨线程数据竞争**：`adhere_mujoco_node.cpp`
+   不再用 `resource_manager->claim_state_interface()` 跨线程抢占状态接口，
+   改为在 `100Hz` 发布定时器中读取 `AdhereMujocoHardware::visBridge()` 的
+   线程安全快照（`qpos`/`qvel`/`pad_force`/`flow_vel_world`），自行换算世界系
+   位姿、机体系速度/角速度。
+9. **严格 `500Hz` 时钟 + GUI 负载保护**：`physics_thread` 由 `rclcpp::Rate`
+   改为 `std::chrono::steady_clock::sleep_until` 的严格 `2.0 ms` 周期循环，
+   并对每拍耗时做指数滑动平均（`actual_hz_ema`）写入
+   `MujocoVisBridge::actual_physics_hz`；`MujocoViewer::renderLoop()`
+   每帧仅用一次 `try_lock()`/`lock_guard` 读取快照，不重复加锁。
+
+### `MujocoVisBridge` 扩展
+
+新增双向控制通道（均为无锁 `std::atomic`）：GUI -> 硬件的 `paused`、
+`reset_request`、`wave_mode_cmd`（`0`=无请求，`1`/`2`=切换请求，边沿触发避免
+重复锁存造浪时钟）、`manual_ctrl[8]`（叠加式手动推力器指令）、
+`xfrc_perturb[6]`（交互扰动力/力矩）；硬件 -> GUI 的 `actual_physics_hz`、
+`sim_time`、`wave_mode_active`、`wave_tau`。批量快照（`qpos`/`qvel`/`ctrl`/
+`pad_force`/`pad_v_sep`/`flow_vel_world`）仍沿用 `std::mutex` + `try_lock()`
+策略。
+
+### 闭环验证结果（`headless:=true use_rviz:=false spawn_wave_console:=false`）
+
+- `xacro .../simplified_v1.urdf.xacro`：零 `headless` 残留；`check_urdf` 通过，
+  `base_link` 仍为单根连杆。
+- `colcon build --symlink-install`（全工作空间 6/6 包）与
+  `colcon build --packages-up-to simplified_v1_description adhere_mujoco_hardware`
+  均零警告、零错误通过。
+- `ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py headless:=true
+  use_rviz:=false spawn_wave_console:=false`：`robot_state_publisher` 与
+  `adhere_mujoco_node` 均正常启动，无 FATAL/异常。
+- 临时插入的诊断日志确认：`100Hz` 遥测定时器稳定触发且 `TelemetrySnapshot`
+  有效（`valid=1`），确认 `visBridge()` 快照路径（替代
+  `claim_state_interface`）工作正常；`physics_thread` 的
+  `actual_physics_hz` 实测 `499.96 Hz` / `500.03 Hz`（两次采样，相距 2s），
+  证明 `steady_clock::sleep_until` 严格 `500Hz` 时钟在 RViz2/GUI 负载下不漂移。
+  诊断日志验证后已从代码中移除。
+- 本机 DDS（CycloneDDS）在本次会话的沙箱化多次独立 shell 调用之间无法稳定
+  交付数据样本（`ros2 topic echo`/`rclpy` 订阅者在能通过 `ros2 topic info`
+  看到已匹配的 publisher 的情况下仍收到 0 条消息），判定为本次会话沙箱环境
+  的进程间网络发现限制，与本次代码改动无关（已用进程内诊断日志绕过验证）。
