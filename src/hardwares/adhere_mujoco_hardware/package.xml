@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>adhere_mujoco_hardware</name>
+  <version>0.1.0</version>
+  <description>
+    AdhereMujocoHardware: a 500Hz hardware_interface::SystemInterface (ROS 2 Foxy) that
+    owns the master MuJoCo mjModel/mjData, FossenHydrodynamics, and the raw
+    hw_states_[36]/hw_commands_[8] buffers. Encapsulates read() -&gt; write() (thruster
+    lag/deadzone -&gt; Fossen hydrodynamics + wave gusts -&gt; mj_step) completely decoupled
+    from the upper ROS 2 controller rate. Also hosts MujocoVisBridge, the in-process
+    pointer bridge to the 60Hz MujocoViewer (GLFW/OpenGL) rendering frontend.
+  </description>
+  <maintainer email="chesnuttbattiste@gmail.com">HiTony4658</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>ament_index_cpp</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>hardware_interface</depend>
+  <depend>controller_manager</depend>
+  <depend>pluginlib</depend>
+  <depend>realtime_tools</depend>
+  <depend>adhere_controller_common</depend>
+
+  <!-- TODO(Phase 2): add system-installed MuJoCo + GLFW3 + OpenGL as find_package targets
+       in CMakeLists.txt once libmujoco is vendored/installed on this workstation. -->
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+    <hardware_interface plugin="${prefix}/adhere_mujoco_hardware.xml" />
+  </export>
+</package>
