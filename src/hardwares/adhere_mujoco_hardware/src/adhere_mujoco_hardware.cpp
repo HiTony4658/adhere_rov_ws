@@ -1,7 +1,9 @@
 #include "adhere_mujoco_hardware/adhere_mujoco_hardware.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <utility>
 
@@ -217,6 +219,7 @@ hardware_interface::return_type AdhereMujocoHardware::start()
   sim_time_atomic_.store(0.0);
   step_count_ = 0;
   have_prev_vel_ = false;
+  last_accel_step_count_ = -1;
   wave_mode_.store(1);
   wave_trigger_time_.store(0.0);
 
@@ -340,16 +343,25 @@ hardware_interface::return_type AdhereMujocoHardware::read()
   hw_states_[kImu + 5] = ang_vel_body.y();
   hw_states_[kImu + 6] = ang_vel_body.z();
 
-  const double dt = model_->opt.timestep;
-  Eigen::Vector3d accel_body = Eigen::Vector3d::Zero();
-  if (have_prev_vel_ && dt > 0.0) {
-    accel_body = R.transpose() * ((lin_vel_world - prev_lin_vel_world_) / dt);
+  // Only recompute/advance the finite-difference accel estimate when a real physics step has
+  // actually elapsed since the last read() (Phase 2.11 Section 3): read() runs every 500Hz tick
+  // regardless of pause state, but step_count_ only advances when mj_step actually ran, so while
+  // paused this latches the last valid accel_body_ instead of dividing a zero velocity delta by
+  // dt and wiping the IMU reading to zero.
+  if (step_count_ != last_accel_step_count_) {
+    const double dt = model_->opt.timestep;
+    Eigen::Vector3d accel_body = Eigen::Vector3d::Zero();
+    if (have_prev_vel_ && dt > 0.0) {
+      accel_body = R.transpose() * ((lin_vel_world - prev_lin_vel_world_) / dt);
+    }
+    last_accel_body_ = accel_body;
+    prev_lin_vel_world_ = lin_vel_world;
+    have_prev_vel_ = true;
+    last_accel_step_count_ = step_count_;
   }
-  hw_states_[kImu + 7] = accel_body.x();
-  hw_states_[kImu + 8] = accel_body.y();
-  hw_states_[kImu + 9] = accel_body.z();
-  prev_lin_vel_world_ = lin_vel_world;
-  have_prev_vel_ = true;
+  hw_states_[kImu + 7] = last_accel_body_.x();
+  hw_states_[kImu + 8] = last_accel_body_.y();
+  hw_states_[kImu + 9] = last_accel_body_.z();
 
   // rov_odom: world-frame CoM position + orientation (quat) + body-frame linear velocity.
   hw_states_[kOdom + 0] = data_->xipos[3 * body_id_ + 0];
@@ -403,6 +415,23 @@ hardware_interface::return_type AdhereMujocoHardware::write()
     sim_time_atomic_.store(sim_time_);
     step_count_ = 0;
     have_prev_vel_ = false;
+    last_accel_step_count_ = -1;
+  }
+
+  // GUI "Reset Stats" request (Phase 2.11 Section 2), independent of the full physics reset
+  // above: clears only the cumulative liftoff/corner-trap counters so a benchmark run can be
+  // re-zeroed without resetting the ROV's pose/velocity.
+  const bool reset_stats = did_reset || vis_bridge_->reset_stats_request.exchange(false);
+  if (reset_stats) {
+    total_eval_steps_ = 0;
+    liftoff_steps_ = 0;
+    liftoff_events_ = 0;
+    corner_trap_steps_ = 0;
+    prev_is_liftoff_ = false;
+    vis_bridge_->liftoff_ratio.store(0.0);
+    vis_bridge_->corner_trap_ratio.store(0.0);
+    vis_bridge_->liftoff_events.store(0);
+    vis_bridge_->active_pads.store(static_cast<int>(kPadNames.size()));
   }
 
   // GUI wave-mode request (1/2 keys in MujocoViewer): reuses the same setWaveMode() logic the
@@ -412,28 +441,103 @@ hardware_interface::return_type AdhereMujocoHardware::write()
     setWaveMode(wave_cmd);
   }
 
+  // Run/Pause (Space in MujocoViewer): when paused, skip stepping entirely so the scene stays
+  // frozen at the last mj_step1()-settled state. "Step Once" (debugging: advance exactly one
+  // 2.0ms tick while paused) is the one exception -- it consumes its own request flag so it
+  // only ever fires once per button press/key tap, not every tick it stays true. Computed
+  // before the thruster-write loop below (Phase 2.11 Section 4) since the optional lag filter
+  // must only integrate forward when a physics step is actually about to occur.
+  const bool paused = vis_bridge_->paused.load();
+  const bool single_step = paused && vis_bridge_->step_once_request.exchange(false);
+  const bool step_occurs = !paused || single_step;
+
   // hw_commands_ stays all-zero with no controller spawned (the "u=0 passive drift"
   // verification condition); manual_ctrl is the GUI's per-thruster slider override, additive
   // so a controller and manual testing never silently fight over the same channel without the
   // user noticing. AdhereMujocoHardware reads whatever value currently sits in hw_commands_
   // regardless of which rate last wrote it (ESC zero-order hold emulation per CLAUDE.md Sec.3).
+  // Phase 2.11 Section 4: clamp to the +-40N rail limit before applying, and optionally run a
+  // first-order ESC lag filter (tau_T = 15ms) instead of writing the target thrust directly.
+  constexpr double kThrusterRailLimit = 40.0;
+  constexpr double kTauThruster = 0.015;
+  const double dt = model_->opt.timestep;
+  const double alpha_t = 1.0 - std::exp(-dt / kTauThruster);
+  const bool lag_enabled = vis_bridge_->enable_thruster_lag.load();
   for (size_t i = 0; i < kThrusterNames.size(); ++i) {
-    data_->ctrl[actuator_id_[i]] = hw_commands_[i] + vis_bridge_->manual_ctrl[i].load();
+    const double u_target = std::clamp(
+      hw_commands_[i] + vis_bridge_->manual_ctrl[i].load(), -kThrusterRailLimit, kThrusterRailLimit);
+    if (lag_enabled) {
+      if (step_occurs) {
+        applied_thrust_[i] = (1.0 - alpha_t) * applied_thrust_[i] + alpha_t * u_target;
+      }
+      // else: paused with lag enabled -- hold the last applied_thrust_ (no time has elapsed).
+    } else {
+      applied_thrust_[i] = u_target;
+    }
+    data_->ctrl[actuator_id_[i]] = applied_thrust_[i];
   }
 
-  // Run/Pause (Space in MujocoViewer): when paused, skip stepping entirely so the scene stays
-  // frozen at the last mj_step1()-settled state; ctrl writes above still land so slider
-  // tweaks are visible immediately next time the sim resumes. "Step Once" (debugging: advance
-  // exactly one 2.0ms tick while paused) is the one exception -- it consumes its own request
-  // flag so it only ever fires once per button press/key tap, not every tick it stays true.
-  const bool paused = vis_bridge_->paused.load();
-  const bool single_step = paused && vis_bridge_->step_once_request.exchange(false);
-  if (!paused || single_step) {
+  if (step_occurs) {
     mj_step2(model_, data_);
     mj_step1(model_, data_);
     sim_time_ = data_->time;
     sim_time_atomic_.store(sim_time_);
     ++step_count_;
+
+    // True 500Hz aliasing-free contact & Rhombic-Kern metrics (Phase 2.11 Section 2): evaluated
+    // on every real physics step (not just the ~60Hz vis-bridge snapshot cadence below), so
+    // transient <5ms contact events are never missed.
+    double L_y = 0.0, L_z = 0.0;
+    for (const auto & yz : pad_yz_) {
+      L_y = std::max(L_y, std::abs(yz.first));
+      L_z = std::max(L_z, std::abs(yz.second));
+    }
+    double F_sum = 0.0, Fy_sum = 0.0, Fz_sum = 0.0;
+    double F_min = std::numeric_limits<double>::max();
+    int liftoff_pad_count = 0;
+    for (size_t i = 0; i < kPadNames.size(); ++i) {
+      const double F_i = std::max(0.0, data_->sensordata[pad_touch_sensor_adr_[i]]);
+      F_sum += F_i;
+      Fy_sum += F_i * pad_yz_[i].first;
+      Fz_sum += F_i * pad_yz_[i].second;
+      F_min = std::min(F_min, F_i);
+      if (F_i <= 1e-3) {
+        ++liftoff_pad_count;
+      }
+    }
+    double p_y = 0.0, p_z = 0.0, kern_val = 2.0, m_kern = -1.0;
+    if (F_sum > 1e-3) {
+      p_y = Fy_sum / F_sum;
+      p_z = Fz_sum / F_sum;
+      kern_val = std::abs(p_y) / L_y + std::abs(p_z) / L_z;
+      m_kern = 1.0 - kern_val;
+    }
+    const bool is_liftoff = (F_min <= 1e-3);
+    const bool is_corner_trap =
+      (F_sum > 1e-3) && (std::abs(p_y) <= L_y) && (std::abs(p_z) <= L_z) && (kern_val > 1.0);
+
+    ++total_eval_steps_;
+    if (is_liftoff) {
+      ++liftoff_steps_;
+      if (!prev_is_liftoff_) {
+        ++liftoff_events_;
+      }
+    }
+    if (is_corner_trap) {
+      ++corner_trap_steps_;
+    }
+    prev_is_liftoff_ = is_liftoff;
+
+    vis_bridge_->cop_y.store(p_y);
+    vis_bridge_->cop_z.store(p_z);
+    vis_bridge_->kern_val.store(kern_val);
+    vis_bridge_->m_kern.store(m_kern);
+    vis_bridge_->liftoff_ratio.store(
+      static_cast<double>(liftoff_steps_) / static_cast<double>(total_eval_steps_));
+    vis_bridge_->corner_trap_ratio.store(
+      static_cast<double>(corner_trap_steps_) / static_cast<double>(total_eval_steps_));
+    vis_bridge_->liftoff_events.store(liftoff_events_);
+    vis_bridge_->active_pads.store(static_cast<int>(kPadNames.size()) - liftoff_pad_count);
   }
   vis_bridge_->sim_time.store(sim_time_);
 
@@ -469,35 +573,6 @@ hardware_interface::return_type AdhereMujocoHardware::write()
     vis_bridge_->wave_tau.store(
       wave_mode_.load() == 2 ? std::max(0.0, sim_time_ - wave_trigger_time_.load()) : 0.0);
     vis_bridge_->hydro_patch_count.store(static_cast<int>(hydro_geometry_model_.patches.size()));
-
-    // Rhombic Kern telemetry (CLAUDE.md Sec.4.4/Phase 2.10 Section B9): L_y/L_z are derived
-    // dynamically from the resolved pad_yz_ positions, never hardcoded, so this stays correct
-    // even if the pad geometry or CLAUDE.md's own (stale) a/b prose ever disagree.
-    double L_y = 0.0, L_z = 0.0;
-    for (const auto & yz : pad_yz_) {
-      L_y = std::max(L_y, std::abs(yz.first));
-      L_z = std::max(L_z, std::abs(yz.second));
-    }
-    double F_sum = 0.0, Fy_sum = 0.0, Fz_sum = 0.0;
-    int liftoff_count = 0;
-    for (size_t i = 0; i < kPadNames.size(); ++i) {
-      const double F_i = std::max(0.0, data_->sensordata[pad_touch_sensor_adr_[i]]);
-      F_sum += F_i;
-      Fy_sum += F_i * pad_yz_[i].first;
-      Fz_sum += F_i * pad_yz_[i].second;
-      if (data_->sensordata[pad_touch_sensor_adr_[i]] <= 0.0) {
-        ++liftoff_count;
-      }
-    }
-    const double p_y = F_sum > 1e-9 ? Fy_sum / F_sum : 0.0;
-    const double p_z = F_sum > 1e-9 ? Fz_sum / F_sum : 0.0;
-    const double kern_val =
-      (L_y > 1e-9 && L_z > 1e-9) ? (std::abs(p_y) / L_y + std::abs(p_z) / L_z) : 0.0;
-    vis_bridge_->cop_y.store(p_y);
-    vis_bridge_->cop_z.store(p_z);
-    vis_bridge_->kern_val.store(kern_val);
-    vis_bridge_->m_kern.store(1.0 - kern_val);
-    vis_bridge_->liftoff_ratio.store(static_cast<double>(liftoff_count) / kPadNames.size());
   }
 
   return hardware_interface::return_type::OK;

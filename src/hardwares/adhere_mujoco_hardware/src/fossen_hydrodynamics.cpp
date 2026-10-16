@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <unordered_map>
 
 namespace adhere_mujoco_hardware
@@ -459,6 +460,14 @@ HydroGeometryModel HydroGeometryModel::buildFromMjModel(const mjModel * m, int r
 
   for (int g = 0; g < m->ngeom; ++g) {
     if (m->geom_bodyid[g] != root_body_id) {
+      continue;
+    }
+    // The 4 small rubber contact-pad spheres are modeled by MuJoCo's own Kelvin-Voigt contact
+    // solver (CLAUDE.md Sec.4.2), not by this fluid-surface hydrodynamic model -- tessellating
+    // them here would contaminate the hull's patch budget and skew the front plate's normals/
+    // area via decimatePatches()'s voxel merging (Phase 2.11 Section 1 fix).
+    const char * gname = mj_id2name(m, mjOBJ_GEOM, g);
+    if (gname != nullptr && std::strncmp(gname, "pad_", 4) == 0) {
       continue;
     }
     any_geom = true;

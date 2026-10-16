@@ -103,6 +103,9 @@ private:
 
   std::array<double, kNumStates> hw_states_{};
   std::array<double, kNumThrusters> hw_commands_{};
+  // First-order ESC lag filter state (Phase 2.11 Section 4), written every write() tick
+  // regardless of the lag checkbox so disabling it mid-flight is an instant passthrough.
+  std::array<double, kNumThrusters> applied_thrust_{};
 
   // Both wave-environment plugins are always constructed; the runtime switch below (instead
   // of a single `flow_env_` selected once at configure()) is what makes "1"/"2" console input
@@ -143,6 +146,23 @@ private:
   // accelerometer sensor exists in rov_wall.xml).
   Eigen::Vector3d prev_lin_vel_world_ = Eigen::Vector3d::Zero();
   bool have_prev_vel_ = false;
+
+  // Paused-IMU latch (Phase 2.11 Section 3): read() is called every 500Hz tick regardless of
+  // pause state, but the finite-difference accel must only be recomputed/advanced when
+  // step_count_ actually changes -- otherwise a paused sim immediately zeroes IMU accel on the
+  // very next read() (lin_vel_world - prev_lin_vel_world_ == 0 while step_count_ is frozen).
+  long long last_accel_step_count_ = -1;
+  Eigen::Vector3d last_accel_body_ = Eigen::Vector3d::Zero();
+
+  // True 500Hz cumulative contact/Rhombic-Kern telemetry counters (Phase 2.11 Section 2),
+  // accumulated on every real physics step (not just the ~60Hz vis-bridge snapshot cadence) so
+  // transient <5ms contact events are never aliased away. Reset alongside did_reset or an
+  // explicit vis_bridge_->reset_stats_request.
+  long long total_eval_steps_ = 0;
+  long long liftoff_steps_ = 0;
+  long long liftoff_events_ = 0;
+  long long corner_trap_steps_ = 0;
+  bool prev_is_liftoff_ = false;
 };
 
 }  // namespace adhere_mujoco_hardware

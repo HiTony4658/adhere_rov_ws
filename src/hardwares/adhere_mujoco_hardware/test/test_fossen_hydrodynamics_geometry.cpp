@@ -167,6 +167,65 @@ TEST_F(HydroGeometryModelFixture, StonefishModeSmokeTest)
   EXPECT_LT(w.torque_world.norm(), 10000.0);
 }
 
+// Phase 2.11 Section 1: excluding the 4 small pad_* contact spheres from hull tessellation must
+// leave exactly chassis_geom's 96 box patches (6 faces x 16), with the front wall-facing plate
+// (x = -0.10m) at its exact 0.24 m^2 area and pure [-1,0,0]^T outward normal -- no lossy
+// decimatePatches() merging, since 96 <= kMaxPatches(256).
+TEST_F(HydroGeometryModelFixture, FrontPlateAreaAndNormalsExact)
+{
+  const HydroGeometryModel geo = HydroGeometryModel::buildFromMjModel(model_, body_id_);
+
+  EXPECT_EQ(geo.patches.size(), 96u);
+
+  double front_area = 0.0;
+  for (const auto & p : geo.patches) {
+    if (p.normal_body.x() < -0.5) {
+      front_area += p.area;
+      EXPECT_NEAR(p.normal_body.x(), -1.0, 1e-9);
+      EXPECT_NEAR(p.normal_body.y(), 0.0, 1e-9);
+      EXPECT_NEAR(p.normal_body.z(), 0.0, 1e-9);
+      EXPECT_NEAR(p.centroid_body.x(), -0.10, 1e-6);
+    }
+  }
+  EXPECT_NEAR(front_area, 0.24, 1e-6);
+}
+
+// Phase 2.11 Sections 1/2: locks in both the Stonefish-mode wall-suction sign (attractive, -X)
+// and the corrected C_squeeze=64.0 magnitude (physical Newtons of resistive damping, not the
+// ~1e-6 N/(m/s) unnormalized-era near-zero force).
+TEST_F(HydroGeometryModelFixture, StonefishVenturiAndSqueezePhysicalSigns)
+{
+  const HydroGeometryModel geo = HydroGeometryModel::buildFromMjModel(model_, body_id_);
+  HydroParams params;
+
+  RigidBodyState state_crossflow;
+  state_crossflow.com_pos_world = Eigen::Vector3d(0.125, 0.0, 0.5);
+  state_crossflow.orientation = Eigen::Quaterniond::Identity();
+  state_crossflow.lin_vel_world = Eigen::Vector3d(0.0, 0.3, 0.0);
+  const Wrench w = FossenHydrodynamics::compute(
+    state_crossflow, 0.0, params, HydroModelMode::kStonefishGeometryDriven, &geo);
+  EXPECT_LT(w.force_world.x(), -1.0);
+
+  RigidBodyState state_rest;
+  state_rest.com_pos_world = Eigen::Vector3d(0.125, 0.0, 0.5);
+  state_rest.orientation = Eigen::Quaterniond::Identity();
+  state_rest.lin_vel_world = Eigen::Vector3d::Zero();
+  const Wrench w_rest = FossenHydrodynamics::compute(
+    state_rest, 0.0, params, HydroModelMode::kStonefishGeometryDriven, &geo);
+
+  RigidBodyState state_approach = state_rest;
+  state_approach.lin_vel_world = Eigen::Vector3d(-0.05, 0.0, 0.0);
+  const Wrench w_approach = FossenHydrodynamics::compute(
+    state_approach, 0.0, params, HydroModelMode::kStonefishGeometryDriven, &geo);
+  EXPECT_GT(w_approach.force_world.x(), w_rest.force_world.x() + 0.5);
+
+  RigidBodyState state_sep = state_rest;
+  state_sep.lin_vel_world = Eigen::Vector3d(0.05, 0.0, 0.0);
+  const Wrench w_sep = FossenHydrodynamics::compute(
+    state_sep, 0.0, params, HydroModelMode::kStonefishGeometryDriven, &geo);
+  EXPECT_LT(w_sep.force_world.x(), w_rest.force_world.x() - 0.5);
+}
+
 int main(int argc, char ** argv)
 {
   ::testing::InitGoogleTest(&argc, argv);

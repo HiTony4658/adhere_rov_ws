@@ -137,6 +137,7 @@ private:
   mjtByte ui_show_kern_diamond_ = 1;  // Section C1 toggle
   int ui_sim_speed_ = 0;              // radio index: 0=1x,1=0.5x,2=0.2x,3=0.1x (Section C4)
   mjtByte ui_cam_follow_ = 0;         // Section C3 "Follow ROV" checkbox
+  mjtByte ui_thruster_lag_ = 0;       // Phase 2.11 Section 4 "Thruster Lag (15ms)" checkbox
   int scope_mode_ = 0;  // radio index: 0=Off,1=Pad Forces,2=Kern Margin,3=Body Vel vs Flow,
                         // 4=Thruster Commands (Section C2)
 
@@ -161,6 +162,9 @@ private:
   double cached_kern_val_ = 0.0;
   double cached_m_kern_ = 0.0;
   double cached_liftoff_ratio_ = 0.0;
+  double cached_corner_trap_ratio_ = 0.0;
+  long long cached_liftoff_events_ = 0;
+  int cached_active_pads_ = 4;
   double cached_cop_y_ = 0.0;
   double cached_cop_z_ = 0.0;
   int cached_hydro_patch_count_ = 0;

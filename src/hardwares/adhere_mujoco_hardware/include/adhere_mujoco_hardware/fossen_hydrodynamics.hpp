@@ -81,7 +81,7 @@ struct HydroParams
   // the Phase 2.10 task spec, pending future tuning against real tow-tank or CFD data.
   double Cd_normal = 1.2;    // per-patch normal pressure-drag coefficient
   double Cf_tangent = 0.02;  // per-patch tangential skin-friction coefficient
-  double C_squeeze = 1e-6;   // near-wall squeeze-film lubrication coefficient
+  double C_squeeze = 64.0;   // near-wall squeeze-film lubrication coefficient
 
   // Ambient current velocity in the world frame at time t: steady crossflow + superposed
   // wave-gust pulses.

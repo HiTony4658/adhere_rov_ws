@@ -35,6 +35,7 @@ constexpr int kUidScreenshot = 104;
 constexpr int kUidCamWallYZ = 105;
 constexpr int kUidCamTopXY = 106;
 constexpr int kUidCamSideXZ = 107;
+constexpr int kUidResetStats = 108;
 
 // Section C4: slow-motion-only speed scale, indexed by the "Sim Speed" radio.
 constexpr double kSimSpeedValues[4] = {1.0, 0.5, 0.2, 0.1};
@@ -140,6 +141,7 @@ void MujocoViewer::buildUi0()
     {mjITEM_CHECKINT, "Running (Space)", 1, &ui_running_, "", 0},
     {mjITEM_BUTTON, "Step Once (S)", 1, nullptr, "", 0},
     {mjITEM_BUTTON, "Reset (Backspace)", 1, nullptr, "", 0},
+    {mjITEM_BUTTON, "Reset Stats", 1, nullptr, "", 0},
     {mjITEM_RADIO, "Sim Speed", 4, &ui_sim_speed_, "1x\n0.5x\n0.2x\n0.1x", 0},
     {mjITEM_BUTTON, "Default Orbit", 1, nullptr, "", 0},
     {mjITEM_BUTTON, "Wall YZ View", 1, nullptr, "", 0},
@@ -150,11 +152,12 @@ void MujocoViewer::buildUi0()
     {mjITEM_END, "", 0, nullptr, "", 0}};
   def_sim[2].otherint = kUidStepOnce;
   def_sim[3].otherint = kUidReset;
-  def_sim[5].otherint = kUidResetView;
-  def_sim[6].otherint = kUidCamWallYZ;
-  def_sim[7].otherint = kUidCamTopXY;
-  def_sim[8].otherint = kUidCamSideXZ;
-  def_sim[10].otherint = kUidScreenshot;
+  def_sim[4].otherint = kUidResetStats;
+  def_sim[6].otherint = kUidResetView;
+  def_sim[7].otherint = kUidCamWallYZ;
+  def_sim[8].otherint = kUidCamTopXY;
+  def_sim[9].otherint = kUidCamSideXZ;
+  def_sim[11].otherint = kUidScreenshot;
   mjui_add(&ui0_, def_sim);
 
   mjuiDef def_wave[] = {
@@ -222,6 +225,7 @@ void MujocoViewer::buildUi1()
   mjuiDef def_thrust_header[] = {
     {mjITEM_SECTION, "Thrusters (Manual)", mjSECT_OPEN, nullptr, "", 0},
     {mjITEM_BUTTON, "Zero All", 1, nullptr, "", 0},
+    {mjITEM_CHECKBYTE, "Thruster Lag (15ms)", 1, &ui_thruster_lag_, "", 0},
     {mjITEM_END, "", 0, nullptr, "", 0}};
   def_thrust_header[1].otherint = kUidZeroThrusters;
   mjui_add(&ui1_, def_thrust_header);
@@ -435,9 +439,13 @@ void MujocoViewer::onCursorPos(double x, double y)
         mjv_movePerturb(model_, d_vis_, move_action, reldx, reldy, &scn_, &pert_);
       }
     } else if (uistate_.left) {
-      mjv_moveCamera(model_, mjMOUSE_ROTATE_H, reldx, reldy, &cam_);
+      // Vertical orbit by default (drag up/down tilts elevation); Shift switches to horizontal
+      // orbit (drag left/right swings azimuth) -- Phase 2.11 Section 5.
+      mjv_moveCamera(model_, uistate_.shift ? mjMOUSE_ROTATE_H : mjMOUSE_ROTATE_V, reldx, reldy, &cam_);
     } else if (uistate_.right) {
-      mjv_moveCamera(model_, mjMOUSE_MOVE_H, reldx, reldy, &cam_);
+      // Vertical pan by default (drag up/down pans along the wall's Z axis); Shift switches to
+      // horizontal pan -- without this, there was no way to pan vertically along the wall.
+      mjv_moveCamera(model_, uistate_.shift ? mjMOUSE_MOVE_H : mjMOUSE_MOVE_V, reldx, reldy, &cam_);
     } else if (uistate_.middle) {
       mjv_moveCamera(model_, mjMOUSE_ZOOM, 0.0, reldy, &cam_);
     }
@@ -597,6 +605,9 @@ void MujocoViewer::handleUiAction(int userid)
     case kUidReset:
       bridge_->reset_request.store(true);
       break;
+    case kUidResetStats:
+      bridge_->reset_stats_request.store(true);
+      break;
     case kUidStepOnce:
       stepOnce();
       break;
@@ -710,23 +721,26 @@ void MujocoViewer::drawKernDiamond()
     world_rect[i][2] = body_pos[2] + rotated_rect[2];
   }
 
-  // Color per Section C1 spec: green (comfortably inside the kern, no liftoff), yellow
-  // (0.7 < K_val <= 1.0), red (K_val > 1.0 or any pad lifted off).
-  float rgba[4] = {0.1f, 1.0f, 0.1f, 0.6f};
-  if (cached_kern_val_ > 1.0 || cached_liftoff_ratio_ > 0.0) {
-    rgba[0] = 1.0f;
-    rgba[1] = 0.1f;
-    rgba[2] = 0.1f;
-    rgba[3] = 0.8f;
-  } else if (cached_kern_val_ > 0.7) {
-    rgba[0] = 1.0f;
-    rgba[1] = 0.9f;
-    rgba[2] = 0.1f;
-    rgba[3] = 0.6f;
+  // Phase 2.11 Section 5: the diamond boundary itself is always a fixed Cyan, distinct from the
+  // CoP sphere, whose color encodes the live admissibility state -- green (inside the kern, all
+  // 4 pads in contact), yellow (Corner-Triangle Trap: K_val > 1.0 but all 4 pads still bearing
+  // load), red (any pad actually lifted off).
+  const float rect_rgba[4] = {0.6f, 0.6f, 0.6f, 0.5f};
+  const float diamond_rgba[4] = {0.1f, 0.85f, 1.0f, 0.75f};
+  float cop_rgba[4] = {0.1f, 1.0f, 0.1f, 0.85f};
+  if (cached_active_pads_ < 4) {
+    cop_rgba[0] = 1.0f;
+    cop_rgba[1] = 0.1f;
+    cop_rgba[2] = 0.1f;
+    cop_rgba[3] = 0.9f;
+  } else if (cached_kern_val_ > 1.0) {
+    cop_rgba[0] = 1.0f;
+    cop_rgba[1] = 0.9f;
+    cop_rgba[2] = 0.1f;
+    cop_rgba[3] = 0.85f;
   }
 
   // Grey outer Support Rectangle edges, drawn first so the diamond's own edges render on top.
-  const float rect_rgba[4] = {0.6f, 0.6f, 0.6f, 0.5f};
   for (int i = 0; i < 4 && scn_.ngeom < scn_.maxgeom; ++i) {
     mjvGeom * g = &scn_.geoms[scn_.ngeom];
     mjv_initGeom(g, mjGEOM_CAPSULE, nullptr, nullptr, nullptr, rect_rgba);
@@ -736,7 +750,7 @@ void MujocoViewer::drawKernDiamond()
 
   for (int i = 0; i < 4 && scn_.ngeom < scn_.maxgeom; ++i) {
     mjvGeom * g = &scn_.geoms[scn_.ngeom];
-    mjv_initGeom(g, mjGEOM_CAPSULE, nullptr, nullptr, nullptr, rgba);
+    mjv_initGeom(g, mjGEOM_CAPSULE, nullptr, nullptr, nullptr, diamond_rgba);
     mjv_connector(g, mjGEOM_CAPSULE, 0.003, world_pts[i], world_pts[(i + 1) % 4]);
     scn_.ngeom++;
   }
@@ -753,7 +767,7 @@ void MujocoViewer::drawKernDiamond()
       body_pos[0] + rotated[0], body_pos[1] + rotated[1], body_pos[2] + rotated[2]};
     const mjtNum size[3] = {0.018, 0.018, 0.018};
     mjvGeom * g = &scn_.geoms[scn_.ngeom];
-    mjv_initGeom(g, mjGEOM_SPHERE, size, cop_world, nullptr, rgba);
+    mjv_initGeom(g, mjGEOM_SPHERE, size, cop_world, nullptr, cop_rgba);
     scn_.ngeom++;
   }
 }
@@ -941,16 +955,18 @@ void MujocoViewer::drawOverlayTelemetry(mjrRect viewport)
     title, sizeof(title),
     "Physics Rate\nSim Time\nWave Mode\nFlow Velocity\n"
     "Pad TL / TR / BL / BR\nPose (X Y Z)\nPose (phi theta psi)\nBody Vel (vx vy vz)\n"
-    "Body AngVel (wx wy wz)\nHydro Mode\nKern Margin M_kern\nLiftoff Ratio");
+    "Body AngVel (wx wy wz)\nHydro Mode\nKern Margin M_kern\nActive Pads\n"
+    "Liftoff Ratio (cum.)\nCorner-Trap Ratio (cum.)\nLiftoff Events");
   std::snprintf(
     content, sizeof(content),
     "%.1f Hz (work: %.3f ms)\n%.2f s\n%s (tau=%.2fs)\n[%.2f, %.2f, %.2f] m/s\n"
     "%.1f / %.1f / %.1f / %.1f N\n[%.3f, %.3f, %.3f] m\n[%.1f, %.1f, %.1f] deg\n[%.3f, %.3f, %.3f] m/s\n"
-    "[%.3f, %.3f, %.3f] rad/s\n%s (%d patches)\n%.3f (K_val=%.3f)\n%.1f%%",
+    "[%.3f, %.3f, %.3f] rad/s\n%s (%d patches)\n%.3f (K_val=%.3f)\n%d / 4\n%.1f%%\n%.1f%%\n%lld",
     hz, work_ms, sim_t, wave_mode == 2 ? "Gust" : "Calm", tau, flow[0], flow[1], flow[2],
     pad_force[0], pad_force[1], pad_force[2], pad_force[3], px, py, pz, phi * 57.2958, theta * 57.2958,
     psi * 57.2958, vx, vy, vz, wx, wy, wz, hydro_name, cached_hydro_patch_count_, cached_m_kern_,
-    cached_kern_val_, cached_liftoff_ratio_ * 100.0);
+    cached_kern_val_, cached_active_pads_, cached_liftoff_ratio_ * 100.0,
+    cached_corner_trap_ratio_ * 100.0, cached_liftoff_events_);
 
   mjr_overlay(mjFONT_NORMAL, mjGRID_TOPLEFT, viewport, title, content, &con_);
 }
@@ -990,6 +1006,9 @@ void MujocoViewer::renderFrame()
     cached_kern_val_ = bridge_->kern_val.load();
     cached_m_kern_ = bridge_->m_kern.load();
     cached_liftoff_ratio_ = bridge_->liftoff_ratio.load();
+    cached_corner_trap_ratio_ = bridge_->corner_trap_ratio.load();
+    cached_liftoff_events_ = bridge_->liftoff_events.load();
+    cached_active_pads_ = bridge_->active_pads.load();
     cached_cop_y_ = bridge_->cop_y.load();
     cached_cop_z_ = bridge_->cop_z.load();
     cached_hydro_patch_count_ = bridge_->hydro_patch_count.load();
@@ -1107,6 +1126,7 @@ void MujocoViewer::renderFrame()
 
   bridge_->hydro_mode.store(ui_hydro_mode_);
   bridge_->sim_speed_factor.store(kSimSpeedValues[ui_sim_speed_]);
+  bridge_->enable_thruster_lag.store(ui_thruster_lag_ != 0);
 
   for (int i = 0; i < 8; ++i) {
     bridge_->manual_ctrl[static_cast<size_t>(i)].store(thruster_slider_[i]);

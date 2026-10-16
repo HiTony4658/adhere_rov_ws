@@ -660,3 +660,80 @@ bug（均局限于 `kStonefishGeometryDriven` 分支，`kParametricLumped` 零�
   `kStonefishGeometryDriven` 烟雾测试）5/5 全部通过，确认 `kParametricLumped`
   零回归；既存的 `copyright`/`cpplint`/`flake8`/`pep257`/`uncrustify`/
   `xmllint` 风格检查对本仓库全局早已失败，与本次改动无关，未处理。
+
+## Phase 2.11（2026-10-16）：5 个剩余物理/时序 bug 修复
+
+### 目标
+
+对 Phase 2.10 审计修复后的 `adhere_mujoco_hardware` 再做一轮复查，发现并修复
+5 个仍未处理的物理与工程缺陷。
+
+### 修复内容
+
+1. **`C_squeeze` 单位不匹配 + 接触垫球体污染水动力外壳切分**：挤膜阻尼公式
+   在 Phase 2.10 已改为无量纲比值 `(h_gap_nominal/h_gap_p)^3`（名义间隙处恒为
+   `1.0`），但 `C_squeeze` 仍停留在为旧的未归一化 `1/h_gap_p^3`（名义间隙处
+   `≈64000`）标定的 `1e-6`，导致名义间隙处挤膜阻尼仅 `≈2.4e-8 N`（约
+   6400 万倍过小，近似为零）。修复：`C_squeeze = 64.0`（名义间隙处单板总
+   阻尼 `C_squeeze*A_plate=15.36 N·s/m`，物理量级）。同时
+   `HydroGeometryModel::buildFromMjModel()` 排除全部 `pad_*` 接触垫球体
+   （已由 MuJoCo 自身 Kelvin-Voigt 接触求解器单独建模），原本 `96(箭体)+
+   4×48(垫球)=288` 个原始微元超过 `256` 上限触发有损体素合并，垫球 `-X`
+   半球微元混入箭体正面板体素、污染正面法向/面积；排除后恰好 `96` 个原始
+   微元，无需合并，正面贴壁板精确为 `16` 个微元、`0.24 m^2`、法向严格
+   `[-1,0,0]^T`。
+2. **Rhombic Kern/脱离遥测被 62.5Hz 节流漏采 + 脱离定义是瞬时而非累积**：
+   `kern_val`/`m_kern`/`cop_y/z`/`liftoff_ratio` 原本只在 `write_tick_count_
+   % 8 == 0` 的 ~62.5Hz 快照节流块内计算，漏采 `87.5%` 的瞬态 `<5ms` 接触
+   事件；`liftoff_ratio` 还只是该拍 4 垫中脱离比例的瞬时值
+   （`0/0.25/0.5/0.75/1.0`），不是基准表要求的 500Hz 累积统计。修复：把
+   接触力/Kern 判据计算移到每一次真实 `mj_step` 之后（不再受 `%8` 节流
+   影响），新增 `total_eval_steps_`/`liftoff_steps_`/`liftoff_events_`
+   （上升沿计数）/`corner_trap_steps_` 累积计数器，换算成
+   `MujocoVisBridge::liftoff_ratio`/`corner_trap_ratio`/`liftoff_events`/
+   `active_pads`；`Backspace` 完整复位或新增的 `Reset Stats` 按钮
+   （`reset_stats_request`）均会清零这些计数器。
+3. **暂停时 IMU 线加速度被有限差分清零**：`read()` 每个 `500Hz` 周期都会
+   用 `(lin_vel_world - prev_lin_vel_world_) / dt` 重新计算并覆写
+   `prev_lin_vel_world_`，即使仿真已暂停（`step_count_` 不再前进）也照常
+   执行，导致暂停后下一次 `read()` 立刻把 IMU 加速度读数清零。修复：新增
+   `last_accel_step_count_`，仅当 `step_count_` 真正变化（物理确实前进了
+   一拍）才重新计算/锁存 `last_accel_body_`，暂停期间持续输出锁存值。
+4. **缺少推力器 `±40N` 轨道钳位与可选一阶惯性延迟**：`write()` 原来把
+   `hw_commands_[i] + manual_ctrl[i]` 不经钳位直接写入 `data_->ctrl`。修复：
+   统一钳位到 `[-40.0, 40.0] N`（`CLAUDE.md` §4.3 硬件轨道极限），并新增
+   `MujocoVisBridge::enable_thruster_lag` 开关（右侧边栏 "Thruster Lag
+   (15ms)" 复选框，默认关闭=直通）：开启后对钳位后的目标值做一阶惯性延迟
+   `tau_T=0.015s`（`alpha_T=1-exp(-dt/tau_T)`），且仅在物理确实前进一拍时
+   积分，暂停时保持上次值。
+5. **相机右键拖拽仍硬编码水平平移 + Kern 菱形/CoP 颜色未分离**：
+   `onCursorPos()` 的左键/右键拖拽仍恒为 `mjMOUSE_ROTATE_H`/
+   `mjMOUSE_MOVE_H`，无法沿壁面竖直方向平移/环绕相机，除非按住 `Shift`。
+   修复：改为 `uistate_.shift ? ..._H : ..._V`，默认竖直变体，`Shift` 切换
+   水平变体（与既有 `Ctrl`+拖拽扰动的约定一致）。`drawKernDiamond()` 原来
+   让菱形边界本身随 `K_val`/脱离状态变色，与 CoP 球颜色重复、难以区分
+   边界与状态点；改为菱形边界固定青色（`{0.1,0.85,1.0}`），CoP 球改为按
+   `active_pads`/`kern_val` 变色：绿（4 垫接触且 `K_val<=1.0`）/黄（4 垫
+   接触但 `K_val>1.0`，角三角陷阱）/红（任意一垫脱离）。
+
+### 单元测试新增
+
+`test_fossen_hydrodynamics_geometry.cpp` 新增 2 组测试，锁定上述物理修复：
+
+- `FrontPlateAreaAndNormalsExact`：验证 `geo.patches.size()==96`、所有正面
+  微元法向严格 `[-1,0,0]^T`、质心 `x` 严格 `-0.10m`、正面总面积严格
+  `0.24 m^2`。
+- `StonefishVenturiAndSqueezePhysicalSigns`：验证侧向来流下吸附力
+  `Fx<-1.0N`；靠近壁面时合力比静止基线高 `>0.5N`（阻碍靠近）、远离壁面时
+  低 `>0.5N`（阻碍远离）——锁定 `C_squeeze=64.0` 的物理量级而非早期近零力。
+
+### 验证结果
+
+- `colcon build --packages-up-to simplified_v1_description adhere_mujoco_hardware
+  --symlink-install` 零警告零错误。
+- `colcon test --packages-select adhere_mujoco_hardware` 的 `gtest`
+  （`test_fossen_hydrodynamics_geometry`）7/7 全部通过（原有 5 组 + 本次
+  新增 2 组），`kParametricLumped` 数值零回归；既存的
+  `copyright`/`cpplint`/`flake8`/`pep257`/`uncrustify` 风格检查与
+  `gtest`（未 `source install/setup.bash` 时找不到包共享目录）在未改动的
+  `main` 分支上同样失败，与本次改动无关，未处理。

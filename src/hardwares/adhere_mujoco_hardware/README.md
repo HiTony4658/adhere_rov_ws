@@ -67,14 +67,22 @@ hardware_interface::return_type write() override;  // 无参数！Foxy 特有
   `(y_i, z_i)` 在 `configure()` 时从 `model_->site_pos[pad_*_site]` 查询得到，
   绝不硬编码）。
 - **`write()`**：把 `hw_commands_[0:8]`（本阶段恒为零）与 `MujocoVisBridge::
-  manual_ctrl[8]`（GUI 推力器滑条，叠加式）之和写入 `d_->ctrl`；通过一个仅在
-  本进程内安装的 `mjcb_passive` 回调（与 Python 原型 `setup_hydrodynamics_
-  callback` 完全相同的调用时机与目标累加数组 `qfrc_passive`，用于保证数值一致性）
-  注入 `FossenHydrodynamics::compute()` 算出的水动力合力/合力矩 **加上**
-  `MujocoViewer` 的 `Ctrl+拖拽` 交互扰动力/力矩；随后调用 `mj_step2` +
-  `mj_step1`（零延迟两段式步进，见下方"零延迟两段式 `mj_step` 契约"）；每 8 步
-  通过 `std::mutex::try_lock()`（绝不阻塞主循环）向 `MujocoVisBridge` 写入一次
-  渲染快照。`write()` 开头还会消费 GUI 发出的复位 / 造浪模式切换请求。
+  manual_ctrl[8]`（GUI 推力器滑条，叠加式）之和**先钳位到 `±40.0 N` 硬件轨道
+  极限**（`CLAUDE.md` §4.3），再可选经过一阶 ESC 惯性延迟滤波
+  （`tau_T = 0.015s`，由右侧边栏 "Thruster Lag (15ms)" 复选框 /
+  `MujocoVisBridge::enable_thruster_lag` 开关，默认关闭=直通），最终写入
+  `d_->ctrl`；通过一个仅在本进程内安装的 `mjcb_passive` 回调（与 Python 原型
+  `setup_hydrodynamics_callback` 完全相同的调用时机与目标累加数组
+  `qfrc_passive`，用于保证数值一致性）注入 `FossenHydrodynamics::compute()`
+  算出的水动力合力/合力矩 **加上** `MujocoViewer` 的 `Ctrl+拖拽` 交互扰动
+  力/力矩；随后调用 `mj_step2` + `mj_step1`（零延迟两段式步进，见下方"零延迟
+  两段式 `mj_step` 契约"）。**每一次真实物理步（而非每 8 步的渲染快照节流）**
+  都会重新计算接触垫法向力、Rhombic Kern 判据与脱离/角三角陷阱分类，累加进
+  500Hz 真实时基的统计计数器（见下文"Rhombic Kern 遥测"），确保瞬态 `<5ms`
+  的接触事件不会被 60Hz 快照节流漏采；每 8 步再通过 `std::mutex::try_lock()`
+  （绝不阻塞主循环）向 `MujocoVisBridge` 写入一次批量渲染快照（`qpos`/`qvel`/
+  `ctrl`/`pad_force` 等）。`write()` 开头还会消费 GUI 发出的复位 / 统计复位 /
+  造浪模式切换请求。
 
 ### 零延迟两段式 `mj_step` 契约
 
@@ -105,13 +113,19 @@ hardware_interface::return_type write() override;  // 无参数！Foxy 特有
   参考逐位一致，作为永久保留的数值基准。
 - **`kStonefishGeometryDriven`**（仿 *Stonefish* 仿真器的几何/网格驱动模型）：
   `HydroGeometryModel::buildFromMjModel()` 在 `configure()` 时自动遍历
-  `rov_base` 自身的全部几何体（`mjGEOM_BOX`/`SPHERE`/`CYLINDER`/`CAPSULE`/
+  `rov_base` 自身的几何体（`mjGEOM_BOX`/`SPHERE`/`CYLINDER`/`CAPSULE`/
   `ELLIPSOID`/`MESH`），按面/经纬网格/三角面自动切分出一组表面微元
-  `(centroid_body, normal_body, area)`，若原始微元数超过 256 个上限则按
-  "空间体素 × 主导法向方向（6 类：`+X/-X/+Y/-Y/+Z/-Z`）"联合键做面积加权
-  合并（当前模型 96(箭体6面×4×4) + 4×48(垫球) = 288 个原始微元会触发一次
-  合并；法向方向参与分桶键，保证同一体素内的接触垫球面/正交箭体面绝不会
-  因闭合曲面法向抵消而被错误合并抹平）。每拍 500Hz 对这组微元 `p` 做：
+  `(centroid_body, normal_body, area)`。4 个微小的 `pad_*` 接触垫球体
+  **不参与**这一流体表面切分（它们已经由 MuJoCo 自身的 Kelvin-Voigt 接触
+  求解器单独建模，详见 `CLAUDE.md` §4.2）——把它们混入水动力外壳只会污染
+  切分预算并通过 `decimatePatches()` 的体素合并污染箭体正面法向/面积。排除
+  后当前模型恰好是箭体 6 面 × 4×4 = **96** 个原始微元，不超过 256 上限、
+  无需任何有损合并，正面贴壁板（`x=-0.10m`）精确对应 **16 个微元、总面积
+  严格等于 `A_plate=0.24 m^2`、法向严格为 `[-1,0,0]^T`**（由单元测试
+  `FrontPlateAreaAndNormalsExact` 锁定）。若未来几何改动导致微元数仍然超过
+  256，才会触发"空间体素 × 主导法向方向（6 类：`+X/-X/+Y/-Y/+Z/-Z`）"联合键
+  面积加权合并（法向方向参与分桶键，防止闭合曲面法向抵消导致错误合并）。
+  每拍 500Hz 对这组微元 `p` 做：
 
   记微元在机体系的相对流速 `v_p^B = v_rel,CoM^B + ω^B × r_p^B`，法向分量
   `v_n = v_p^B · n_p`，切向分量 `v_t^B = v_p^B - v_n n_p`：
@@ -130,7 +144,12 @@ hardware_interface::return_type write() override;  // 无参数！Foxy 特有
     ```
     `n_p ≈ [-1,0,0]`：吸附力恒为 `-X`（吸向壁面）；挤膜阻尼在靠近壁面
     （`v_n>0`）时为 `+X`（阻碍靠近），远离壁面（`v_n<0`）时为 `-X`
-    （阻碍远离），两种情形都是负反馈阻尼而非正反馈。
+    （阻碍远离），两种情形都是负反馈阻尼而非正反馈。`(h_gap_nominal/h_gap,p)^3`
+    是无量纲比值，名义间隙处恒为 `1.0`；配套系数 `C_squeeze = 64.0 N·s/m`
+    （而非早期未归一化版本遗留的 `1e-6`），使名义间隙处单板总阻尼
+    `C_squeeze * A_plate = 15.36 N·s/m` 落在物理量级，而不是约 `2.4e-8 N`
+    的近似于零的力（单元测试 `StonefishVenturiAndSqueezePhysicalSigns` 锁定
+    靠近/远离壁面时的阻尼力符号与 `>0.5N` 量级）。
   - **整体线性阻尼**（弥补纯二次微元阻力在 `v_rel=0` 处导数为零、定点悬停时
     缺低速阻尼刚度的问题，复用与集中参数模型相同的 `D_lin`/`D_ang_lin`）：
     `F_lin = -D_lin ⊙ v_rel,CoM^B`，`T_lin = -D_ang,lin ⊙ ω^B`；
@@ -210,10 +229,16 @@ p_y = sum(F_Ni * y_i) / sum(F_Ni),  p_z = sum(F_Ni * z_i) / sum(F_Ni)
 K_val = |p_y| / L_y + |p_z| / L_z,  M_kern = 1 - K_val
 ```
 
-`write()` 每次快照 tick 都会算出 `kern_val`/`m_kern`/`liftoff_ratio`（4 个垫中
-法向力 `<=0` 的比例）/`cop_y`/`cop_z`，写入 `MujocoVisBridge` 供
-`MujocoViewer` 的实时浮层、Kern 菱形可视化（见下文）与未来的 OSQP 控制器
-直接复用。
+`write()` 在**每一次真实物理步**（而非每 8 步的渲染快照节流）都会算出
+`kern_val`/`m_kern`/`cop_y`/`cop_z`，并把该拍的脱离（`F_min<=1e-3N`）/角三角
+陷阱（`ΣF_N,i>1e-3N` 且 `|p_y|<=L_y`、`|p_z|<=L_z` 且 `K_val>1.0`）判定结果
+累加进 `total_eval_steps_`/`liftoff_steps_`/`liftoff_events_`（上升沿计数）/
+`corner_trap_steps_` 计数器，换算成累积比例写入 `MujocoVisBridge::
+liftoff_ratio`/`corner_trap_ratio`/`liftoff_events`/`active_pads`——这是
+`CLAUDE.md` §4 基准表要求的"500Hz 累积脱离时间比例/离散脱离事件数/角三角
+陷阱时间比例"，不会漏采任何瞬态 `<5ms` 接触事件。供 `MujocoViewer` 的实时
+浮层、Kern 菱形/CoP 可视化（见下文）与未来的 OSQP 控制器直接复用；
+`Backspace`（完整复位）或 `Reset Stats` 按钮均会清零这些累积计数器。
 
 ### 运行时造浪机切换（Runtime Wave-Maker Switching）
 
@@ -265,8 +290,10 @@ GLFW 窗口创建，仅空转等待停止信号。
 
 | 操作 | 效果 |
 |---|---|
-| 左键拖拽 | 相机环绕（orbit） |
-| 右键拖拽 | 相机平移（pan） |
+| 左键拖拽 | 相机环绕（orbit），默认竖直变体（上下拖拽调俯仰） |
+| 左键拖拽 + `Shift` | 相机环绕，水平变体（左右拖拽调方位角） |
+| 右键拖拽 | 相机平移（pan），默认竖直变体（上下拖拽沿世界 `Z` 轴平移，方便沿壁面上下移动视角） |
+| 右键拖拽 + `Shift` | 相机平移，水平变体 |
 | 滚轮 | 缩放（zoom） |
 | 左键双击 | 选中物体（`mjv_select`）并初始化 `mjvPerturb` |
 | `Ctrl` + 左键拖拽 | 对已选中物体施加外部力矩（torque），默认竖直变体 `mjMOUSE_ROTATE_V` |
@@ -310,6 +337,7 @@ GLFW 窗口创建，仅空转等待停止信号。
 | Simulation | `Running` 复选框 | 与 `Space` 等价 |
 | | `Step Once` 按钮 | 与 `S` 等价 |
 | | `Reset` 按钮 | 与 `Backspace` 等价 |
+| | `Reset Stats` 按钮 | 仅清零 500Hz 累积统计计数器（脱离/角三角陷阱累积时间比例、离散脱离事件数），不影响 ROV 位姿/速度，适合在不重置物理状态的情况下重新开始一轮基准统计 |
 | | `Sim Speed` 单选 | `1x/0.5x/0.2x/0.1x`，拉长 500Hz 物理线程的墙钟周期做慢动作观察，不改变 `mjModel::opt.timestep` |
 | | `Default Orbit`/`Wall YZ View`/`Top XY View`/`Side XZ View` 按钮 | 4 个预设相机视角（环绕默认视角 / 正对壁面 Y-Z 平面 / 俯视 X-Y 平面 / 侧视 X-Z 平面） |
 | | `Camera Follow` 复选框 | 勾选后每帧将相机 `lookat` 锁定到 ROV 质心，可与任意预设/手动环绕叠加使用 |
@@ -317,7 +345,7 @@ GLFW 窗口创建，仅空转等待停止信号。
 | | `Screenshot` 按钮 | 将当前整个窗口帧保存为 `/tmp/adhere_mujoco_screenshot_<ms>.ppm`（PPM 格式，GIMP/大多数看图软件可直接打开；若需要 PNG 可用 `convert shot.ppm shot.png` 转换），终端会打印保存路径 |
 | Wave & Hydro Model | `Mode` 单选 | Calm Water / Station-Keeping Gust，与 `1`/`2` 键等价 |
 | | `Hydro Model` 单选 | `Lumped`（集中参数）/ `Stonefish-Mesh`（几何驱动）水动力模型切换，见上文"双模式水动力引擎" |
-| | `Kern Diamond` 复选框 | 壁面上的灰色支撑矩形（`±L_y × ±L_z`，角三角陷阱区边界）+ 青色 Rhombic Kern 菱形 + 实时压力中心（CoP）标记开关，菱形颜色随 `K_val`/是否脱离壁面变化（绿/黄/红）；完全脱壁（`ΣF_N,i<=1e-3N`）时不绘制 CoP 球（无物理意义） |
+| | `Kern Diamond` 复选框 | 壁面上的灰色支撑矩形（`±L_y × ±L_z`，角三角陷阱区边界）+ **固定青色**（`{0.1,0.85,1.0}`）Rhombic Kern 菱形边界 + 实时压力中心（CoP）标记开关；菱形边界颜色恒定不变，CoP 球颜色随可行性状态变化——**绿**（4 垫均接触、`K_val<=1.0`）/**黄**（4 垫均接触但 `K_val>1.0`，角三角陷阱）/**红**（任意一垫实际脱离）；完全脱壁（`ΣF_N,i<=1e-3N`）时不绘制 CoP 球（无物理意义） |
 | ROV Overlays（自定义） | `Pad Contact Forces` | 4 个接触垫受力柱状图开关（绿色胶囊，长度正比于法向力） |
 | | `Flow Velocity Arrow` | 环境流速箭头开关（蓝色，从机体质心指向流速方向） |
 | Visualize（默认折叠） | `Transparent Hull` (`mjVIS_TRANSPARENT`) | 船体半透明——**可直接看到内部的接触垫/惯量箱/质心标记** |
@@ -339,10 +367,12 @@ GLFW 窗口创建，仅空转等待停止信号。
 | 分组 | 控件 | 说明 |
 |---|---|---|
 | Thrusters (Manual)（自定义） | `Zero All` 按钮 | 一键将全部 8 个滑条归零 |
+| | `Thruster Lag (15ms)` 复选框 | 默认关闭（直通，钳位后立即写入 `ctrl`）；勾选后对钳位后的目标推力额外叠加一阶 ESC 惯性延迟滤波（`tau_T=0.015s`，`alpha_T = 1-exp(-dt/tau_T)`），仅在物理确实前进一拍时积分，暂停时保持上次值不变 |
 | | `thr_N1..4` / `thr_T5..8` 滑条 | `[-40, 40] N`，叠加写入
-  `MujocoVisBridge::manual_ctrl`（与上层控制器指令相加），可在未挂载控制器时
-  手动测试单个推力器——例如把 4 个 `thr_N*` 拉到正值可将 ROV 压向壁面，
-  用于验证接触力/`Pad Contact Forces` 可视化是否随指令动态响应 |
+  `MujocoVisBridge::manual_ctrl`（与上层控制器指令相加）后统一钳位到
+  `±40.0 N` 硬件轨道极限，可在未挂载控制器时手动测试单个推力器——例如把 4 个
+  `thr_N*` 拉到正值可将 ROV 压向壁面，用于验证接触力/`Pad Contact Forces`
+  可视化是否随指令动态响应 |
 | Live Scope（自定义） | `Scope Plot` 单选 | `Off` / `Pad Forces F_N` / `Kern Margin & minF_N` /
   `Body Vel vs Flow` / `Thruster Commands`——在视口右下角嵌入一个 `mjvFigure` 实时滚动
   示波器（约 400 帧滚动历史窗口），对应曲线由每帧的 `cached_*` 快照驱动；切换通道会
@@ -361,7 +391,10 @@ GLFW 窗口创建，仅空转等待停止信号。
   仿真时间、造浪模式与 `τ`、环境流速、4 个接触垫受力、ROV 位姿
   `(X,Y,Z,φ,θ,ψ)`、机体系线速度 `(vx,vy,vz)`（已按当前姿态旋转到机体系）、
   机体角速度 `(ωx,ωy,ωz)`、当前水动力模型与微元数、Rhombic Kern 裕度
-  `M_kern`、脱离壁面比例 |
+  `M_kern`、当前接触垫数（`Active Pads`，0-4）、**500Hz 真实时基累积**的
+  脱离时间比例（`Liftoff Ratio`）、角三角陷阱时间比例（`Corner-Trap Ratio`）
+  与离散脱离事件数（`Liftoff Events`，上升沿计数）——均每个物理步累加，不受
+  60Hz 渲染快照节流影响，可被 `Reset Stats` 按钮清零重新统计 |
 
 `Visualize`/`Render Flags`/`Label`/`Visibility Groups` 四个原生 MuJoCo 开关组
 默认折叠（点击分组标题即可展开），为新增的 `Sim Speed`/相机预设/`Hydro Model`/
