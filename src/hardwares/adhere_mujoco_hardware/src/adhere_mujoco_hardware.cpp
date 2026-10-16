@@ -395,7 +395,8 @@ hardware_interface::return_type AdhereMujocoHardware::write()
 
   // GUI reset request (Backspace in MujocoViewer) takes priority over everything else this
   // tick: re-seed the authoritative mjData and re-latch mj_step1 so read() stays zero-delay.
-  if (vis_bridge_->reset_request.exchange(false)) {
+  const bool did_reset = vis_bridge_->reset_request.exchange(false);
+  if (did_reset) {
     mj_resetData(model_, data_);
     mj_step1(model_, data_);
     sim_time_ = data_->time;
@@ -437,10 +438,11 @@ hardware_interface::return_type AdhereMujocoHardware::write()
   vis_bridge_->sim_time.store(sim_time_);
 
   // Every 8 write() ticks (~60Hz at dt=2ms wall-clock, now gated on write_tick_count_ instead
-  // of step_count_ -- CLAUDE.md Phase 2.10 Bug 2 fix -- or immediately on a single_step so
-  // "Step Once" is never up to 7 ticks late), snapshot state into the vis bridge via
-  // try_lock() so a slow/blocked renderer can never stall this 500Hz loop.
-  if (write_tick_count_ % 8 == 0 || single_step) {
+  // of step_count_ -- CLAUDE.md Phase 2.10 Bug 2 fix) -- or immediately on a single_step,
+  // reset, wave-mode change, or any tick while paused (so a paused slider drag is visible on
+  // its very next tick instead of waiting up to 7 ticks) -- snapshot state into the vis bridge
+  // via try_lock() so a slow/blocked renderer can never stall this 500Hz loop.
+  if (write_tick_count_ % 8 == 0 || single_step || did_reset || wave_cmd != 0 || paused) {
     std::unique_lock<std::mutex> lock(vis_bridge_->mtx, std::try_to_lock);
     if (lock.owns_lock()) {
       std::memcpy(vis_bridge_->qpos.data(), data_->qpos, vis_bridge_->qpos.size() * sizeof(double));

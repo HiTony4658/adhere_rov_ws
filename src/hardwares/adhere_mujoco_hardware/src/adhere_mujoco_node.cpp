@@ -287,12 +287,20 @@ int main(int argc, char ** argv)
     auto next_tick = Clock::now() + std::chrono::duration_cast<Clock::duration>(kBasePeriod);
     auto last_tick = Clock::now();
     double actual_hz_ema = kPhysicsUpdateRateHz;
+    double step_work_ms_ema = 0.0;
     auto bridge = hw->visBridge();
 
     while (rclcpp::ok() && physics_running.load()) {
+      const auto work_start = Clock::now();
       controller_manager->read();
       controller_manager->update();
       controller_manager->write();
+      const double work_ms =
+        std::chrono::duration<double, std::milli>(Clock::now() - work_start).count();
+      step_work_ms_ema = 0.98 * step_work_ms_ema + 0.02 * work_ms;
+      if (bridge) {
+        bridge->step_work_ms.store(step_work_ms_ema);
+      }
 
       const auto now = Clock::now();
       const double dt = std::chrono::duration<double>(now - last_tick).count();

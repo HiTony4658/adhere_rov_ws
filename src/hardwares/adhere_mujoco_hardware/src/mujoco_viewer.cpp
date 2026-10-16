@@ -424,14 +424,16 @@ void MujocoViewer::onCursorPos(double x, double y)
     const double reldy = dy_raw / fb_h;
 
     if (uistate_.control && pert_.active) {
-      const int action = uistate_.left ? mjMOUSE_MOVE_H : (uistate_.right ? mjMOUSE_MOVE_H : 0);
-      // Ctrl+Left = torque (rotate perturb), Ctrl+Right = force (translate perturb).
+      // Ctrl+Left = torque (rotate perturb), Ctrl+Right = force (translate perturb). Default
+      // to the Vertical variants (mjMOUSE_MOVE_V/mjMOUSE_ROTATE_V) so users can drag/pan the
+      // ROV along World Z on the wall; holding Shift switches to the Horizontal variants.
+      const int move_action = uistate_.shift ? mjMOUSE_MOVE_H : mjMOUSE_MOVE_V;
+      const int rotate_action = uistate_.shift ? mjMOUSE_ROTATE_H : mjMOUSE_ROTATE_V;
       if (uistate_.left) {
-        mjv_movePerturb(model_, d_vis_, mjMOUSE_ROTATE_H, reldx, reldy, &scn_, &pert_);
+        mjv_movePerturb(model_, d_vis_, rotate_action, reldx, reldy, &scn_, &pert_);
       } else if (uistate_.right) {
-        mjv_movePerturb(model_, d_vis_, mjMOUSE_MOVE_H, reldx, reldy, &scn_, &pert_);
+        mjv_movePerturb(model_, d_vis_, move_action, reldx, reldy, &scn_, &pert_);
       }
-      (void)action;
     } else if (uistate_.left) {
       mjv_moveCamera(model_, mjMOUSE_ROTATE_H, reldx, reldy, &cam_);
     } else if (uistate_.right) {
@@ -684,15 +686,28 @@ void MujocoViewer::drawKernDiamond()
   const mjtNum local_pts[4][3] = {
     {kern_x_plane_, kern_Ly_, 0.0}, {kern_x_plane_, 0.0, kern_Lz_},
     {kern_x_plane_, -kern_Ly_, 0.0}, {kern_x_plane_, 0.0, -kern_Lz_}};
+  // Outer rigid Support Rectangle (+-L_y x +-L_z), the physical corner-pad footprint the
+  // Rhombic Kern diamond is inscribed within -- visualizes the full Corner-Triangle Trap
+  // region outside the diamond but inside the rectangle.
+  const mjtNum local_rect[4][3] = {
+    {kern_x_plane_, kern_Ly_, kern_Lz_}, {kern_x_plane_, -kern_Ly_, kern_Lz_},
+    {kern_x_plane_, -kern_Ly_, -kern_Lz_}, {kern_x_plane_, kern_Ly_, -kern_Lz_}};
   const mjtNum * body_pos = d_vis_->xpos + 3 * body_id_;
   const mjtNum * body_quat = d_vis_->xquat + 4 * body_id_;
   mjtNum world_pts[4][3];
+  mjtNum world_rect[4][3];
   for (int i = 0; i < 4; ++i) {
     mjtNum rotated[3];
     mju_rotVecQuat(rotated, local_pts[i], body_quat);
     world_pts[i][0] = body_pos[0] + rotated[0];
     world_pts[i][1] = body_pos[1] + rotated[1];
     world_pts[i][2] = body_pos[2] + rotated[2];
+
+    mjtNum rotated_rect[3];
+    mju_rotVecQuat(rotated_rect, local_rect[i], body_quat);
+    world_rect[i][0] = body_pos[0] + rotated_rect[0];
+    world_rect[i][1] = body_pos[1] + rotated_rect[1];
+    world_rect[i][2] = body_pos[2] + rotated_rect[2];
   }
 
   // Color per Section C1 spec: green (comfortably inside the kern, no liftoff), yellow
@@ -710,6 +725,15 @@ void MujocoViewer::drawKernDiamond()
     rgba[3] = 0.6f;
   }
 
+  // Grey outer Support Rectangle edges, drawn first so the diamond's own edges render on top.
+  const float rect_rgba[4] = {0.6f, 0.6f, 0.6f, 0.5f};
+  for (int i = 0; i < 4 && scn_.ngeom < scn_.maxgeom; ++i) {
+    mjvGeom * g = &scn_.geoms[scn_.ngeom];
+    mjv_initGeom(g, mjGEOM_CAPSULE, nullptr, nullptr, nullptr, rect_rgba);
+    mjv_connector(g, mjGEOM_CAPSULE, 0.003, world_rect[i], world_rect[(i + 1) % 4]);
+    scn_.ngeom++;
+  }
+
   for (int i = 0; i < 4 && scn_.ngeom < scn_.maxgeom; ++i) {
     mjvGeom * g = &scn_.geoms[scn_.ngeom];
     mjv_initGeom(g, mjGEOM_CAPSULE, nullptr, nullptr, nullptr, rgba);
@@ -717,7 +741,11 @@ void MujocoViewer::drawKernDiamond()
     scn_.ngeom++;
   }
 
-  if (scn_.ngeom < scn_.maxgeom) {
+  // CoP is physically undefined while fully detached from the wall (sum F_N,i ~ 0) -- do not
+  // draw a false CoP sphere at the diamond's center in that case.
+  const double total_pad_force =
+    cached_pad_force_[0] + cached_pad_force_[1] + cached_pad_force_[2] + cached_pad_force_[3];
+  if (total_pad_force > 1e-3 && scn_.ngeom < scn_.maxgeom) {
     const mjtNum local_cop[3] = {kern_x_plane_ + 0.005, cached_cop_y_, cached_cop_z_};
     mjtNum rotated[3];
     mju_rotVecQuat(rotated, local_cop, body_quat);
@@ -732,6 +760,16 @@ void MujocoViewer::drawKernDiamond()
 
 void MujocoViewer::updateAndDrawScope(mjrRect full_viewport)
 {
+  if (scope_mode_ != last_scope_channel_) {
+    // Switching channels: drop the old history so stale large-scale values (e.g. 40N
+    // thrusters) can never crush a new, smaller-scale signal's auto-ranged Y axis.
+    last_scope_channel_ = scope_mode_;
+    scope_history_count_ = 0;
+    for (auto & series : scope_history_) {
+      series.fill(0.0f);
+    }
+  }
+
   if (scope_mode_ == 0) {
     return;
   }
@@ -893,6 +931,7 @@ void MujocoViewer::drawOverlayTelemetry(mjrRect viewport)
   }
 
   const double hz = bridge_->actual_physics_hz.load();
+  const double work_ms = bridge_->step_work_ms.load();
   const double sim_t = bridge_->sim_time.load();
   const int wave_mode = bridge_->wave_mode_active.load();
   const double tau = bridge_->wave_tau.load();
@@ -905,11 +944,11 @@ void MujocoViewer::drawOverlayTelemetry(mjrRect viewport)
     "Body AngVel (wx wy wz)\nHydro Mode\nKern Margin M_kern\nLiftoff Ratio");
   std::snprintf(
     content, sizeof(content),
-    "%.1f Hz\n%.2f s\n%s (tau=%.2fs)\n[%.2f, %.2f, %.2f] m/s\n"
+    "%.1f Hz (work: %.3f ms)\n%.2f s\n%s (tau=%.2fs)\n[%.2f, %.2f, %.2f] m/s\n"
     "%.1f / %.1f / %.1f / %.1f N\n[%.3f, %.3f, %.3f] m\n[%.1f, %.1f, %.1f] deg\n[%.3f, %.3f, %.3f] m/s\n"
     "[%.3f, %.3f, %.3f] rad/s\n%s (%d patches)\n%.3f (K_val=%.3f)\n%.1f%%",
-    hz, sim_t, wave_mode == 2 ? "Gust" : "Calm", tau, flow[0], flow[1], flow[2], pad_force[0],
-    pad_force[1], pad_force[2], pad_force[3], px, py, pz, phi * 57.2958, theta * 57.2958,
+    hz, work_ms, sim_t, wave_mode == 2 ? "Gust" : "Calm", tau, flow[0], flow[1], flow[2],
+    pad_force[0], pad_force[1], pad_force[2], pad_force[3], px, py, pz, phi * 57.2958, theta * 57.2958,
     psi * 57.2958, vx, vy, vz, wx, wy, wz, hydro_name, cached_hydro_patch_count_, cached_m_kern_,
     cached_kern_val_, cached_liftoff_ratio_ * 100.0);
 

@@ -108,21 +108,49 @@ hardware_interface::return_type write() override;  // 无参数！Foxy 特有
   `rov_base` 自身的全部几何体（`mjGEOM_BOX`/`SPHERE`/`CYLINDER`/`CAPSULE`/
   `ELLIPSOID`/`MESH`），按面/经纬网格/三角面自动切分出一组表面微元
   `(centroid_body, normal_body, area)`，若原始微元数超过 256 个上限则按
-  空间体素网格做面积加权合并（当前模型 96(箭体6面×4×4) + 4×48(垫球) = 288
-  个原始微元会触发一次合并）。每拍 500Hz 对这组微元做：
-  - 法向分布式二次压阻 + 切向蒙皮摩擦（`Cd_normal`/`Cf_tangent`）；
-  - 仅对朝壁（法向 `x<-0.5`）微元按各自局部 `x` 坐标计算的近壁 Venturi 吸附 +
-    挤膜阻尼（`C_venturi`/`C_squeeze`）；
+  "空间体素 × 主导法向方向（6 类：`+X/-X/+Y/-Y/+Z/-Z`）"联合键做面积加权
+  合并（当前模型 96(箭体6面×4×4) + 4×48(垫球) = 288 个原始微元会触发一次
+  合并；法向方向参与分桶键，保证同一体素内的接触垫球面/正交箭体面绝不会
+  因闭合曲面法向抵消而被错误合并抹平）。每拍 500Hz 对这组微元 `p` 做：
+
+  记微元在机体系的相对流速 `v_p^B = v_rel,CoM^B + ω^B × r_p^B`，法向分量
+  `v_n = v_p^B · n_p`，切向分量 `v_t^B = v_p^B - v_n n_p`：
+
+  - **迎流侧单面法向压阻**（钝体 `Cd_normal` 本就定义在单面迎流投影面积上，
+    迎流+背风双面施加会计重两次）：
+    `F_drag,n = -0.5 ρ Cd_normal A_p v_n^2 n_p`（仅当 `v_n > 0`，背风侧为零）；
+  - **切向蒙皮摩擦**（双向）：`F_skin,t = -0.5 ρ Cf_tangent A_p |v_t^B| v_t^B`；
+  - **朝壁微元**（法向 `n_p·x̂ < -0.5`）的近壁 Venturi 吸附 + 挤膜阻尼：取该
+    微元自身世界系 `x` 坐标 `x_world,p`（微元质心本就位于箭体外表面，**不再
+    二次减去** `wall_x_offset`）得到间隙 `h_gap,p = max(x_world,p, 0.005)`，
+    衰减因子 `decay = exp(-max(0, h_gap,p - h_gap_nominal) / h0_decay)`：
+    ```
+    F_suction,n = +0.5 ρ C_venturi A_p (v_t,y^2 + v_t,z^2) decay n_p   (吸附，指向壁面)
+    F_squeeze,n = -C_squeeze A_p (h_gap_nominal / h_gap,p)^3 v_n decay n_p  (阻尼，双向负反馈)
+    ```
+    `n_p ≈ [-1,0,0]`：吸附力恒为 `-X`（吸向壁面）；挤膜阻尼在靠近壁面
+    （`v_n>0`）时为 `+X`（阻碍靠近），远离壁面（`v_n<0`）时为 `-X`
+    （阻碍远离），两种情形都是负反馈阻尼而非正反馈。
+  - **整体线性阻尼**（弥补纯二次微元阻力在 `v_rel=0` 处导数为零、定点悬停时
+    缺低速阻尼刚度的问题，复用与集中参数模型相同的 `D_lin`/`D_ang_lin`）：
+    `F_lin = -D_lin ⊙ v_rel,CoM^B`，`T_lin = -D_ang,lin ⊙ ω^B`；
+  - **非定常 Froude-Krylov + 附加质量反力**（环境流体加速度 `a_fluid^B`，来自
+    半正弦阵风的解析导数）：
+    `F_FK+AM = (ρ V_disp I_3 + diag(M_A,lin)) a_fluid^B`；
+  - **Munk 回正力矩**（经典理想流体附加质量各向异性耦合，含平动与转动两项）：
+    `T_Munk = -v_rel,CoM^B × (M_A,lin ⊙ v_rel,CoM^B) - ω^B × (M_A,ang ⊙ ω^B)`；
   - 用 Lamb 椭球近似（由该模型的包围盒半轴 `bbox_half_extents` 通过数值积分
-    得到各主轴附加质量/附加惯量系数）注入非定常 Froude-Krylov 力与 Munk
-    回正力矩。
+    得到各主轴附加质量/附加惯量系数 `M_A,lin`/`M_A,ang`，仅在 `buildFromMjModel()`
+    时算一次）为上述两项提供系数；
   - 浮力/重力偏置与自由液面渐变复用集中参数模型的同一组公式（整体效应，
     与微元分布无关）。
 
   这一路径对几何**完全无感知假设**：换成任意 CAD 三角网格（未来
   `full_cad_description` 包）后 `buildFromMjModel()` 会自动识别
-  `mjGEOM_MESH` 并切分三角面，不需要改动任何水动力代码。单次 500Hz 评估
-  （≤256 个微元的定长循环，无堆分配）远低于 `30us` 预算。
+  `mjGEOM_MESH` 并切分三角面，不需要改动任何水动力代码。重网格化/体素合并/
+  Lamb 椭球积分只在 `configure()` 时跑一次（实测约 `1.7ms`），500Hz 热路径
+  只剩 `≤256` 个微元的定长循环（无堆分配）：实测单次 `compute()` 调用约
+  `4.2us`（66 个微元），远低于 `2000us`/拍（500Hz）预算。
 
 两种模式的开关、当前激活的微元数（`hydro_patch_count`）与 Rhombic Kern 遥测
 都会实时显示在 `MujocoViewer` 的左上角浮层中。
@@ -241,8 +269,14 @@ GLFW 窗口创建，仅空转等待停止信号。
 | 右键拖拽 | 相机平移（pan） |
 | 滚轮 | 缩放（zoom） |
 | 左键双击 | 选中物体（`mjv_select`）并初始化 `mjvPerturb` |
-| `Ctrl` + 左键拖拽 | 对已选中物体施加外部力矩（torque） |
-| `Ctrl` + 右键拖拽 | 对已选中物体施加外部力（force） |
+| `Ctrl` + 左键拖拽 | 对已选中物体施加外部力矩（torque），默认竖直变体 `mjMOUSE_ROTATE_V` |
+| `Ctrl` + 右键拖拽 | 对已选中物体施加外部力（force），默认竖直变体 `mjMOUSE_MOVE_V` |
+| `Ctrl` + `Shift` + 拖拽 | 同上，但切换为水平变体（`mjMOUSE_ROTATE_H`/`mjMOUSE_MOVE_H`） |
+
+默认竖直变体让用户可以直接沿世界 `Z` 轴在壁面上下拖拽/旋转 ROV（最常用的
+贴壁位姿调试场景），按住 `Shift` 切到水平变体用于其他方向的调试。每次
+`Ctrl`+点击都会重新调用 `mjv_initPerturb()` 用 ROV 当前位姿重新播种扰动基准
+（而非复用上一次双击选中时的旧位姿），避免 ROV 已经移动后拖拽方向错位。
 
 `Ctrl` 拖拽产生的力/力矩会实时写回 `MujocoVisBridge::xfrc_perturb`，并在
 `AdhereMujocoHardware::applyHydrodynamics()` 中与水动力合并注入
@@ -283,7 +317,7 @@ GLFW 窗口创建，仅空转等待停止信号。
 | | `Screenshot` 按钮 | 将当前整个窗口帧保存为 `/tmp/adhere_mujoco_screenshot_<ms>.ppm`（PPM 格式，GIMP/大多数看图软件可直接打开；若需要 PNG 可用 `convert shot.ppm shot.png` 转换），终端会打印保存路径 |
 | Wave & Hydro Model | `Mode` 单选 | Calm Water / Station-Keeping Gust，与 `1`/`2` 键等价 |
 | | `Hydro Model` 单选 | `Lumped`（集中参数）/ `Stonefish-Mesh`（几何驱动）水动力模型切换，见上文"双模式水动力引擎" |
-| | `Kern Diamond` 复选框 | 壁面上的 Rhombic Kern 菱形 + 实时压力中心（CoP）标记开关，颜色随 `K_val`/是否脱离壁面变化（绿/黄/红） |
+| | `Kern Diamond` 复选框 | 壁面上的灰色支撑矩形（`±L_y × ±L_z`，角三角陷阱区边界）+ 青色 Rhombic Kern 菱形 + 实时压力中心（CoP）标记开关，菱形颜色随 `K_val`/是否脱离壁面变化（绿/黄/红）；完全脱壁（`ΣF_N,i<=1e-3N`）时不绘制 CoP 球（无物理意义） |
 | ROV Overlays（自定义） | `Pad Contact Forces` | 4 个接触垫受力柱状图开关（绿色胶囊，长度正比于法向力） |
 | | `Flow Velocity Arrow` | 环境流速箭头开关（蓝色，从机体质心指向流速方向） |
 | Visualize（默认折叠） | `Transparent Hull` (`mjVIS_TRANSPARENT`) | 船体半透明——**可直接看到内部的接触垫/惯量箱/质心标记** |
@@ -311,7 +345,9 @@ GLFW 窗口创建，仅空转等待停止信号。
   用于验证接触力/`Pad Contact Forces` 可视化是否随指令动态响应 |
 | Live Scope（自定义） | `Scope Plot` 单选 | `Off` / `Pad Forces F_N` / `Kern Margin & minF_N` /
   `Body Vel vs Flow` / `Thruster Commands`——在视口右下角嵌入一个 `mjvFigure` 实时滚动
-  示波器（约 400 帧滚动历史窗口），对应曲线由每帧的 `cached_*` 快照驱动 |
+  示波器（约 400 帧滚动历史窗口），对应曲线由每帧的 `cached_*` 快照驱动；切换通道会
+  清空历史缓冲，避免旧量级（如 `40N` 推力器）残留压扁新通道（如 `0.3m/s` 速度）的
+  自动量程 |
 | Render Flags（默认折叠） | `Wireframe`/`Shadow`/`Reflection`/`Skybox`/`Fog`/`Haze` | 场景级渲染效果开关（`mjtRndFlag`），纯视觉，不影响物理 |
 | Label（默认折叠） | `Mode` 单选 | None/Body/Joint/Geom/Site/Camera/Light/Tendon/Actuator/Constraint/
   Flex/Skin/Selection/SelPoint/ContactPt/ContactForce/Island——在 3D 视口内
@@ -319,7 +355,9 @@ GLFW 窗口创建，仅空转等待停止信号。
 | Visibility Groups（默认折叠） | `Geom Group 0`/`Site Group 0` | 整体隐藏/显示所有几何体/站点（`rov_wall.xml`
   目前所有元素都在默认组 `0`，故只有这一组有实际效果；`opt_.geomgroup[1..5]`/
   `sitegroup[1..5]` 仍可通过代码按需启用，这里暂不在 UI 上重复暴露） |
-| Telemetry（自定义） | （说明性条目，指向视口左上角的实时数值浮层） | 浮层内容：物理频率（Hz）、
+| Telemetry（自定义） | （说明性条目，指向视口左上角的实时数值浮层） | 浮层内容：物理频率（Hz，
+  附带 `work:` 括注的纯计算耗时 `step_work_ms`——`read()+update()+write()` 的 EMA
+  毫秒数，用于量化 `Stonefish-Mesh` 相对 `Lumped` 的真实 CPU 开销）、
   仿真时间、造浪模式与 `τ`、环境流速、4 个接触垫受力、ROV 位姿
   `(X,Y,Z,φ,θ,ψ)`、机体系线速度 `(vx,vy,vz)`（已按当前姿态旋转到机体系）、
   机体角速度 `(ωx,ωy,ωz)`、当前水动力模型与微元数、Rhombic Kern 裕度

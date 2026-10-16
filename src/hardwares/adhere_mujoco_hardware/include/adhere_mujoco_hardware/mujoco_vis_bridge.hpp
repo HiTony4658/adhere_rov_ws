@@ -62,6 +62,7 @@ struct MujocoVisBridge
 
   // --- hardware -> GUI scalar telemetry (lock-free atomics) ---
   std::atomic<double> actual_physics_hz{0.0};
+  std::atomic<double> step_work_ms{0.0};  // EMA of read()+update()+write() pure compute time
   std::atomic<double> sim_time{0.0};
   std::atomic<int> wave_mode_active{1};
   std::atomic<double> wave_tau{0.0};

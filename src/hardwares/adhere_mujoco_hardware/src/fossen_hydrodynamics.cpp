@@ -89,10 +89,15 @@ Wrench FossenHydrodynamics::compute(
     const Eigen::Vector3d v_t = v_p_body - v_n * p.normal_body;
     const double v_t_norm = v_t.norm();
 
-    // Distributed quadratic pressure drag (normal direction).
-    const Eigen::Vector3d F_drag_n =
-      -0.5 * params.rho_water * params.Cd_normal * p.area * v_n * std::abs(v_n) * p.normal_body;
-    // Skin friction (tangential direction).
+    // Windward-only distributed quadratic pressure drag (normal direction): bluff-body
+    // Cd_normal is defined on single-sided frontal projected area (already encompassing
+    // windward stagnation + leeward wake suction), so applying it on both sides double-counts
+    // the pressure drag. Leeward patches (v_n <= 0) contribute zero normal pressure drag here.
+    Eigen::Vector3d F_drag_n = Eigen::Vector3d::Zero();
+    if (v_n > 0.0) {
+      F_drag_n = -0.5 * params.rho_water * params.Cd_normal * p.area * v_n * v_n * p.normal_body;
+    }
+    // Skin friction (tangential direction), both directions.
     const Eigen::Vector3d F_skin_t =
       -0.5 * params.rho_water * params.Cf_tangent * p.area * v_t_norm * v_t;
 
@@ -101,17 +106,23 @@ Wrench FossenHydrodynamics::compute(
     if (p.normal_body.x() < -0.5) {
       // Wall-facing patch: per-patch near-wall Venturi suction + squeeze-film lubrication,
       // using this patch's own X position instead of one whole-body CoM X (Section B4).
+      // r_p is already on the hull's exterior surface (e.g. -0.10 m for the front wall-facing
+      // plate), so x_world_p is already the true distance from the patch surface to the World
+      // X=0 wall -- do NOT subtract params.wall_x_offset a second time.
       const double x_world_p = state.com_pos_world.x() + (R * r_p).x();
-      const double h_gap_p = std::max(x_world_p - params.wall_x_offset, 0.001);
+      const double h_gap_p = std::max(x_world_p, 0.005);
       const double v_tan_sq_p = v_t.y() * v_t.y() + v_t.z() * v_t.z();
-      const double decay = std::exp(-(h_gap_p - params.h_gap_nominal) / params.h0_decay);
+      const double decay =
+        std::exp(-std::max(0.0, h_gap_p - params.h_gap_nominal) / params.h0_decay);
+      // n_p = [-1,0,0]^T here, so the +sign below yields a -X (wall-attractive) suction force.
       F_suction_n =
-        -0.5 * params.rho_water * params.C_venturi * p.area * v_tan_sq_p * decay * p.normal_body;
+        0.5 * params.rho_water * params.C_venturi * p.area * v_tan_sq_p * decay * p.normal_body;
 
-      // Positive when this patch is closing in on the wall (moving along body -X).
-      const double v_n_wall_approach = -v_n;
-      F_squeeze_n = -params.C_squeeze * p.area / (h_gap_p * h_gap_p * h_gap_p) *
-        v_n_wall_approach * decay * p.normal_body;
+      // v_n > 0 means this patch is closing in on the wall (moving along body -X); the
+      // squeeze-film term below then points along -n_p = +X (resisting approach), and along
+      // +n_p = -X when v_n < 0 (separating), resisting separation either way.
+      F_squeeze_n = -params.C_squeeze * p.area *
+        std::pow(params.h_gap_nominal / h_gap_p, 3) * v_n * decay * p.normal_body;
     }
 
     const Eigen::Vector3d F_patch = F_drag_n + F_skin_t + F_suction_n + F_squeeze_n;
@@ -119,17 +130,27 @@ Wrench FossenHydrodynamics::compute(
     T_total_body += r_p.cross(F_patch);
   }
 
-  // Unsteady Froude-Krylov (ambient fluid-acceleration reaction) force: fluid accelerating
-  // around the body (gusts) exerts a reaction force proportional to the added-mass tensor.
-  // This is distinct from the body's own-acceleration added-mass reaction (which mj_step
-  // does not know about and which is out of scope here -- it belongs in the controller's
-  // effective mass matrix, not as an explicit applied force).
+  // Low-speed linear viscous damping (whole-body): purely quadratic patch drag has zero
+  // derivative at v_rel=0, losing damping stiffness during station-keeping.
+  F_total_body += -params.D_lin.cwiseProduct(v_cog_body);
+  T_total_body += -params.D_ang_lin.cwiseProduct(w_body);
+
+  // Unsteady Froude-Krylov (displaced-fluid inertia) + added-mass reaction force: fluid
+  // accelerating around the body (gusts) exerts a reaction force proportional to both the
+  // displaced volume and the added-mass tensor. This is distinct from the body's own-
+  // acceleration added-mass reaction (which mj_step does not know about and which is out of
+  // scope here -- it belongs in the controller's effective mass matrix, not as an explicit
+  // applied force).
   const Eigen::Vector3d a_fluid_body = R.transpose() * params.currentAccelerationWorld(t);
-  F_total_body += geo->added_mass_linear * a_fluid_body;
+  F_total_body +=
+    (params.rho_water * params.displaced_volume * Eigen::Matrix3d::Identity() +
+     geo->added_mass_linear) *
+    a_fluid_body;
 
   // Munk moment: classical rigid-body-in-ideal-fluid moment from added-mass anisotropy
-  // coupling relative linear velocity into a destabilizing moment.
-  T_total_body += v_cog_body.cross(geo->added_mass_linear * v_cog_body);
+  // coupling relative linear/angular velocity into a destabilizing moment.
+  T_total_body += -v_cog_body.cross(geo->added_mass_linear * v_cog_body) -
+    w_body.cross(geo->added_mass_angular * w_body);
 
   // Buoyancy/gravity-bias and the free-surface taper are whole-body effects independent of
   // the distributed-drag model; reuse the same lumped-model terms rather than re-deriving a
@@ -309,6 +330,27 @@ void tessellateMesh(
   }
 }
 
+// Maps a unit-ish normal to one of 6 dominant-axis-direction buckets (+X,-X,+Y,-Y,+Z,-Z),
+// indexed by the axis of largest |component| and its sign. Folded into decimatePatches()'s
+// voxel hash key so spatially-coincident but oppositely-facing patches (e.g. all 48 patches of
+// one closed contact-pad sphere, or two orthogonal box faces sharing a voxel) are never merged
+// into the same bucket -- merging them would sum their area-weighted normals to near zero
+// (closed-surface normals integrate to the zero vector) while still dumping their full area
+// onto whichever direction survives.
+int normalDirIndex(const Eigen::Vector3d & n)
+{
+  int axis = 0;
+  double max_abs = std::abs(n.x());
+  if (std::abs(n.y()) > max_abs) {
+    axis = 1;
+    max_abs = std::abs(n.y());
+  }
+  if (std::abs(n.z()) > max_abs) {
+    axis = 2;
+  }
+  return axis * 2 + (n[axis] >= 0.0 ? 0 : 1);
+}
+
 // Decimates `raw` to at most kMaxPatches entries via area-weighted spatial-grid bucketing.
 // No-op (returns raw unchanged) if already within budget.
 constexpr int kMaxPatches = 256;
@@ -326,7 +368,9 @@ std::vector<SurfacePatch> decimatePatches(const std::vector<SurfacePatch> & raw)
     aabb_max = aabb_max.cwiseMax(p.centroid_body);
   }
   const Eigen::Vector3d extent = (aabb_max - aabb_min).cwiseMax(1e-6);
-  constexpr int kGridN = 6;  // 6^3 = 216 <= 256
+  // 3^3 spatial cells x 6 normal-direction buckets = 162 <= kMaxPatches, leaving headroom
+  // versus the 256 budget while keeping every bucket's occupants normal-direction-consistent.
+  constexpr int kGridN = 3;
   const Eigen::Vector3d cell_size = extent / static_cast<double>(kGridN);
 
   struct Bucket
@@ -345,8 +389,9 @@ std::vector<SurfacePatch> decimatePatches(const std::vector<SurfacePatch> & raw)
     const int ix = std::clamp(static_cast<int>(rel.x() / cell_size.x()), 0, kGridN - 1);
     const int iy = std::clamp(static_cast<int>(rel.y() / cell_size.y()), 0, kGridN - 1);
     const int iz = std::clamp(static_cast<int>(rel.z() / cell_size.z()), 0, kGridN - 1);
+    const int ndir = normalDirIndex(p.normal_body);
     const int64_t key =
-      (static_cast<int64_t>(ix) * kGridN + iy) * kGridN + iz;
+      ((static_cast<int64_t>(ix) * kGridN + iy) * kGridN + iz) * 6 + ndir;
     Bucket & b = buckets[key];
     b.area_sum += p.area;
     b.centroid_weighted_sum += p.area * p.centroid_body;

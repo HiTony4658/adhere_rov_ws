@@ -567,3 +567,96 @@ Phase 3（控制器包）启动前的代码审计发现 `adhere_mujoco_hardware`
 - 本阶段未在真实桌面 GLFW 会话中逐项人工复核全部 6 个 bug 修复与新 UI
   控件的视觉效果（环境限制），后续首次桌面会话应按 README 操作表逐项确认，
   尤其是相机 4 个预设的 `azimuth`/`elevation` 符号是否符合预期视角。
+
+## Phase 2.10 审计修复（2026-10-16）：Stonefish 符号/几何 bug 修复、Viewer 可视化与遥测补全
+
+### 目标
+
+Phase 3（控制器包）启动前对 Phase 2.10 引入的 `Stonefish-Mesh` 几何驱动水动力
+模型与 `MujocoViewer` 新增调试工具做逐行复核，发现 6 处严重物理符号/几何
+bug（均局限于 `kStonefishGeometryDriven` 分支，`kParametricLumped` 零改动）
+与 3 处 GUI 可视化/遥测缺口，逐一修复。
+
+### `fossen_hydrodynamics.cpp` 的 6 处物理/几何 bug
+
+1. **Venturi 吸附 + 挤膜阻尼符号反转**：壁面微元外法向 `n_p ≈ [-1,0,0]`；
+   原实现 `F_suction_n = -0.5*...*n_p` 在负标量乘负法向下产生 `+X` 排斥力
+   （应为 `-X` 吸附力），且 `F_squeeze_n` 对 `v_n` 做了双重取反，造成
+   "越靠近壁面越被加速吸入、越远离越被推开" 的正反馈（应为负反馈阻尼）。
+   修复：吸附力改为 `+0.5*...*n_p`；挤膜阻尼直接用原始 `v_n`（不再取反）、
+   公式改为 `-C_squeeze*A*(h_nom/h)^3*v_n*decay*n_p`，经验证两种模式下
+   近壁顺流吸附力 `F_x` 均为负（见下方数值核验）。
+2. **`wall_x_offset`（0.10m）重复减去两次**：微元质心 `r_p` 在壁面微元上
+   本就已经位于箭体外表面（`x≈-0.10m`），`x_world_p` 已是微元到世界
+   `X=0` 壁面的真实距离，原代码仍减去 `wall_x_offset`，导致名义 `0.025m`
+   间隙被误算成 `-0.075m`（钳到 `0.001m`）。修复：`h_gap_p = max(x_world_p, 0.005)`，
+   不再二次减去偏移量。
+3. **`decimatePatches()` 体素合并抹平球面/正交面法向**：原体素键只编码空间
+   坐标 `(ix,iy,iz)`，4 个接触垫球（每个 48 微元）各自整体落入同一体素——
+   闭合球面法向面积加权求和理论上收敛于零向量，抹平法向的同时把全部球面积
+   错误地堆到残余方向上。修复：新增 `normalDirIndex()` 按主导轴+符号分 6 类，
+   体素键改为 `(((ix*N+iy)*N+iz)*6+normal_dir`，`N` 从 6 降到 3（`3^3*6=162
+   <= 256` 预算），同一体素内的微元必然同法向主导方向，杜绝法向抹平。
+4. **背风面二次计重压阻 + 缺少低速线性阻尼/非定常排水惰性/Munk 力矩符号反**：
+   - 法向压阻 `Cd_normal` 原来对迎流（`v_n>0`）与背风（`v_n<0`）微元都施加，
+     但钝体阻力系数本就定义在单面迎流投影面积上（已含迎流滞止压+背风尾流
+     吸力），双面施加等于计重两次——修复为只在 `v_n>0` 时施加法向压阻。
+   - 纯二次微元阻力在 `v_rel=0` 处导数为零，定点悬停时丢失低速阻尼刚度——
+     补上整体线性阻尼 `-D_lin⊙v_rel,CoM` 与 `-D_ang_lin⊙ω^B`。
+   - 非定常流体加速度反力原来只含附加质量项，缺排水体积的 Froude-Krylov
+     惯性项——补上 `+rho*V_disp*a_fluid_body`。
+   - Munk 回正力矩符号反（`+v×(M_A v)` 应为 `-v×(M_A v)`），且缺旋转附加
+     惯量耦合项——改为 `-v_cog×(M_A,lin v_cog) - ω×(M_A,ang ω)`。
+
+### `MujocoViewer`/`MujocoVisBridge`/`adhere_mujoco_node` 的 3 处可视化/遥测缺口
+
+1. **`drawKernDiamond()` 补全灰色支撑矩形 + 脱壁隐藏假 CoP**：新增连接
+   `(±L_y,±L_z)` 4 角的灰色外框（在青色菱形之前绘制），直观呈现角三角陷阱
+   区；`sum F_N,i <= 1e-3N`（完全脱壁）时不再绘制红色 CoP 小球。
+2. **示波器切换通道不清历史**：新增 `last_scope_channel_` 成员，
+   `scope_mode_` 变化时清零 `scope_history_count_` 与全部通道缓冲，避免
+   `40N` 推力器量级的旧数据残留压扁新通道（如 `0.3m/s` 速度）的自动量程。
+3. **补全 `step_work_ms` 纯计算耗时遥测**：`MujocoVisBridge` 新增
+   `step_work_ms` 原子字段；`adhere_mujoco_node.cpp` 的 `physics_thread`
+   用 `Clock::now()` 包住 `controller_manager->read()/update()/write()`
+   做 EMA；`drawOverlayTelemetry()` 显示为 `"%.1f Hz (work: %.3f ms)"`。
+
+### 其余交互审计项（人工走查确认，均已满足或无需改动）
+
+- `onMouseButton()` 的 `Ctrl+Click` 分支每次触发都重新调用
+  `mjv_initPerturb()`（Phase 2.10 既有修复，复核仍成立）。
+- `onCursorPos()` 的 `Ctrl+拖拽` 默认改为 `mjMOUSE_MOVE_V`/`mjMOUSE_ROTATE_V`
+  （沿世界 `Z` 在壁面上下拖拽/旋转 ROV），按住 `Shift` 切换到
+  `mjMOUSE_MOVE_H`/`mjMOUSE_ROTATE_H`。
+- `AdhereMujocoHardware::write()` 的 `vis_bridge_` 快照条件新增
+  `did_reset`/`wave_cmd != 0`/`paused`，使 `Reset`、造浪模式切换、暂停态下
+  的每一拍都立即可见，不必等到 `write_tick_count_ % 8 == 0`。
+- `grep -c "bridge_->mtx" mujoco_viewer.cpp` 仍为 `1`（单帧单锁契约未破坏）。
+- 推力器 `ctrlrange="-40 40"` 已由 MJCF `<general>` 执行器原生限幅；
+  本阶段未引入新的 `tau_T` 一阶惯性滞后模型（CLAUDE.md 中标注为
+  "optional"，留给 Phase 3 控制器层处理推力器动力学时再决定是否下沉到
+  硬件层）。
+
+### 数值符号与量级核验（独立 g++ 编译的核验程序，未并入 gtest）
+
+- 近壁侧向来流（`x_com=0.125m`，`V_y=0.3m/s`）：`Lumped Fx=-4.860N`，
+  `Stonefish Fx=-5.018N`，两者均为负（吸附向壁面），符合预期。
+- 近壁（`x_com=0.115m`）靠近壁面（`vx_b=-0.05m/s`）vs 远离壁面
+  （`vx_b=+0.05m/s`）：`Stonefish Fx` 分别为 `-3.100N`/`-6.935N`，
+  靠近时合力更偏 `+X`（阻碍靠近）、远离时更偏 `-X`（阻碍远离），符合
+  挤膜阻尼应有的负反馈方向。
+- `t=3.2s`（半正弦阵风窗 `[3.0,4.2]s` 内）：`a_fluid_world=[0.45,2.04,0]
+  m/s^2` 非零，`Stonefish` 合力/力矩全部为有限值，Froude-Krylov/Munk 力矩
+  项参与计算且未发散。
+- 单次 `FossenHydrodynamics::compute()` 耗时（`-O2`，200000 次循环平均）：
+  `kParametricLumped` 约 `0.19 us`/次；`kStonefishGeometryDriven`
+  （66 个微元）约 `4.20 us`/次 —— 远低于 500Hz 的 `2000 us`/拍预算，
+  印证两阶段预计算架构（重网格化只在 `configure()` 时算一次约 `1.7ms`）
+  确实把 500Hz 热路径开销压到微秒级。
+- `colcon build --packages-up-to simplified_v1_description adhere_mujoco_hardware
+  --symlink-install` 零警告零错误；`colcon test --packages-select
+  adhere_mujoco_hardware` 的 `gtest`（`test_fossen_hydrodynamics_geometry`，
+  含原有 2 组 `kParametricLumped` 逐位核验、`nullptr` 回退、几何结构不变量、
+  `kStonefishGeometryDriven` 烟雾测试）5/5 全部通过，确认 `kParametricLumped`
+  零回归；既存的 `copyright`/`cpplint`/`flake8`/`pep257`/`uncrustify`/
+  `xmllint` 风格检查对本仓库全局早已失败，与本次改动无关，未处理。

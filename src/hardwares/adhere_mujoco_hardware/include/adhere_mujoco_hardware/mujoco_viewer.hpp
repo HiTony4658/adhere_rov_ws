@@ -182,6 +182,7 @@ private:
   mjvFigure scope_fig_{};
   std::array<std::array<float, kScopeHistoryLen>, kScopeMaxSeries> scope_history_{};
   int scope_history_count_ = 0;
+  int last_scope_channel_ = -1;
 
   std::thread thread_;
   std::atomic<bool> running_{false};
