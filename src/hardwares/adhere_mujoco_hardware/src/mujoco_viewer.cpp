@@ -32,6 +32,12 @@ constexpr int kUidStepOnce = 101;
 constexpr int kUidResetView = 102;
 constexpr int kUidZeroThrusters = 103;
 constexpr int kUidScreenshot = 104;
+constexpr int kUidCamWallYZ = 105;
+constexpr int kUidCamTopXY = 106;
+constexpr int kUidCamSideXZ = 107;
+
+// Section C4: slow-motion-only speed scale, indexed by the "Sim Speed" radio.
+constexpr double kSimSpeedValues[4] = {1.0, 0.5, 0.2, 0.1};
 
 // Appends a single mjITEM_CHECKBYTE item directly bound to *pdata (used throughout buildUi0()
 // to bind MuJoCo-native toggles straight to a field inside opt_/scn_, e.g. &opt_.flags[idx] or
@@ -134,18 +140,28 @@ void MujocoViewer::buildUi0()
     {mjITEM_CHECKINT, "Running (Space)", 1, &ui_running_, "", 0},
     {mjITEM_BUTTON, "Step Once (S)", 1, nullptr, "", 0},
     {mjITEM_BUTTON, "Reset (Backspace)", 1, nullptr, "", 0},
-    {mjITEM_BUTTON, "Reset Camera View", 1, nullptr, "", 0},
+    {mjITEM_RADIO, "Sim Speed", 4, &ui_sim_speed_, "1x\n0.5x\n0.2x\n0.1x", 0},
+    {mjITEM_BUTTON, "Default Orbit", 1, nullptr, "", 0},
+    {mjITEM_BUTTON, "Wall YZ View", 1, nullptr, "", 0},
+    {mjITEM_BUTTON, "Top XY View", 1, nullptr, "", 0},
+    {mjITEM_BUTTON, "Side XZ View", 1, nullptr, "", 0},
+    {mjITEM_CHECKBYTE, "Camera Follow", 1, &ui_cam_follow_, "", 0},
     {mjITEM_BUTTON, "Screenshot", 1, nullptr, "", 0},
     {mjITEM_END, "", 0, nullptr, "", 0}};
   def_sim[2].otherint = kUidStepOnce;
   def_sim[3].otherint = kUidReset;
-  def_sim[4].otherint = kUidResetView;
-  def_sim[5].otherint = kUidScreenshot;
+  def_sim[5].otherint = kUidResetView;
+  def_sim[6].otherint = kUidCamWallYZ;
+  def_sim[7].otherint = kUidCamTopXY;
+  def_sim[8].otherint = kUidCamSideXZ;
+  def_sim[10].otherint = kUidScreenshot;
   mjui_add(&ui0_, def_sim);
 
   mjuiDef def_wave[] = {
-    {mjITEM_SECTION, "Wave Environment", mjSECT_OPEN, nullptr, "", 0},
+    {mjITEM_SECTION, "Wave & Hydro Model", mjSECT_OPEN, nullptr, "", 0},
     {mjITEM_RADIO, "Mode (1/2)", 2, &ui_wave_mode_, "Calm Water\nStation-Keeping Gust", 0},
+    {mjITEM_RADIO, "Hydro Model", 2, &ui_hydro_mode_, "Lumped\nStonefish-Mesh", 0},
+    {mjITEM_CHECKBYTE, "Kern Diamond", 1, &ui_show_kern_diamond_, "", 0},
     {mjITEM_END, "", 0, nullptr, "", 0}};
   mjui_add(&ui0_, def_wave);
 
@@ -163,7 +179,7 @@ void MujocoViewer::buildUi0()
   // official toggles (render flags, geom/site groups, Label) live in buildUi1() -- splitting
   // across both panels keeps either side from needing to scroll past a full screen of content.
   mjuiDef def_vis[] = {
-    {mjITEM_SECTION, "Visualize", mjSECT_OPEN, nullptr, "", 0},
+    {mjITEM_SECTION, "Visualize", mjSECT_CLOSED, nullptr, "", 0},
     {mjITEM_END, "", 0, nullptr, "", 0}};
   mjui_add(&ui0_, def_vis);
   const int sect_vis = ui0_.nsect - 1;
@@ -220,11 +236,20 @@ void MujocoViewer::buildUi1()
     mjui_addToSection(&ui1_, 0, def_slider);
   }
 
+  mjuiDef def_scope[] = {
+    {mjITEM_SECTION, "Live Scope", mjSECT_OPEN, nullptr, "", 0},
+    {mjITEM_RADIO, "Scope Plot", 5, &scope_mode_,
+     "Off\nPad Forces F_N\nKern Margin & minF_N\nBody Vel vs Flow\nThruster Commands", 0},
+    {mjITEM_END, "", 0, nullptr, "", 0}};
+  mjui_add(&ui1_, def_scope);
+
   // Scene-level render flags (mjtRndFlag), bound directly to scn_.flags[...] -- paired here
   // with Label/geom-site-group visibility (also MuJoCo-native) rather than in buildUi0(), to
-  // keep either panel's total content within roughly one screen's height.
+  // keep either panel's total content within roughly one screen's height. Collapsed by
+  // default (CLAUDE.md Phase 2.10 Section C5): these are rarely-touched MuJoCo-native toggle
+  // dumps, expandable on click.
   mjuiDef def_rndflags[] = {
-    {mjITEM_SECTION, "Render Flags", mjSECT_OPEN, nullptr, "", 0},
+    {mjITEM_SECTION, "Render Flags", mjSECT_CLOSED, nullptr, "", 0},
     {mjITEM_END, "", 0, nullptr, "", 0}};
   mjui_add(&ui1_, def_rndflags);
   const int sect_rnd = ui1_.nsect - 1;
@@ -241,7 +266,7 @@ void MujocoViewer::buildUi1()
   }
 
   mjuiDef def_label_sect[] = {
-    {mjITEM_SECTION, "Label", mjSECT_OPEN, nullptr, "", 0},
+    {mjITEM_SECTION, "Label", mjSECT_CLOSED, nullptr, "", 0},
     {mjITEM_RADIO, "Mode", 17, &opt_.label,
      "None\nBody\nJoint\nGeom\nSite\nCamera\nLight\nTendon\nActuator\nConstraint\nFlex\n"
      "Skin\nSelection\nSelPoint\nContactPt\nContactForce\nIsland",
@@ -257,7 +282,7 @@ void MujocoViewer::buildUi1()
   // ui0_scroll_/ui1_scroll_ comment in the header: mjui_resize()'s layout math gets unreliable
   // well past that, independent of our scroll override).
   mjuiDef def_groups[] = {
-    {mjITEM_SECTION, "Visibility Groups", mjSECT_OPEN, nullptr, "", 0},
+    {mjITEM_SECTION, "Visibility Groups", mjSECT_CLOSED, nullptr, "", 0},
     {mjITEM_CHECKBYTE, "Geom Group 0", 1, &opt_.geomgroup[0], "", 0},
     {mjITEM_CHECKBYTE, "Site Group 0", 1, &opt_.sitegroup[0], "", 0},
     {mjITEM_END, "", 0, nullptr, "", 0}};
@@ -284,6 +309,20 @@ void MujocoViewer::initUi()
   mjr_makeContext(model_, &con_, mjFONTSCALE_100);
 
   resetCameraView();
+
+  // Section C2: live scope oscilloscope, initialized once here and populated/rendered every
+  // frame from updateAndDrawScope().
+  mjv_defaultFigure(&scope_fig_);
+  scope_fig_.flg_legend = 1;
+  std::snprintf(scope_fig_.title, sizeof(scope_fig_.title), "Live Scope");
+  static const float kLineColors[kScopeMaxSeries][3] = {
+    {1.0f, 0.2f, 0.2f}, {0.2f, 1.0f, 0.2f}, {0.3f, 0.5f, 1.0f}, {1.0f, 1.0f, 0.2f},
+    {1.0f, 0.3f, 1.0f}, {0.2f, 1.0f, 1.0f}, {1.0f, 0.6f, 0.1f}, {0.6f, 0.6f, 1.0f}};
+  for (int i = 0; i < kScopeMaxSeries; ++i) {
+    scope_fig_.linergb[i][0] = kLineColors[i][0];
+    scope_fig_.linergb[i][1] = kLineColors[i][1];
+    scope_fig_.linergb[i][2] = kLineColors[i][2];
+  }
 
   ui0_.userdata = this;
   ui1_.userdata = this;
@@ -477,6 +516,10 @@ void MujocoViewer::onMouseButton(int button, int act, int mods)
         pert_.active = 0;
       }
     } else if (uistate_.control && pert_.select > 0) {
+      // Bug 1 fix: re-seed pert_.refpos/refselpos from the ROV's CURRENT pose every time this
+      // branch fires, not just once after the last double-click-select. Without this, dragging
+      // Ctrl+Click after the ROV has moved yanks it using a stale reference pose.
+      mjv_initPerturb(model_, d_vis_, &scn_, &pert_);
       pert_.active = (button == GLFW_MOUSE_BUTTON_LEFT) ? mjPERT_ROTATE : mjPERT_TRANSLATE;
     }
   } else {
@@ -558,6 +601,15 @@ void MujocoViewer::handleUiAction(int userid)
     case kUidResetView:
       resetCameraView();
       break;
+    case kUidCamWallYZ:
+      setCameraWallYZ();
+      break;
+    case kUidCamTopXY:
+      setCameraTopXY();
+      break;
+    case kUidCamSideXZ:
+      setCameraSideXZ();
+      break;
     case kUidZeroThrusters:
       for (auto & v : thruster_slider_) {
         v = 0.0;
@@ -588,6 +640,191 @@ void MujocoViewer::resetCameraView()
   cam_.lookat[0] = 0.0;
   cam_.lookat[1] = 0.0;
   cam_.lookat[2] = 0.6;
+}
+
+// Section C3 camera presets. lookat/distance are the convention-independent, load-bearing
+// values; azimuth/elevation signs match resetCameraView()'s confirmed-working convention and
+// should be visually re-checked in a real desktop session (adjust by +-90/180 deg if MuJoCo's
+// azimuth/elevation convention differs from what's assumed here).
+void MujocoViewer::setCameraWallYZ()
+{
+  cam_.distance = 1.5;
+  cam_.azimuth = 180.0;
+  cam_.elevation = 0.0;
+  cam_.lookat[0] = 0.0;
+  cam_.lookat[1] = 0.0;
+  cam_.lookat[2] = 0.5;
+}
+
+void MujocoViewer::setCameraTopXY()
+{
+  cam_.distance = 2.0;
+  cam_.azimuth = -90.0;
+  cam_.elevation = -90.0;
+  cam_.lookat[0] = 0.0;
+  cam_.lookat[1] = 0.0;
+  cam_.lookat[2] = 0.5;
+}
+
+void MujocoViewer::setCameraSideXZ()
+{
+  cam_.distance = 2.0;
+  cam_.azimuth = -90.0;
+  cam_.elevation = 0.0;
+  cam_.lookat[0] = 0.0;
+  cam_.lookat[1] = 0.0;
+  cam_.lookat[2] = 0.5;
+}
+
+void MujocoViewer::drawKernDiamond()
+{
+  if (!kern_geom_cached_ || body_id_ < 0 || kern_Ly_ <= 1e-9 || kern_Lz_ <= 1e-9) {
+    return;
+  }
+  const mjtNum local_pts[4][3] = {
+    {kern_x_plane_, kern_Ly_, 0.0}, {kern_x_plane_, 0.0, kern_Lz_},
+    {kern_x_plane_, -kern_Ly_, 0.0}, {kern_x_plane_, 0.0, -kern_Lz_}};
+  const mjtNum * body_pos = d_vis_->xpos + 3 * body_id_;
+  const mjtNum * body_quat = d_vis_->xquat + 4 * body_id_;
+  mjtNum world_pts[4][3];
+  for (int i = 0; i < 4; ++i) {
+    mjtNum rotated[3];
+    mju_rotVecQuat(rotated, local_pts[i], body_quat);
+    world_pts[i][0] = body_pos[0] + rotated[0];
+    world_pts[i][1] = body_pos[1] + rotated[1];
+    world_pts[i][2] = body_pos[2] + rotated[2];
+  }
+
+  // Color per Section C1 spec: green (comfortably inside the kern, no liftoff), yellow
+  // (0.7 < K_val <= 1.0), red (K_val > 1.0 or any pad lifted off).
+  float rgba[4] = {0.1f, 1.0f, 0.1f, 0.6f};
+  if (cached_kern_val_ > 1.0 || cached_liftoff_ratio_ > 0.0) {
+    rgba[0] = 1.0f;
+    rgba[1] = 0.1f;
+    rgba[2] = 0.1f;
+    rgba[3] = 0.8f;
+  } else if (cached_kern_val_ > 0.7) {
+    rgba[0] = 1.0f;
+    rgba[1] = 0.9f;
+    rgba[2] = 0.1f;
+    rgba[3] = 0.6f;
+  }
+
+  for (int i = 0; i < 4 && scn_.ngeom < scn_.maxgeom; ++i) {
+    mjvGeom * g = &scn_.geoms[scn_.ngeom];
+    mjv_initGeom(g, mjGEOM_CAPSULE, nullptr, nullptr, nullptr, rgba);
+    mjv_connector(g, mjGEOM_CAPSULE, 0.003, world_pts[i], world_pts[(i + 1) % 4]);
+    scn_.ngeom++;
+  }
+
+  if (scn_.ngeom < scn_.maxgeom) {
+    const mjtNum local_cop[3] = {kern_x_plane_ + 0.005, cached_cop_y_, cached_cop_z_};
+    mjtNum rotated[3];
+    mju_rotVecQuat(rotated, local_cop, body_quat);
+    const mjtNum cop_world[3] = {
+      body_pos[0] + rotated[0], body_pos[1] + rotated[1], body_pos[2] + rotated[2]};
+    const mjtNum size[3] = {0.018, 0.018, 0.018};
+    mjvGeom * g = &scn_.geoms[scn_.ngeom];
+    mjv_initGeom(g, mjGEOM_SPHERE, size, cop_world, nullptr, rgba);
+    scn_.ngeom++;
+  }
+}
+
+void MujocoViewer::updateAndDrawScope(mjrRect full_viewport)
+{
+  if (scope_mode_ == 0) {
+    return;
+  }
+
+  int n_series = 0;
+  float samples[kScopeMaxSeries] = {0};
+  const char * names[kScopeMaxSeries] = {nullptr};
+  switch (scope_mode_) {
+    case 1:  // Pad Forces F_N (N)
+      n_series = 4;
+      for (int i = 0; i < 4; ++i) {
+        samples[i] = static_cast<float>(cached_pad_force_[i]);
+      }
+      names[0] = "TL";
+      names[1] = "TR";
+      names[2] = "BL";
+      names[3] = "BR";
+      break;
+    case 2: {  // Kern Margin M_kern & min F_N
+      n_series = 2;
+      samples[0] = static_cast<float>(cached_m_kern_);
+      const double min_f = *std::min_element(cached_pad_force_.begin(), cached_pad_force_.end());
+      samples[1] = static_cast<float>(min_f / 10.0);
+      names[0] = "M_kern";
+      names[1] = "minF_N/10";
+      break;
+    }
+    case 3: {  // Body Vel vs Flow (m/s)
+      n_series = 4;
+      double vx_b = 0.0, vy_b = 0.0, vz_b = 0.0;
+      if (model_->nq >= 7) {
+        const mjtNum quat[4] = {
+          d_vis_->qpos[3], d_vis_->qpos[4], d_vis_->qpos[5], d_vis_->qpos[6]};
+        mjtNum mat[9];
+        mju_quat2Mat(mat, quat);
+        const double vx_w = d_vis_->qvel[0], vy_w = d_vis_->qvel[1], vz_w = d_vis_->qvel[2];
+        vx_b = mat[0] * vx_w + mat[3] * vy_w + mat[6] * vz_w;
+        vy_b = mat[1] * vx_w + mat[4] * vy_w + mat[7] * vz_w;
+        vz_b = mat[2] * vx_w + mat[5] * vy_w + mat[8] * vz_w;
+      }
+      samples[0] = static_cast<float>(vx_b);
+      samples[1] = static_cast<float>(vy_b);
+      samples[2] = static_cast<float>(vz_b);
+      samples[3] = static_cast<float>(cached_flow_vel_world_[1]);
+      names[0] = "vx_b";
+      names[1] = "vy_b";
+      names[2] = "vz_b";
+      names[3] = "Vflow_y";
+      break;
+    }
+    case 4:  // Thruster Commands u_i (N)
+      n_series = 8;
+      for (int i = 0; i < 8 && i < model_->nu; ++i) {
+        samples[i] = static_cast<float>(d_vis_->ctrl[i]);
+        names[i] = kThrusterLabels[i];
+      }
+      break;
+    default:
+      return;
+  }
+
+  for (int s = 0; s < n_series; ++s) {
+    if (scope_history_count_ >= kScopeHistoryLen) {
+      std::copy(
+        scope_history_[s].begin() + 1, scope_history_[s].end(), scope_history_[s].begin());
+      scope_history_[s][kScopeHistoryLen - 1] = samples[s];
+    } else {
+      scope_history_[s][scope_history_count_] = samples[s];
+    }
+    if (names[s]) {
+      std::snprintf(
+        scope_fig_.linename[s], sizeof(scope_fig_.linename[s]), "%s", names[s]);
+    }
+  }
+  scope_history_count_ = std::min(scope_history_count_ + 1, kScopeHistoryLen);
+
+  for (int s = 0; s < n_series; ++s) {
+    scope_fig_.linepnt[s] = scope_history_count_;
+    for (int k = 0; k < scope_history_count_; ++k) {
+      scope_fig_.linedata[s][2 * k] = static_cast<float>(k);
+      scope_fig_.linedata[s][2 * k + 1] = scope_history_[s][k];
+    }
+  }
+  for (int s = n_series; s < kScopeMaxSeries; ++s) {
+    scope_fig_.linepnt[s] = 0;
+  }
+
+  mjrRect scope_vp;
+  scope_vp.width = 420;
+  scope_vp.height = 220;
+  scope_vp.left = std::max(0, full_viewport.width - scope_vp.width - 10);
+  scope_vp.bottom = 10;
+  mjr_figure(scope_vp, &scope_fig_, &con_);
 }
 
 void MujocoViewer::saveScreenshot()
@@ -623,16 +860,10 @@ void MujocoViewer::drawOverlayTelemetry(mjrRect viewport)
   char title[1024];
   char content[1024];
 
-  std::array<double, 3> flow{};
-  std::array<double, 4> pad_force{};
-  bool valid = false;
-  {
-    std::lock_guard<std::mutex> lock(bridge_->mtx);
-    flow = bridge_->flow_vel_world;
-    pad_force = bridge_->pad_force;
-    valid = bridge_->valid;
-  }
-  (void)valid;
+  // Bug 4 fix: no locking here -- reads the single per-frame snapshot cache renderFrame()
+  // already populated earlier this same frame.
+  const std::array<double, 3> & flow = cached_flow_vel_world_;
+  const std::array<double, 4> & pad_force = cached_pad_force_;
 
   double px = 0.0, py = 0.0, pz = 0.0, phi = 0.0, theta = 0.0, psi = 0.0;
   double vx = 0.0, vy = 0.0, vz = 0.0;
@@ -648,12 +879,14 @@ void MujocoViewer::drawOverlayTelemetry(mjrRect viewport)
     psi = std::atan2(mat[3], mat[0]);
     theta = std::asin(std::clamp(-mat[6], -1.0, 1.0));
     phi = std::atan2(mat[7], mat[8]);
-    vx = d_vis_->qvel[0];
-    vy = d_vis_->qvel[1];
-    vz = d_vis_->qvel[2];
-    // MuJoCo freejoint qvel convention: [0:3] world-frame linear velocity, [3:6] body-frame
-    // angular velocity (gyro-equivalent) -- useful on its own for spotting tumbling/instability
-    // while debugging, independent of the linear Body Vel row above.
+    // Bug 5 fix: qvel[0:3] is WORLD-frame linear velocity per MuJoCo's freejoint convention
+    // (qvel[3:6] is body-frame angular velocity, already correct below) -- rotate by R^T
+    // (mat's transpose, already computed above for the Euler-angle display) to get the true
+    // body-frame velocity this row is labeled as.
+    const double vx_w = d_vis_->qvel[0], vy_w = d_vis_->qvel[1], vz_w = d_vis_->qvel[2];
+    vx = mat[0] * vx_w + mat[3] * vy_w + mat[6] * vz_w;
+    vy = mat[1] * vx_w + mat[4] * vy_w + mat[7] * vz_w;
+    vz = mat[2] * vx_w + mat[5] * vy_w + mat[8] * vz_w;
     wx = d_vis_->qvel[3];
     wy = d_vis_->qvel[4];
     wz = d_vis_->qvel[5];
@@ -663,26 +896,31 @@ void MujocoViewer::drawOverlayTelemetry(mjrRect viewport)
   const double sim_t = bridge_->sim_time.load();
   const int wave_mode = bridge_->wave_mode_active.load();
   const double tau = bridge_->wave_tau.load();
+  const char * hydro_name = ui_hydro_mode_ == 1 ? "Stonefish-Mesh" : "Lumped";
 
   std::snprintf(
     title, sizeof(title),
     "Physics Rate\nSim Time\nWave Mode\nFlow Velocity\n"
     "Pad TL / TR / BL / BR\nPose (X Y Z)\nPose (phi theta psi)\nBody Vel (vx vy vz)\n"
-    "Body AngVel (wx wy wz)");
+    "Body AngVel (wx wy wz)\nHydro Mode\nKern Margin M_kern\nLiftoff Ratio");
   std::snprintf(
     content, sizeof(content),
     "%.1f Hz\n%.2f s\n%s (tau=%.2fs)\n[%.2f, %.2f, %.2f] m/s\n"
     "%.1f / %.1f / %.1f / %.1f N\n[%.3f, %.3f, %.3f] m\n[%.1f, %.1f, %.1f] deg\n[%.3f, %.3f, %.3f] m/s\n"
-    "[%.3f, %.3f, %.3f] rad/s",
+    "[%.3f, %.3f, %.3f] rad/s\n%s (%d patches)\n%.3f (K_val=%.3f)\n%.1f%%",
     hz, sim_t, wave_mode == 2 ? "Gust" : "Calm", tau, flow[0], flow[1], flow[2], pad_force[0],
     pad_force[1], pad_force[2], pad_force[3], px, py, pz, phi * 57.2958, theta * 57.2958,
-    psi * 57.2958, vx, vy, vz, wx, wy, wz);
+    psi * 57.2958, vx, vy, vz, wx, wy, wz, hydro_name, cached_hydro_patch_count_, cached_m_kern_,
+    cached_kern_val_, cached_liftoff_ratio_ * 100.0);
 
   mjr_overlay(mjFONT_NORMAL, mjGRID_TOPLEFT, viewport, title, content, &con_);
 }
 
 void MujocoViewer::renderFrame()
 {
+  // Bug 4 fix: exactly one bridge mutex critical section per frame, populating every cached_*
+  // member this frame needs (qpos/qvel/ctrl go straight into d_vis_, which already serves as
+  // their own per-frame cache for mj_forward()/rendering/drawOverlayTelemetry()).
   {
     std::unique_lock<std::mutex> lock(bridge_->mtx, std::try_to_lock);
     if (lock.owns_lock() && bridge_->valid) {
@@ -691,13 +929,45 @@ void MujocoViewer::renderFrame()
       for (size_t i = 0; i < bridge_->ctrl.size() && i < static_cast<size_t>(model_->nu); ++i) {
         d_vis_->ctrl[i] = bridge_->ctrl[i];
       }
+      cached_pad_force_ = bridge_->pad_force;
+      cached_pad_v_sep_ = bridge_->pad_v_sep;
+      cached_flow_vel_world_ = bridge_->flow_vel_world;
+      cached_flow_acc_world_ = bridge_->flow_acc_world;
+      cached_valid_ = true;
+      if (!kern_geom_cached_) {
+        // Write-once pad geometry (CLAUDE.md Phase 2.10 Section A3): cache L_y/L_z/x_plane
+        // the first time it's observed, no need to recompute every frame afterwards.
+        double ly = 0.0, lz = 0.0;
+        for (const auto & pos : bridge_->pad_site_pos_body) {
+          ly = std::max(ly, std::abs(pos[1]));
+          lz = std::max(lz, std::abs(pos[2]));
+        }
+        kern_Ly_ = ly;
+        kern_Lz_ = lz;
+        kern_x_plane_ = bridge_->pad_site_pos_body[0][0];
+        kern_geom_cached_ = true;
+      }
     }
+    cached_kern_val_ = bridge_->kern_val.load();
+    cached_m_kern_ = bridge_->m_kern.load();
+    cached_liftoff_ratio_ = bridge_->liftoff_ratio.load();
+    cached_cop_y_ = bridge_->cop_y.load();
+    cached_cop_z_ = bridge_->cop_z.load();
+    cached_hydro_patch_count_ = bridge_->hydro_patch_count.load();
   }
 
   // Note: opt_.flags[*], opt_.frame, opt_.label, opt_.geomgroup/sitegroup[*], and
   // scn_.flags[*] are all mjUI-bound directly (see buildUi0()) and therefore already current
   // here -- mjui_event() writes straight into these fields, no per-frame copy needed.
 
+  // Bug 1 fix: clear any stale xfrc_applied on d_vis_ before (re-)applying this frame's
+  // perturb force, so a force left over from a previous frame (e.g. the first frame after
+  // pert_.active toggles off) never leaks into mj_forward().
+  if (body_id_ >= 0) {
+    for (int i = 0; i < 6; ++i) {
+      d_vis_->xfrc_applied[6 * body_id_ + i] = 0.0;
+    }
+  }
   if (pert_.active) {
     mjv_applyPerturbForce(model_, d_vis_, &pert_);
     if (pert_select_body_ == body_id_) {
@@ -705,6 +975,13 @@ void MujocoViewer::renderFrame()
         bridge_->xfrc_perturb[i].store(d_vis_->xfrc_applied[6 * body_id_ + i]);
       }
     }
+  }
+
+  // Section C3: Camera Follow overwrites only lookat, composing with manual orbit/presets.
+  if (ui_cam_follow_ && body_id_ >= 0) {
+    cam_.lookat[0] = d_vis_->xipos[3 * body_id_ + 0];
+    cam_.lookat[1] = d_vis_->xipos[3 * body_id_ + 1];
+    cam_.lookat[2] = d_vis_->xipos[3 * body_id_ + 2];
   }
 
   mj_forward(model_, d_vis_);
@@ -717,19 +994,15 @@ void MujocoViewer::renderFrame()
   mjv_updateScene(model_, d_vis_, &opt_, &pert_, &cam_, mjCAT_ALL, &scn_);
 
   // Pad-force bars: short capsules from each pad site, extending along +X (away from the
-  // wall) proportional to the measured normal force.
+  // wall) proportional to the measured normal force. Reads cached_pad_force_ (Bug 4 fix) --
+  // no per-block locking.
   if (ui_show_pad_forces_) {
-    std::array<double, 4> pad_force{};
-    {
-      std::lock_guard<std::mutex> lock(bridge_->mtx);
-      pad_force = bridge_->pad_force;
-    }
     for (int i = 0; i < kPadCount && scn_.ngeom < scn_.maxgeom; ++i) {
       if (pad_site_id_[i] < 0) {
         continue;
       }
       const double * site_pos = d_vis_->site_xpos + 3 * pad_site_id_[i];
-      const double length = std::max(0.0, pad_force[static_cast<size_t>(i)]) * kForceScale;
+      const double length = std::max(0.0, cached_pad_force_[static_cast<size_t>(i)]) * kForceScale;
       const mjtNum from[3] = {site_pos[0], site_pos[1], site_pos[2]};
       const mjtNum to[3] = {site_pos[0] + length, site_pos[1], site_pos[2]};
       mjvGeom * g = &scn_.geoms[scn_.ngeom];
@@ -740,18 +1013,13 @@ void MujocoViewer::renderFrame()
     }
   }
 
-  // Ambient flow-velocity arrow from the body CoM.
+  // Ambient flow-velocity arrow from the body CoM. Reads cached_flow_vel_world_ (Bug 4 fix).
   if (ui_show_flow_arrow_ && body_id_ >= 0 && scn_.ngeom < scn_.maxgeom) {
-    std::array<double, 3> flow_vel{};
-    {
-      std::lock_guard<std::mutex> lock(bridge_->mtx);
-      flow_vel = bridge_->flow_vel_world;
-    }
     const double * com = d_vis_->xipos + 3 * body_id_;
     const mjtNum from[3] = {com[0], com[1], com[2]};
     const mjtNum to[3] = {
-      com[0] + flow_vel[0] * kFlowScale, com[1] + flow_vel[1] * kFlowScale,
-      com[2] + flow_vel[2] * kFlowScale};
+      com[0] + cached_flow_vel_world_[0] * kFlowScale, com[1] + cached_flow_vel_world_[1] * kFlowScale,
+      com[2] + cached_flow_vel_world_[2] * kFlowScale};
     mjvGeom * g = &scn_.geoms[scn_.ngeom];
     const float rgba[4] = {0.2f, 0.6f, 1.0f, 1.0f};
     mjv_initGeom(g, mjGEOM_ARROW, nullptr, nullptr, nullptr, rgba);
@@ -759,8 +1027,14 @@ void MujocoViewer::renderFrame()
     scn_.ngeom++;
   }
 
+  // Section C1: Rhombic Kern diamond + live CoP marker.
+  if (ui_show_kern_diamond_) {
+    drawKernDiamond();
+  }
+
   mjr_render(viewport, &scn_, &con_);
   drawOverlayTelemetry(viewport);
+  updateAndDrawScope(uistate_.rect[0]);
 
   if (ui0_visible_) {
     mjui_update(-1, -1, &ui0_, &uistate_, &con_);
@@ -774,14 +1048,27 @@ void MujocoViewer::renderFrame()
   glfwSwapBuffers(window_);
   glfwPollEvents();
 
-  // Push GUI-side control state to the hardware thread. Edge-detect the wave-mode radio so
-  // repeated identical requests never spuriously re-latch the gust clock inside setWaveMode().
+  // Push GUI-side control state to the hardware thread.
   bridge_->paused.store(ui_running_ == 0);
-  static int last_ui_wave_mode = -1;
-  if (ui_wave_mode_ != last_ui_wave_mode) {
-    last_ui_wave_mode = ui_wave_mode_;
+
+  // Bug 6 fix: bidirectional wave-mode sync. Read the external bridge state FIRST; if it
+  // changed since last frame (e.g. the /rov/wave_mode_cmd ROS topic, or onKey()'s 1/2 keys
+  // which already write ui_wave_mode_ directly), pull it into ui_wave_mode_ and mark it as
+  // "already synced" so the edit-detect below does not immediately push it right back out.
+  const int external_mode = bridge_->wave_mode_active.load();
+  if (external_mode != last_external_wave_mode_) {
+    last_external_wave_mode_ = external_mode;
+    ui_wave_mode_ = external_mode - 1;
+    last_ui_wave_mode_ = ui_wave_mode_;
+  }
+  if (ui_wave_mode_ != last_ui_wave_mode_) {
+    last_ui_wave_mode_ = ui_wave_mode_;
     bridge_->wave_mode_cmd.store(ui_wave_mode_ + 1);
   }
+
+  bridge_->hydro_mode.store(ui_hydro_mode_);
+  bridge_->sim_speed_factor.store(kSimSpeedValues[ui_sim_speed_]);
+
   for (int i = 0; i < 8; ++i) {
     bridge_->manual_ctrl[static_cast<size_t>(i)].store(thruster_slider_[i]);
   }

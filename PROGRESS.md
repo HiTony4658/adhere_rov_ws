@@ -453,3 +453,117 @@ Phase 2.7 之后进一步实际操作 MuJoCo 窗口发现："Coord Frames" 显�
   `Thrusters (Manual)`）开始完整显示到最后一个小节（`Coord Frames`/
   `Telemetry`），无任何裁切，无需滚动；点击 `Transparent` 复选框后 ROV
   船体渲染为半透明，可透过船体看到内部的接触垫球体与推力器站点标记。
+
+## Phase 2.10（2026-10-15）：6 个隐藏交互 bug 修复、Stonefish 几何驱动水动力引擎、Viewer 调试工具
+
+### 目标
+
+Phase 3（控制器包）启动前的代码审计发现 `adhere_mujoco_hardware` 的
+500Hz/60Hz 双线程交互存在 6 个隐藏同步 bug，另有两项结构性需求：(1)
+`FossenHydrodynamics` 是硬编码的点质心/平板模型，一旦机体几何换成 CAD 网格
+就会失效；(2) `MujocoViewer` 缺少 Rhombic Kern 可视化、实时示波器、相机预设、
+慢动作等研究级调试工具。
+
+### 6 个 bug 的根因与修复
+
+1. **`Ctrl+拖拽` 幽灵弹力**：`onMouseButton()` 的 `Ctrl+点击` 分支只设置
+   `pert_.active`，从未重新调用 `mjv_initPerturb()`——若 ROV 在上一次双击后
+   发生过位移，`pert_.refpos`/`refselpos` 仍是旧位置，导致拖拽时把 ROV 往
+   错误方向猛拽。修复：该分支每次触发都重新调用 `mjv_initPerturb()`。同时
+   `renderFrame()` 在 `mjv_applyPerturbForce()` 之前从未清零
+   `d_vis_->xfrc_applied`，补上清零逻辑，避免残留力泄漏进 `mj_forward()`。
+2. **暂停态下 `Step Once`/滑条冻结**：`write()` 原先用物理步数 `step_count_`
+   （暂停时不再自增）对 `% 8` 取模决定是否快照到 `MujocoVisBridge`——暂停时
+   `step_count_` 冻结，导致 8 次 `Step Once` 中只有 1 次真正更新快照，
+   暂停拖滑条同理。新增独立计数 `write_tick_count_`（无论暂停与否每次
+   `write()` 都自增），快照门槛改为
+   `write_tick_count_ % 8 == 0 || single_step`，"Step Once" 必然当拍可见。
+3. **接触垫几何多处硬编码**：`adhere_mujoco_node.cpp` 里的
+   `constexpr kPadPosBody` 与 `AdhereMujocoHardware::pad_yz_` 各自独立硬编码
+   同一组坐标。新增 `MujocoVisBridge::pad_site_pos_body`（写一次、`configure()`
+   之后只读不加锁，与既有 `pad_yz_` 同一假设），`adhere_mujoco_node` 删除
+   `kPadPosBody`，统一从该字段读取。
+4. **`MujocoViewer::renderFrame()` 单帧 4 次加锁**：原先 1 次 `try_lock`（拷贝
+   `qpos`/`qvel`/`ctrl`）+ 3 次独立 `lock_guard`（受力柱状图、流速箭头、
+   `drawOverlayTelemetry()` 内部）。改为单次 `try_lock` 临界区内一次性拷贝
+   全部所需字段到新增的 `cached_*` 成员，其余 3 处全部改读缓存，不再加锁。
+   `grep -c "bridge_->mtx" mujoco_viewer.cpp` 现为 `1`。
+5. **"Body Vel" 显示世界系当成机体系**：`drawOverlayTelemetry()` 直接显示
+   `d_vis_->qvel[0..2]`，但 MuJoCo 自由关节约定里这是世界系线速度（`qvel[3:6]`
+   才是机体系角速度，原本就是对的）。修复：复用该函数里已经为欧拉角显示算出
+   的旋转矩阵，做 `R^T * v_world` 再显示。
+6. **造浪模式单向同步**：`renderFrame()` 原先只用一个函数局部 `static` 变量
+   把 `ui_wave_mode_` 推送给 `bridge_->wave_mode_cmd`，若外部（如
+   `/rov/wave_mode_cmd` 话题）改变了 `wave_mode_active`，左侧单选按钮不会
+   跟着变。改为两个成员变量 `last_ui_wave_mode_`/`last_external_wave_mode_`，
+   先读外部状态并同步进 `ui_wave_mode_`（同时标记"已同步"避免立即原样推回
+   造成振荡），再做本地编辑的边沿检测推送。
+
+### Stonefish 几何驱动水动力引擎
+
+`fossen_hydrodynamics.hpp/.cpp` 新增 `HydroModelMode`/`SurfacePatch`/
+`HydroGeometryModel`，`FossenHydrodynamics::compute()` 新增 `mode`/`geo`
+两个默认参数，`mode == kParametricLumped`（默认）分支与 Phase 2 验证过的
+实现逐行保持不变（硬性 parity 要求）。`kStonefishGeometryDriven` 分支：
+
+- `HydroGeometryModel::buildFromMjModel()` 在 `configure()` 时对 `rov_base`
+  的全部几何体自动切分表面微元（箭体 box 6 面×4×4=96 个，4 个垫球每个
+  6 纬×8 经=48 个，共 288 个原始微元），用空间体素网格按面积加权合并到
+  ≤256 个（当前实测确实触发一次合并）；同时支持 `mjGEOM_CYLINDER`/
+  `CAPSULE`/`ELLIPSOID`/`MESH`（三角面读取 `mesh_vert`/`mesh_face`）以便
+  未来 CAD 网格无需改代码即可接入。
+- 包围盒半轴通过逐几何体类型专用半扩展（而非 `geom_rbound` 的等效球半径，
+  后者会把 `0.1x0.3x0.2` 的扁平箭体错误膨胀成一个各轴相同的 `0.374` 立方体）
+  计算，实测结果 `(0.1, 0.3, 0.2)` 与 MJCF 吻合。
+- 用 Lamb 椭球经典附加质量积分（正切换元数值求积，仅在 `buildFromMjModel()`
+  时算一次）得到 `added_mass_linear`/`added_mass_angular` 对角张量，实测最薄
+  轴（X，半轴 `0.1m`）的附加质量系数因扁平形状显著放大（约 `33.6 kg`，
+  超过等效球排水质量 `~25.1 kg`，属扁平体附加质量的已知现象，不与集中参数
+  模型的固定 `6kg` 偏置直接比较）。
+- 每拍 500Hz 对 ≤256 个微元做分布式压阻/蒙皮摩擦/近壁 Venturi/挤膜阻尼
+  积分，再叠加非定常 Froude-Krylov 力与 Munk 回正力矩（见 README 公式）。
+- `MujocoVisBridge` 新增 `hydro_mode`/`hydro_patch_count`/`kern_val`/
+  `m_kern`/`liftoff_ratio`/`cop_y`/`cop_z`/`flow_acc_world`/`sim_speed_factor`，
+  由 `write()` 的快照 tick 一并计算/写入。
+
+### `MujocoViewer` 新增调试工具
+
+- **Rhombic Kern 菱形 + 实时 CoP**：壁面上绘制支撑矩形对角线连接成的菱形
+  （由动态解析的 `L_y`/`L_z` 决定，非硬编码）与一个按 `K_val`/脱离壁面状态
+  变色（绿/黄/红）的压力中心小球，复用既有受力柱状图/流速箭头的
+  `mjv_connector`/`mjv_initGeom` 写法。
+- **`mjvFigure` 实时示波器**：右侧新增 "Live Scope" 分组，5 态单选
+  （关闭/4 垫受力/Kern 裕度与最小垫力/机体速度 vs 流速/8 推力器指令），
+  约 400 帧滚动窗口，渲染在视口右下角 `420x220` 区域。
+- **相机预设 + 跟随**：`Default Orbit`/`Wall YZ View`/`Top XY View`/
+  `Side XZ View` 4 个预设按钮 + `Camera Follow` 复选框（每帧锁定
+  `lookat` 到 ROV 质心，可与任意预设叠加）。
+- **慢动作**：`Sim Speed` 单选（`1x/0.5x/0.2x/0.1x`），通过
+  `MujocoVisBridge::sim_speed_factor` 把 `adhere_mujoco_node` 物理线程的
+  墙钟周期拉长 `1/factor` 倍，仅影响墙钟节奏，不触碰 `mjModel::opt.timestep`。
+- **面板分组折叠**：`Visualize`/`Render Flags`/`Label`/`Visibility Groups`
+  四个原生 MuJoCo 开关组默认折叠（`mjSECT_CLOSED`），为上述新增控件腾出
+  屏幕高度；`Simulation`/`Wave & Hydro Model`/`ROV Overlays`/
+  `Thrusters (Manual)`/`Live Scope` 保持展开。
+
+### 验证结果
+
+- `colcon build --symlink-install --packages-up-to simplified_v1_description adhere_mujoco_hardware`
+  与全工作空间 `colcon build --symlink-install`（6/6 包）均零编译警告通过。
+- `grep -c "bridge_->mtx" src/hardwares/adhere_mujoco_hardware/src/mujoco_viewer.cpp`
+  输出 `1`，确认单帧单锁。
+- 新增本仓库第一个 gtest（`test/test_fossen_hydrodynamics_geometry.cpp`，
+  `ament_cmake_gtest`）：
+  - `kParametricLumped` 两组手工推导状态（静止全浸没 / 侧向来流+近壁吸附）
+    逐位匹配闭式解（`<1e-9`）；`kStonefishGeometryDriven` 传入 `nullptr`
+    几何模型时的防御性回退与 `kParametricLumped` 逐位一致。
+  - 对真实 `rov_wall.xml` 构建的 `HydroGeometryModel` 做结构不变量检查
+    （微元数 `0 < n <= 256`，法向单位长度，包围盒半轴匹配
+    `(0.1,0.3,0.2)` 箭体半扩展，附加质量张量对角且量级合理）与
+    `kStonefishGeometryDriven` 模式有限性烟雾测试，全部通过
+    （`colcon test --packages-select adhere_mujoco_hardware`：
+    `gtest` 5/5 通过；项目既存的 `copyright`/`cpplint`/`flake8`/`pep257`
+    风格检查此前即对本仓库全局失败，与本阶段改动无关，未处理）。
+- 本阶段未在真实桌面 GLFW 会话中逐项人工复核全部 6 个 bug 修复与新 UI
+  控件的视觉效果（环境限制），后续首次桌面会话应按 README 操作表逐项确认，
+  尤其是相机 4 个预设的 `azimuth`/`elevation` 符号是否符合预期视角。

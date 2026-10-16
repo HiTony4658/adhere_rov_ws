@@ -134,6 +134,16 @@ ament_export_libraries(${PROJECT_NAME})
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
+
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_fossen_hydrodynamics_geometry
+    test/test_fossen_hydrodynamics_geometry.cpp
+    src/fossen_hydrodynamics.cpp
+  )
+  target_include_directories(test_fossen_hydrodynamics_geometry PRIVATE
+    include ${MUJOCO_INCLUDE_DIR} ${EIGEN3_INCLUDE_DIR})
+  target_link_libraries(test_fossen_hydrodynamics_geometry ${MUJOCO_LIBRARY})
+  ament_target_dependencies(test_fossen_hydrodynamics_geometry ament_index_cpp)
 endif()
 
 ament_package()

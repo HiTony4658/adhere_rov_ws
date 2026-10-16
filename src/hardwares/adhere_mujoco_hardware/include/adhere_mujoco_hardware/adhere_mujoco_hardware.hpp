@@ -125,10 +125,18 @@ private:
   // bug #6): used by read()'s v_sep,i = v_x,b + omega_y*z_i - omega_z*y_i formula.
   std::array<std::pair<double, double>, 4> pad_yz_{};
 
+  // Geometry-driven hydrodynamics engine (CLAUDE.md Phase 2.10 Section B): built once in
+  // configure() from model_'s own geoms via HydroGeometryModel::buildFromMjModel(), cached
+  // for the lifetime of this instance. hydro_mode_ mirrors vis_bridge_->hydro_mode, read once
+  // per write() tick -- no edge-detection needed, it's a plain mode selector.
+  HydroGeometryModel hydro_geometry_model_;
+  std::atomic<HydroModelMode> hydro_mode_{HydroModelMode::kParametricLumped};
+
   bool headless_ = false;
 
   double sim_time_ = 0.0;
-  long long step_count_ = 0;
+  long long step_count_ = 0;        // real physics-step counter (frozen while paused)
+  long long write_tick_count_ = 0;  // increments every write() call, pause or not (Bug 2 fix)
 
   // Previous-tick world-frame linear velocity, used for the finite-difference linear
   // acceleration estimate reported on the imu_sensor state interfaces (no dedicated MJCF

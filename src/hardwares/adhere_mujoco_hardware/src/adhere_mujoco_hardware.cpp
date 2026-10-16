@@ -65,7 +65,7 @@ hardware_interface::return_type AdhereMujocoHardware::configure(
   // model's auto-computed mean extent and renders many times larger than this ~0.2-0.6m ROV.
   // Shrunk by >50x (MuJoCo defaults are 1.0 / 0.1) so frame gizmos read as thin markers instead
   // of dominating the scene.
-  model_->vis.scale.framelength = 0.02;
+  model_->vis.scale.framelength = 0.04;
   model_->vis.scale.framewidth = 0.002;
 
   body_id_ = mj_name2id(model_, mjOBJ_BODY, "rov_base");
@@ -73,6 +73,14 @@ hardware_interface::return_type AdhereMujocoHardware::configure(
     RCLCPP_ERROR(logger(), "Body 'rov_base' not found in MJCF");
     return hardware_interface::return_type::ERROR;
   }
+
+  // Constructed here (before the pad-resolution loop below) rather than after, so that loop
+  // can write pad_site_pos_body directly into vis_bridge_ -- CLAUDE.md Phase 2.10 Section A3:
+  // this is the single place the full 3D pad-site positions are resolved, read unlocked
+  // afterwards by both MujocoViewer and adhere_mujoco_node (replacing their respective
+  // duplicated/hardcoded copies). Safe unlocked: populated synchronously here, before
+  // vis_bridge_ is ever handed to any other thread.
+  vis_bridge_ = std::make_shared<MujocoVisBridge>(model_->nq, model_->nv);
 
   for (size_t i = 0; i < kPadNames.size(); ++i) {
     const std::string sensor_name = std::string("touch_") + kPadNames[i];
@@ -92,6 +100,9 @@ hardware_interface::return_type AdhereMujocoHardware::configure(
       return hardware_interface::return_type::ERROR;
     }
     pad_yz_[i] = {model_->site_pos[3 * site_id + 1], model_->site_pos[3 * site_id + 2]};
+    vis_bridge_->pad_site_pos_body[i] = {
+      model_->site_pos[3 * site_id + 0], model_->site_pos[3 * site_id + 1],
+      model_->site_pos[3 * site_id + 2]};
   }
 
   for (size_t i = 0; i < kThrusterNames.size(); ++i) {
@@ -111,11 +122,18 @@ hardware_interface::return_type AdhereMujocoHardware::configure(
   wave_trigger_time_.store(0.0);
   RCLCPP_INFO(logger(), "AdhereMujocoHardware: configured, starting in Calm Water mode");
 
-  vis_bridge_ = std::make_shared<MujocoVisBridge>(model_->nq, model_->nv);
   // MujocoViewer is deferred to start(): pure-xacro decoupling (CLAUDE.md Phase 2.6 Stage 2.1)
   // means `headless` is no longer known at configure() time -- it arrives later via
   // setHeadless(), called by adhere_mujoco_node through activeInstance() after this configure()
   // call returns but before resource_manager->start_components() triggers start().
+
+  // CLAUDE.md Phase 2.10 Section B8: tessellate this robot's own geoms into a
+  // HydroGeometryModel once, cached for the lifetime of this instance and reused by every
+  // kStonefishGeometryDriven compute() call.
+  hydro_geometry_model_ = HydroGeometryModel::buildFromMjModel(model_, body_id_);
+  RCLCPP_INFO(
+    logger(), "AdhereMujocoHardware: HydroGeometryModel built with %zu surface patches",
+    hydro_geometry_model_.patches.size());
 
   hw_states_.fill(0.0);
   hw_commands_.fill(0.0);
@@ -270,7 +288,8 @@ void AdhereMujocoHardware::applyHydrodynamics(const mjModel * m, mjData * d)
     gust_active ? gust_plugin_->getHydroParams() : calm_plugin_->getHydroParams();
   const double t_eval = gust_active ? std::max(0.0, d->time - wave_trigger_time_.load()) : d->time;
 
-  const Wrench wrench = FossenHydrodynamics::compute(state, t_eval, params);
+  const Wrench wrench = FossenHydrodynamics::compute(
+    state, t_eval, params, hydro_mode_.load(), &hydro_geometry_model_);
 
   // Interactive mouse perturbation (CLAUDE.md Phase 2.6 Stage 3.1): MujocoViewer writes the
   // Ctrl+drag wrench it computed on its own secondary d_vis_ into vis_bridge_->xfrc_perturb;
@@ -364,6 +383,16 @@ hardware_interface::return_type AdhereMujocoHardware::write()
     return hardware_interface::return_type::ERROR;
   }
 
+  // Increments every write() call regardless of pause state (CLAUDE.md Phase 2.10 Bug 2
+  // fix): unlike step_count_ (the real physics-step counter, frozen while paused), this
+  // keeps the vis-bridge snapshot cadence below alive even while paused, so "Step Once" and
+  // manual-slider drags while paused are never stuck waiting for step_count_ to advance.
+  ++write_tick_count_;
+
+  // Hydro model mode selector (CLAUDE.md Phase 2.10 Section B9): plain pass-through, no
+  // edge-detection needed -- always take whatever value the GUI radio currently holds.
+  hydro_mode_.store(static_cast<HydroModelMode>(vis_bridge_->hydro_mode.load()));
+
   // GUI reset request (Backspace in MujocoViewer) takes priority over everything else this
   // tick: re-seed the authoritative mjData and re-latch mj_step1 so read() stays zero-delay.
   if (vis_bridge_->reset_request.exchange(false)) {
@@ -407,9 +436,11 @@ hardware_interface::return_type AdhereMujocoHardware::write()
   }
   vis_bridge_->sim_time.store(sim_time_);
 
-  // Every 8 steps (~60Hz at dt=2ms), snapshot state into the vis bridge via try_lock() so a
-  // slow/blocked renderer can never stall this 500Hz loop.
-  if (step_count_ % 8 == 0) {
+  // Every 8 write() ticks (~60Hz at dt=2ms wall-clock, now gated on write_tick_count_ instead
+  // of step_count_ -- CLAUDE.md Phase 2.10 Bug 2 fix -- or immediately on a single_step so
+  // "Step Once" is never up to 7 ticks late), snapshot state into the vis bridge via
+  // try_lock() so a slow/blocked renderer can never stall this 500Hz loop.
+  if (write_tick_count_ % 8 == 0 || single_step) {
     std::unique_lock<std::mutex> lock(vis_bridge_->mtx, std::try_to_lock);
     if (lock.owns_lock()) {
       std::memcpy(vis_bridge_->qpos.data(), data_->qpos, vis_bridge_->qpos.size() * sizeof(double));
@@ -428,11 +459,43 @@ hardware_interface::return_type AdhereMujocoHardware::write()
         gust_active ? *gust_plugin_ : *calm_plugin_;
       const Eigen::Vector3d flow = active_plugin.ambientVelocityWorld(t_eval);
       vis_bridge_->flow_vel_world = {flow.x(), flow.y(), flow.z()};
+      const Eigen::Vector3d flow_acc = active_plugin.ambientAccelerationWorld(t_eval);
+      vis_bridge_->flow_acc_world = {flow_acc.x(), flow_acc.y(), flow_acc.z()};
       vis_bridge_->valid = true;
     }
     vis_bridge_->wave_mode_active.store(wave_mode_.load());
     vis_bridge_->wave_tau.store(
       wave_mode_.load() == 2 ? std::max(0.0, sim_time_ - wave_trigger_time_.load()) : 0.0);
+    vis_bridge_->hydro_patch_count.store(static_cast<int>(hydro_geometry_model_.patches.size()));
+
+    // Rhombic Kern telemetry (CLAUDE.md Sec.4.4/Phase 2.10 Section B9): L_y/L_z are derived
+    // dynamically from the resolved pad_yz_ positions, never hardcoded, so this stays correct
+    // even if the pad geometry or CLAUDE.md's own (stale) a/b prose ever disagree.
+    double L_y = 0.0, L_z = 0.0;
+    for (const auto & yz : pad_yz_) {
+      L_y = std::max(L_y, std::abs(yz.first));
+      L_z = std::max(L_z, std::abs(yz.second));
+    }
+    double F_sum = 0.0, Fy_sum = 0.0, Fz_sum = 0.0;
+    int liftoff_count = 0;
+    for (size_t i = 0; i < kPadNames.size(); ++i) {
+      const double F_i = std::max(0.0, data_->sensordata[pad_touch_sensor_adr_[i]]);
+      F_sum += F_i;
+      Fy_sum += F_i * pad_yz_[i].first;
+      Fz_sum += F_i * pad_yz_[i].second;
+      if (data_->sensordata[pad_touch_sensor_adr_[i]] <= 0.0) {
+        ++liftoff_count;
+      }
+    }
+    const double p_y = F_sum > 1e-9 ? Fy_sum / F_sum : 0.0;
+    const double p_z = F_sum > 1e-9 ? Fz_sum / F_sum : 0.0;
+    const double kern_val =
+      (L_y > 1e-9 && L_z > 1e-9) ? (std::abs(p_y) / L_y + std::abs(p_z) / L_z) : 0.0;
+    vis_bridge_->cop_y.store(p_y);
+    vis_bridge_->cop_z.store(p_z);
+    vis_bridge_->kern_val.store(kern_val);
+    vis_bridge_->m_kern.store(1.0 - kern_val);
+    vis_bridge_->liftoff_ratio.store(static_cast<double>(liftoff_count) / kPadNames.size());
   }
 
   return hardware_interface::return_type::OK;

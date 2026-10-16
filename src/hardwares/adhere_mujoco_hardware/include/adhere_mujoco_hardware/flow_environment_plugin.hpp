@@ -22,6 +22,10 @@ public:
   {
     return getHydroParams().currentWorld(t);
   }
+  virtual Eigen::Vector3d ambientAccelerationWorld(double t) const
+  {
+    return getHydroParams().currentAccelerationWorld(t);
+  }
   virtual std::string profileName() const = 0;
 };
 

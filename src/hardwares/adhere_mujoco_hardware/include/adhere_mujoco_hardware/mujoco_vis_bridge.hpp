@@ -40,7 +40,15 @@ struct MujocoVisBridge
   std::array<double, 4> pad_force{};       // [TL, TR, BL, BR], N
   std::array<double, 4> pad_v_sep{};       // [TL, TR, BL, BR], m/s
   std::array<double, 3> flow_vel_world{};  // ambient flow velocity, world frame, m/s
+  std::array<double, 3> flow_acc_world{};  // ambient flow acceleration, world frame, m/s^2
   bool valid = false;                      // becomes true after the first successful write
+
+  // --- write-once static geometry (set by AdhereMujocoHardware::configure(), read freely
+  //     afterwards without locking: it is populated synchronously before vis_bridge_ is ever
+  //     handed to MujocoViewer/the 500Hz physics thread/any ROS executor thread, so there is no
+  //     possible concurrent writer -- mirrors the existing AdhereMujocoHardware::pad_yz_
+  //     precedent) ---
+  std::array<std::array<double, 3>, 4> pad_site_pos_body{};  // [TL,TR,BL,BR] body-local (x,y,z)
 
   // --- GUI -> hardware control requests (lock-free atomics) ---
   std::atomic<bool> paused{false};
@@ -49,12 +57,20 @@ struct MujocoVisBridge
   std::atomic<int> wave_mode_cmd{0};  // 0 = no request pending; 1/2 = switch request from GUI
   std::array<std::atomic<double>, 8> manual_ctrl{};  // additive manual slider thrust, N
   std::array<std::atomic<double>, 6> xfrc_perturb{};  // [Fx,Fy,Fz,Tx,Ty,Tz] on rov_base, world
+  std::atomic<int> hydro_mode{0};  // mirrors HydroModelMode: 0=ParametricLumped, 1=StonefishGeometryDriven
+  std::atomic<double> sim_speed_factor{1.0};  // <=1.0, slow-motion scale for the physics thread period
 
   // --- hardware -> GUI scalar telemetry (lock-free atomics) ---
   std::atomic<double> actual_physics_hz{0.0};
   std::atomic<double> sim_time{0.0};
   std::atomic<int> wave_mode_active{1};
   std::atomic<double> wave_tau{0.0};
+  std::atomic<int> hydro_patch_count{0};   // HydroGeometryModel::patches.size()
+  std::atomic<double> kern_val{0.0};       // Rhombic Kern K_val
+  std::atomic<double> m_kern{0.0};         // Rhombic Kern margin, 1 - K_val
+  std::atomic<double> liftoff_ratio{0.0};  // fraction of the 4 pads at/near liftoff this tick
+  std::atomic<double> cop_y{0.0};          // Center of Pressure, body-local y, m
+  std::atomic<double> cop_z{0.0};          // Center of Pressure, body-local z, m
 };
 
 }  // namespace adhere_mujoco_hardware

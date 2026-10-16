@@ -30,9 +30,6 @@ namespace
 {
 constexpr double kPhysicsUpdateRateHz = 500.0;
 constexpr double kPublishRateHz = 100.0;
-constexpr std::array<std::array<double, 3>, 4> kPadPosBody = {
-  std::array<double, 3>{-0.1, 0.25, 0.15}, std::array<double, 3>{-0.1, -0.25, 0.15},
-  std::array<double, 3>{-0.1, 0.25, -0.15}, std::array<double, 3>{-0.1, -0.25, -0.15}};
 
 // Snapshot of the state this node needs for TF/Odom/Marker publishing, read from
 // AdhereMujocoHardware::visBridge() under its mutex (CLAUDE.md Phase 2.6 Stage 2.1 bug #8: no
@@ -46,6 +43,10 @@ struct TelemetrySnapshot
   double gyro_body[3] = {0, 0, 0};
   std::array<double, 4> pad_force{};
   std::array<double, 3> flow_vel_world{};
+  // [TL,TR,BL,BR] body-local (x,y,z), read unlocked from bridge->pad_site_pos_body (CLAUDE.md
+  // Phase 2.10 Section A3: single source of truth, resolved once in
+  // AdhereMujocoHardware::configure() -- replaces this file's former hardcoded kPadPosBody).
+  std::array<std::array<double, 3>, 4> pad_site_pos_body{};
   bool valid = false;
 };
 
@@ -56,35 +57,40 @@ TelemetrySnapshot readTelemetry(adhere_mujoco_hardware::AdhereMujocoHardware * h
   if (!bridge) {
     return snap;
   }
-  std::lock_guard<std::mutex> lock(bridge->mtx);
-  if (!bridge->valid || bridge->qpos.size() < 7 || bridge->qvel.size() < 6) {
-    return snap;
-  }
-  snap.pos[0] = bridge->qpos[0];
-  snap.pos[1] = bridge->qpos[1];
-  snap.pos[2] = bridge->qpos[2];
-  snap.quat[0] = bridge->qpos[3];
-  snap.quat[1] = bridge->qpos[4];
-  snap.quat[2] = bridge->qpos[5];
-  snap.quat[3] = bridge->qpos[6];
+  {
+    std::lock_guard<std::mutex> lock(bridge->mtx);
+    if (!bridge->valid || bridge->qpos.size() < 7 || bridge->qvel.size() < 6) {
+      return snap;
+    }
+    snap.pos[0] = bridge->qpos[0];
+    snap.pos[1] = bridge->qpos[1];
+    snap.pos[2] = bridge->qpos[2];
+    snap.quat[0] = bridge->qpos[3];
+    snap.quat[1] = bridge->qpos[4];
+    snap.quat[2] = bridge->qpos[5];
+    snap.quat[3] = bridge->qpos[6];
 
-  // MuJoCo freejoint qvel convention: first 3 = world-frame linear velocity, last 3 =
-  // body-frame angular velocity. Rotate linear velocity into the body frame with R^T.
-  const double w = snap.quat[0], x = snap.quat[1], y = snap.quat[2], z = snap.quat[3];
-  double R[9] = {
-    1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y),
-    2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x),
-    2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)};
-  const double vx = bridge->qvel[0], vy = bridge->qvel[1], vz = bridge->qvel[2];
-  snap.vel_body[0] = R[0] * vx + R[3] * vy + R[6] * vz;
-  snap.vel_body[1] = R[1] * vx + R[4] * vy + R[7] * vz;
-  snap.vel_body[2] = R[2] * vx + R[5] * vy + R[8] * vz;
-  snap.gyro_body[0] = bridge->qvel[3];
-  snap.gyro_body[1] = bridge->qvel[4];
-  snap.gyro_body[2] = bridge->qvel[5];
-  snap.pad_force = bridge->pad_force;
-  snap.flow_vel_world = bridge->flow_vel_world;
-  snap.valid = true;
+    // MuJoCo freejoint qvel convention: first 3 = world-frame linear velocity, last 3 =
+    // body-frame angular velocity. Rotate linear velocity into the body frame with R^T.
+    const double w = snap.quat[0], x = snap.quat[1], y = snap.quat[2], z = snap.quat[3];
+    double R[9] = {
+      1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y),
+      2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x),
+      2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)};
+    const double vx = bridge->qvel[0], vy = bridge->qvel[1], vz = bridge->qvel[2];
+    snap.vel_body[0] = R[0] * vx + R[3] * vy + R[6] * vz;
+    snap.vel_body[1] = R[1] * vx + R[4] * vy + R[7] * vz;
+    snap.vel_body[2] = R[2] * vx + R[5] * vy + R[8] * vz;
+    snap.gyro_body[0] = bridge->qvel[3];
+    snap.gyro_body[1] = bridge->qvel[4];
+    snap.gyro_body[2] = bridge->qvel[5];
+    snap.pad_force = bridge->pad_force;
+    snap.flow_vel_world = bridge->flow_vel_world;
+    snap.valid = true;
+  }
+  // pad_site_pos_body is write-once unlocked geometry (CLAUDE.md Phase 2.10 Section A3): safe
+  // to read outside bridge->mtx once snap.valid has been observed true.
+  snap.pad_site_pos_body = bridge->pad_site_pos_body;
   return snap;
 }
 }  // namespace
@@ -222,9 +228,9 @@ int main(int argc, char ** argv)
         const double force = std::max(0.0, snap.pad_force[i]);
         const double length = 0.01 * force;  // 0.01 m per N
         geometry_msgs::msg::Point p0;
-        p0.x = kPadPosBody[i][0];
-        p0.y = kPadPosBody[i][1];
-        p0.z = kPadPosBody[i][2];
+        p0.x = snap.pad_site_pos_body[i][0];
+        p0.y = snap.pad_site_pos_body[i][1];
+        p0.z = snap.pad_site_pos_body[i][2];
         geometry_msgs::msg::Point p1 = p0;
         p1.x += length;
         bar.points.push_back(p0);
@@ -276,9 +282,9 @@ int main(int argc, char ** argv)
   std::atomic<bool> physics_running{true};
   std::thread physics_thread([&, hw]() {
     using Clock = std::chrono::steady_clock;
-    const auto period = std::chrono::duration_cast<Clock::duration>(
-      std::chrono::duration<double>(1.0 / kPhysicsUpdateRateHz));
-    auto next_tick = Clock::now() + period;
+    constexpr auto kBasePeriod =
+      std::chrono::duration<double>(1.0 / kPhysicsUpdateRateHz);
+    auto next_tick = Clock::now() + std::chrono::duration_cast<Clock::duration>(kBasePeriod);
     auto last_tick = Clock::now();
     double actual_hz_ema = kPhysicsUpdateRateHz;
     auto bridge = hw->visBridge();
@@ -298,6 +304,16 @@ int main(int argc, char ** argv)
           bridge->actual_physics_hz.store(actual_hz_ema);
         }
       }
+
+      // Slow-motion wall-clock scale (CLAUDE.md Phase 2.10 Section C4): factor<1 stretches
+      // the wall-clock period between ticks (factor=0.1 -> 10x longer period -> 10x slower
+      // wall-clock stepping), while mjModel::opt.timestep -- and therefore every numerical-
+      // parity contract -- stays exactly 2.0ms, unaffected. Clamped to (0, 1] so the GUI can
+      // never speed the simulation up past real-time through this control.
+      const double speed_factor =
+        bridge ? std::clamp(bridge->sim_speed_factor.load(), 0.01, 1.0) : 1.0;
+      const auto period =
+        std::chrono::duration_cast<Clock::duration>(kBasePeriod / speed_factor);
 
       std::this_thread::sleep_until(next_tick);
       next_tick += period;

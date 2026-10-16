@@ -68,6 +68,23 @@ private:
   void resetCameraView();
   void saveScreenshot();
 
+  // Camera presets (CLAUDE.md Phase 2.10 Section C3) -- lookat/distance are the
+  // convention-independent, load-bearing values; azimuth/elevation signs were chosen to match
+  // resetCameraView()'s confirmed-working convention and should be visually re-checked in a
+  // real desktop session.
+  void setCameraWallYZ();
+  void setCameraTopXY();
+  void setCameraSideXZ();
+
+  // Draws the 3D Rhombic Kern diamond + live Center-of-Pressure marker on the wall plane
+  // (Section C1), appending into scn_.geoms the same way the existing pad-force-bar/flow-
+  // arrow blocks already do. Call after mjv_updateScene(), before mjr_render().
+  void drawKernDiamond();
+  // Appends the current frame's sample(s) to scope_history_ for whichever scope_mode_ is
+  // selected, then renders the mjvFigure oscilloscope into a fixed bottom-right rect
+  // (Section C2). Call after mjr_render()/drawOverlayTelemetry().
+  void updateAndDrawScope(mjrRect full_viewport);
+
   const mjModel * model_;
   mjData * d_vis_ = nullptr;
   std::shared_ptr<MujocoVisBridge> bridge_;
@@ -115,6 +132,14 @@ private:
   mjtByte ui_show_flow_arrow_ = 1;  // custom blue flow arrow, not a MuJoCo opt_/scn_ flag
   double thruster_slider_[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 
+  // CLAUDE.md Phase 2.10 additions.
+  int ui_hydro_mode_ = 0;             // radio index: 0 = Lumped, 1 = Stonefish-Mesh
+  mjtByte ui_show_kern_diamond_ = 1;  // Section C1 toggle
+  int ui_sim_speed_ = 0;              // radio index: 0=1x,1=0.5x,2=0.2x,3=0.1x (Section C4)
+  mjtByte ui_cam_follow_ = 0;         // Section C3 "Follow ROV" checkbox
+  int scope_mode_ = 0;  // radio index: 0=Off,1=Pad Forces,2=Kern Margin,3=Body Vel vs Flow,
+                        // 4=Thruster Commands (Section C2)
+
   int pad_site_id_[4] = {-1, -1, -1, -1};
   int body_id_ = -1;
 
@@ -124,6 +149,39 @@ private:
   // independent of the bottom-up flip applied to uistate_.y for mj*/mjUI consumers.
   double last_raw_x_ = 0.0;
   double last_raw_y_ = 0.0;
+
+  // --- Bug 4: single critical-section snapshot cache, populated once per frame at the top
+  //     of renderFrame() (qpos/qvel/ctrl are copied straight into d_vis_ instead, which
+  //     already serves as their own per-frame cache). ---
+  std::array<double, 4> cached_pad_force_{};
+  std::array<double, 4> cached_pad_v_sep_{};
+  std::array<double, 3> cached_flow_vel_world_{};
+  std::array<double, 3> cached_flow_acc_world_{};
+  bool cached_valid_ = false;
+  double cached_kern_val_ = 0.0;
+  double cached_m_kern_ = 0.0;
+  double cached_liftoff_ratio_ = 0.0;
+  double cached_cop_y_ = 0.0;
+  double cached_cop_z_ = 0.0;
+  int cached_hydro_patch_count_ = 0;
+
+  // --- Bug 6: bidirectional wave-mode sync state (replaces the old function-local static). ---
+  int last_ui_wave_mode_ = -1;
+  int last_external_wave_mode_ = -1;
+
+  // --- Section C1: Rhombic Kern diamond geometry, resolved once from bridge_->pad_site_pos_body
+  //     the first time it's observed valid (write-once data, never changes afterwards). ---
+  bool kern_geom_cached_ = false;
+  double kern_Ly_ = 0.0;
+  double kern_Lz_ = 0.0;
+  double kern_x_plane_ = 0.0;
+
+  // --- Section C2: live scope oscilloscope. ---
+  static constexpr int kScopeHistoryLen = 400;
+  static constexpr int kScopeMaxSeries = 8;
+  mjvFigure scope_fig_{};
+  std::array<std::array<float, kScopeHistoryLen>, kScopeMaxSeries> scope_history_{};
+  int scope_history_count_ = 0;
 
   std::thread thread_;
   std::atomic<bool> running_{false};
