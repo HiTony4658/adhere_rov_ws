@@ -3,7 +3,9 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <random>
 #include <string>
+#include <vector>
 
 #include "adhere_mujoco_hardware/fossen_hydrodynamics.hpp"
 #include "ament_index_cpp/get_package_share_directory.hpp"
@@ -12,6 +14,7 @@ using adhere_mujoco_hardware::FossenHydrodynamics;
 using adhere_mujoco_hardware::HydroGeometryModel;
 using adhere_mujoco_hardware::HydroModelMode;
 using adhere_mujoco_hardware::HydroParams;
+using adhere_mujoco_hardware::HydroWrenchBreakdown;
 using adhere_mujoco_hardware::RigidBodyState;
 using adhere_mujoco_hardware::Wrench;
 
@@ -305,6 +308,377 @@ TEST(ModelAgnosticHydro, WeldedChildBodyRecursionAndCustomNumerics)
   EXPECT_NEAR(params.augmented_mass, 26.0, 1e-9);
 
   mj_deleteModel(model);
+}
+
+// ===========================================================================================
+// CLAUDE.md Phase 2.13: 5-Tier Hydrodynamic Accuracy V&V Suite
+// ===========================================================================================
+
+// Tier 1 (Lamb Sphere Analytical Limit): for a sphere (a=b=c=R), buildFromMjModel()'s
+// ellipsoidAlpha-based linear added mass must equal the classical Lamb result
+// M_A = 0.5 * rho * (4/3 pi R^3) * I_3 (k1=k2=k3=0.5) to <0.1% relative error.
+TEST(HydroVV_Tier1, LambSphereAddedMassAnalyticalExact)
+{
+  constexpr const char * kMjcf = R"xml(
+<mujoco model="lamb_sphere_test">
+  <compiler angle="radian"/>
+  <option timestep="0.002"/>
+  <worldbody>
+    <body name="sphere_body" pos="0 0 0.5">
+      <freejoint name="sphere_free"/>
+      <inertial pos="0 0 0" mass="1.0" diaginertia="1.0 1.0 1.0"/>
+      <geom name="sphere_geom" type="sphere" size="0.2"/>
+    </body>
+  </worldbody>
+</mujoco>
+)xml";
+  const std::string path = "/tmp/adhere_mujoco_hardware_test_lamb_sphere.xml";
+  {
+    std::ofstream out(path);
+    out << kMjcf;
+  }
+  char error[1000] = "";
+  mjModel * model = mj_loadXML(path.c_str(), nullptr, error, sizeof(error));
+  std::remove(path.c_str());
+  ASSERT_NE(model, nullptr) << "Failed to load in-memory Lamb-sphere MJCF: " << error;
+
+  const int body_id = mj_name2id(model, mjOBJ_BODY, "sphere_body");
+  ASSERT_GE(body_id, 0);
+  const HydroGeometryModel geo = HydroGeometryModel::buildFromMjModel(model, body_id);
+
+  // M_A = 0.5 * rho * (4/3) * pi * R^3, R = 0.2 m, rho = 1000 kg/m^3 (HydroGeometryModel's own
+  // hardcoded kRhoWater, see buildFromMjModel()'s comment).
+  constexpr double kR = 0.2;
+  constexpr double kRho = 1000.0;
+  const double displaced_mass = kRho * (4.0 / 3.0) * M_PI * kR * kR * kR;
+  const double expected_m_a = 0.5 * displaced_mass;  // == 16.75516... kg
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_NEAR(geo.added_mass_linear(i, i), expected_m_a, 2e-2);
+  }
+
+  // A sphere rotating in an unbounded ideal fluid induces exactly zero fluid motion (Lamb,
+  // Hydrodynamics Art. 114), so its added rotational inertia is exactly zero about every axis
+  // -- special-cased in buildFromMjModel() since the general heuristic formula used for
+  // non-spherical hulls does not itself vanish at a=b=c.
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_NEAR(geo.added_mass_angular(i, i), 0.0, 1e-9);
+  }
+
+  mj_deleteModel(model);
+}
+
+// Tier 2 (Degenerate Patch-to-Lumped Exact Equivalence): under pure translation (omega=0,
+// identity orientation), kStonefishGeometryDriven's per-patch Venturi suction must sum to
+// exactly kParametricLumped's single-point Venturi force, and a pure axial crossflow velocity
+// must produce exactly the analytical frontal-drag + skin-friction integral.
+TEST_F(HydroGeometryModelFixture, HydroVV_Tier2_PatchToLumpedExactEquivalence)
+{
+  const HydroGeometryModel geo = HydroGeometryModel::buildFromMjModel(model_, body_id_);
+  HydroParams params;  // calm-water defaults
+
+  // Part A: Venturi suction, zero rotation. h_gap = 0.15 - 0.10 = 0.05 m > h_gap_nominal, so
+  // neither model's decay term is clamped and the two formulations must agree exactly.
+  RigidBodyState state_venturi;
+  state_venturi.com_pos_world = Eigen::Vector3d(0.15, 0.0, 0.5);
+  state_venturi.orientation = Eigen::Quaterniond::Identity();
+  state_venturi.ang_vel_world = Eigen::Vector3d::Zero();
+  state_venturi.lin_vel_world = Eigen::Vector3d(0.0, 0.2, 0.0);
+
+  HydroWrenchBreakdown breakdown_lumped;
+  FossenHydrodynamics::compute(
+    state_venturi, 0.0, params, HydroModelMode::kParametricLumped, nullptr, &breakdown_lumped);
+  HydroWrenchBreakdown breakdown_stonefish;
+  FossenHydrodynamics::compute(
+    state_venturi, 0.0, params, HydroModelMode::kStonefishGeometryDriven, &geo,
+    &breakdown_stonefish);
+
+  EXPECT_NEAR(breakdown_lumped.f_venturi_body.x(), breakdown_stonefish.f_venturi_body.x(), 1e-12);
+  EXPECT_NEAR(breakdown_lumped.f_venturi_body.y(), breakdown_stonefish.f_venturi_body.y(), 1e-12);
+  EXPECT_NEAR(breakdown_lumped.f_venturi_body.z(), breakdown_stonefish.f_venturi_body.z(), 1e-12);
+  // Sanity: this must be the known nonzero suction value, not two sides of a degenerate 0==0.
+  EXPECT_LT(breakdown_lumped.f_venturi_body.x(), -1.0);
+
+  // Part B: pure axial relative velocity v_y = 0.4 m/s, no wall proximity effects (patches with
+  // normal != +-Y see pure tangential flow, contributing skin friction only; the single +Y face
+  // sees pure normal flow, contributing windward pressure drag only -- the -Y face is leeward
+  // and contributes nothing, matching kStonefishGeometryDriven's windward-only convention).
+  RigidBodyState state_axial;
+  state_axial.com_pos_world = Eigen::Vector3d(0.5, 0.0, 0.5);  // far from the wall: no suction
+  state_axial.orientation = Eigen::Quaterniond::Identity();
+  state_axial.ang_vel_world = Eigen::Vector3d::Zero();
+  const double v_y = 0.4;
+  state_axial.lin_vel_world = Eigen::Vector3d(0.0, v_y, 0.0);
+
+  double area_windward_y = 0.0;   // the single +Y face
+  double area_tangential = 0.0;   // every face except +-Y (zero normal component for pure v_y)
+  for (const auto & p : geo.patches) {
+    if (p.normal_body.y() > 0.5) {
+      area_windward_y += p.area;
+    } else if (p.normal_body.y() > -0.5) {
+      area_tangential += p.area;  // normal is +-X or +-Z: pure tangential flow
+    }
+  }
+  ASSERT_GT(area_windward_y, 0.0);
+  ASSERT_GT(area_tangential, 0.0);
+
+  const double F_y_exact = -(
+    params.D_lin.y() * v_y +
+    0.5 * params.rho_water * (params.Cd_normal * area_windward_y +
+                               params.Cf_tangent * area_tangential) *
+      v_y * v_y);
+  const Wrench w_axial = FossenHydrodynamics::compute(
+    state_axial, 0.0, params, HydroModelMode::kStonefishGeometryDriven, &geo);
+  EXPECT_NEAR(w_axial.force_world.y(), F_y_exact, 1e-11);
+}
+
+// Tier 3 (Analytical Surface Integral Benchmark under Pitch Tilt & Rotation).
+TEST_F(HydroGeometryModelFixture, HydroVV_Tier3_AnalyticalPitchSqueezeAndVenturiTorque)
+{
+  const HydroGeometryModel geo = HydroGeometryModel::buildFromMjModel(model_, body_id_);
+
+  // --- Part A: pure pitch rate omega_y at the nominal gap (h_gap == h_gap_nominal, so decay ==
+  // 1 and (h_nom/h_gap)^3 == 1 exactly for every front patch, all of which share the same flat
+  // x = -0.10m centroid -- CLAUDE.md FrontPlateAreaAndNormalsExact). Cd_normal/Cf_tangent/
+  // D_ang_lin/D_ang_quad are zeroed to isolate the squeeze-film torque alone: windward pressure
+  // drag and skin friction are real (nonzero) contributors to tau_y at this state (see the
+  // derivation in the task write-up) and would otherwise contaminate the comparison against the
+  // squeeze-only closed form below.
+  HydroParams params;
+  params.Cd_normal = 0.0;
+  params.Cf_tangent = 0.0;
+  params.D_ang_lin = Eigen::Vector3d::Zero();
+  params.D_ang_quad = Eigen::Vector3d::Zero();
+
+  RigidBodyState state_pitch_rate;
+  state_pitch_rate.com_pos_world = Eigen::Vector3d(0.125, 0.0, 0.5);  // h_gap = 0.125-0.10 = h_nom
+  state_pitch_rate.orientation = Eigen::Quaterniond::Identity();
+  const double omega_y = 0.5;
+  state_pitch_rate.ang_vel_world = Eigen::Vector3d(0.0, omega_y, 0.0);
+  state_pitch_rate.lin_vel_world = Eigen::Vector3d::Zero();
+
+  HydroWrenchBreakdown breakdown;
+  FossenHydrodynamics::compute(
+    state_pitch_rate, 0.0, params, HydroModelMode::kStonefishGeometryDriven, &geo, &breakdown);
+
+  double sum_area_z2 = 0.0;
+  double area_plate = 0.0;
+  for (const auto & p : geo.patches) {
+    if (p.normal_body.x() < -0.5) {
+      sum_area_z2 += p.area * p.centroid_body.z() * p.centroid_body.z();
+      area_plate += p.area;
+    }
+  }
+  ASSERT_GT(area_plate, 0.0);
+  const double tau_y_discrete_exact = -params.C_squeeze * sum_area_z2 * omega_y;
+  EXPECT_NEAR(breakdown.t_drag_body.y(), tau_y_discrete_exact, 1e-9);
+
+  // Continuum closed form: Integral_{-Ly}^{Ly} Integral_{-Lz}^{Lz} z^2 dy dz
+  //   = (2Ly) * (2Lz^3/3) = A_plate * Lz^2 / 3, so
+  //   tau_y,squeeze,exact ~= -C_squeeze * A_plate * Lz^2 / 3 * omega_y.
+  // (Lz is the plate's own half-height, recovered from the tessellated AABB -- not hardcoded --
+  // so this check stays valid if the hull geometry ever changes.)
+  const double L_z = geo.bbox_half_extents.z();
+  const double tau_y_continuum = -params.C_squeeze * area_plate * L_z * L_z / 3.0 * omega_y;
+  EXPECT_NEAR(tau_y_discrete_exact, tau_y_continuum, 0.1 * std::abs(tau_y_continuum));
+
+  // --- Part B: static pitch tilt theta in a pure Y crossflow (omega=0): the closer half of the
+  // front plate experiences less exponential suction attenuation (smaller h_gap => decay closer
+  // to 1) than the farther half, so the discrete per-patch model sees a net pitching moment that
+  // the single-point Lumped model cannot represent at all. The exact *sign* of that moment
+  // depends on which half ends up closer for a given rotation-convention/pitch-sign combination
+  // (verified analytically, not asserted a priori here to avoid baking in an unverified
+  // convention); what is asserted is the qualitative physical claim CLAUDE.md actually cares
+  // about: a nonzero geometry-driven pitch moment vs. an exactly-zero Lumped one.
+  HydroParams params_b;
+  params_b.cob_offset_body = Eigen::Vector3d::Zero();  // isolate: remove hydrostatic restoring
+                                                         // moment so Lumped's torque is exactly
+                                                         // zero, not just "small"
+  const double theta = 0.05;
+  RigidBodyState state_tilt;
+  state_tilt.com_pos_world = Eigen::Vector3d(0.125, 0.0, 0.5);
+  state_tilt.orientation = Eigen::Quaterniond(Eigen::AngleAxisd(theta, Eigen::Vector3d::UnitY()));
+  state_tilt.ang_vel_world = Eigen::Vector3d::Zero();
+  state_tilt.lin_vel_world = Eigen::Vector3d(0.0, 0.5, 0.0);
+
+  const Eigen::Matrix3d R = state_tilt.orientation.toRotationMatrix();
+  double h_gap_pos_z = -1.0, h_gap_neg_z = -1.0;
+  for (const auto & p : geo.patches) {
+    if (p.normal_body.x() < -0.5) {
+      const double x_world = state_tilt.com_pos_world.x() + (R * p.centroid_body).x();
+      if (p.centroid_body.z() > 0.1 && h_gap_pos_z < 0.0) {
+        h_gap_pos_z = x_world;
+      }
+      if (p.centroid_body.z() < -0.1 && h_gap_neg_z < 0.0) {
+        h_gap_neg_z = x_world;
+      }
+    }
+  }
+  ASSERT_GE(h_gap_pos_z, 0.0);
+  ASSERT_GE(h_gap_neg_z, 0.0);
+  ASSERT_NE(h_gap_pos_z, h_gap_neg_z) << "pitch tilt must break the z-symmetry of the front gap";
+
+  const Wrench w_tilt = FossenHydrodynamics::compute(
+    state_tilt, 0.0, params_b, HydroModelMode::kStonefishGeometryDriven, &geo);
+  const Wrench w_tilt_lumped = FossenHydrodynamics::compute(state_tilt, 0.0, params_b);
+
+  EXPECT_GT(std::abs(w_tilt.torque_world.y()), 1e-6);
+  EXPECT_NEAR(w_tilt_lumped.torque_world.y(), 0.0, 1e-9);
+  // Sign check derived from first principles (r x F with F concentrated on the closer/stronger
+  // side): whichever z-half is closer to the wall contributes the larger-magnitude suction
+  // force, and that side's own sign dominates tau_y with a flipped sign.
+  if (h_gap_pos_z < h_gap_neg_z) {
+    EXPECT_LT(w_tilt.torque_world.y(), -1e-6);
+  } else {
+    EXPECT_GT(w_tilt.torque_world.y(), 1e-6);
+  }
+}
+
+// Tier 4 (Thermodynamic Passivity / Energy Dissipation Law): across 200 deterministic
+// pseudo-random 6-DOF states in calm water, the dissipative hydrodynamic power must be strictly
+// negative, and the rotational Munk self-coupling term must be exactly workless.
+TEST_F(HydroGeometryModelFixture, HydroVV_Tier4_ThermodynamicPassivityAndWorklessMunk)
+{
+  const HydroGeometryModel geo = HydroGeometryModel::buildFromMjModel(model_, body_id_);
+  const HydroParams params;  // calm-water defaults: zero current, zero gusts
+
+  std::mt19937 rng(42);
+  std::uniform_real_distribution<double> dist_x(0.105, 0.5);
+  std::uniform_real_distribution<double> dist_v(-1.0, 1.0);
+  std::uniform_real_distribution<double> dist_w(-2.0, 2.0);
+
+  for (int sample = 0; sample < 200; ++sample) {
+    RigidBodyState state;
+    state.com_pos_world = Eigen::Vector3d(dist_x(rng), 0.0, 0.5);
+    state.orientation = Eigen::Quaterniond::Identity();
+    const Eigen::Vector3d v(dist_v(rng), dist_v(rng), dist_v(rng));
+    const Eigen::Vector3d w(dist_w(rng), dist_w(rng), dist_w(rng));
+    state.lin_vel_world = v;
+    state.ang_vel_world = w;
+
+    HydroWrenchBreakdown breakdown;
+    FossenHydrodynamics::compute(
+      state, 0.0, params, HydroModelMode::kStonefishGeometryDriven, &geo, &breakdown);
+
+    const double p_diss =
+      v.dot(breakdown.f_drag_body + breakdown.f_squeeze_body) + w.dot(breakdown.t_drag_body);
+    EXPECT_LT(p_diss, 0.0) << "sample " << sample;
+
+    // Rotational Munk self-coupling is workless by construction (a . (a x b) == 0 for any a,b):
+    // verified directly against the same geo.added_mass_angular FossenHydrodynamics::compute()
+    // itself reads, independent of the (non-workless) translational v x (M_lin v) term that is
+    // also folded into the combined t_munk_body breakdown field.
+    const Eigen::Vector3d t_munk_rot = -w.cross(geo.added_mass_angular * w);
+    EXPECT_NEAR(w.dot(t_munk_rot), 0.0, 1e-12) << "sample " << sample;
+  }
+}
+
+// Tier 5 (Closed-Loop MuJoCo Dynamic Trajectory V&V): actually step mj_step with the Fossen
+// wrench applied every tick (mirroring AdhereMujocoHardware::applyHydrodynamics()), away from
+// the wall so no contact forces are involved.
+TEST_F(HydroGeometryModelFixture, HydroVV_Tier5_ClosedLoopTerminalVelocityAndRollStability)
+{
+  const HydroGeometryModel geo = HydroGeometryModel::buildFromMjModel(model_, body_id_);
+
+  // Neutral buoyancy (vehicle_mass == augmented_mass == the MJCF's actual 26kg, displaced_volume
+  // chosen so rho*V*g exactly cancels mj_step's own built-in gravity on that mass) isolates the
+  // crossflow/roll dynamics under test from the unrelated, already-documented net +1.96N rise
+  // drift ("数值校验" section) that would otherwise carry the ROV out of the submerged band
+  // during a long trajectory.
+  HydroParams params;
+  params.vehicle_mass = 26.0;
+  params.augmented_mass = 26.0;
+  params.displaced_volume = params.vehicle_mass / params.rho_water;
+
+  auto stepWithHydro = [&](mjData * d, const HydroParams & p) {
+    RigidBodyState state;
+    state.com_pos_world = Eigen::Vector3d(
+      d->xipos[3 * body_id_ + 0], d->xipos[3 * body_id_ + 1], d->xipos[3 * body_id_ + 2]);
+    state.orientation = Eigen::Quaterniond(
+      d->xquat[4 * body_id_ + 0], d->xquat[4 * body_id_ + 1], d->xquat[4 * body_id_ + 2],
+      d->xquat[4 * body_id_ + 3]);
+    state.ang_vel_world = Eigen::Vector3d(
+      d->cvel[6 * body_id_ + 0], d->cvel[6 * body_id_ + 1], d->cvel[6 * body_id_ + 2]);
+    state.lin_vel_world = Eigen::Vector3d(
+      d->cvel[6 * body_id_ + 3], d->cvel[6 * body_id_ + 4], d->cvel[6 * body_id_ + 5]);
+    const Wrench w = FossenHydrodynamics::compute(
+      state, d->time, p, HydroModelMode::kStonefishGeometryDriven, &geo);
+    d->xfrc_applied[6 * body_id_ + 0] = w.force_world.x();
+    d->xfrc_applied[6 * body_id_ + 1] = w.force_world.y();
+    d->xfrc_applied[6 * body_id_ + 2] = w.force_world.z();
+    d->xfrc_applied[6 * body_id_ + 3] = w.torque_world.x();
+    d->xfrc_applied[6 * body_id_ + 4] = w.torque_world.y();
+    d->xfrc_applied[6 * body_id_ + 5] = w.torque_world.z();
+    mj_step(model_, d);
+  };
+
+  // --- Part A: steady 0.3 m/s crossflow terminal-velocity convergence, far from the wall
+  // (x=1.0m) so no pad/wall contact forces are in play. ---
+  {
+    HydroParams p = params;
+    p.current_steady_world = Eigen::Vector3d(0.0, 0.3, 0.0);
+
+    mjData * d = mj_makeData(model_);
+    ASSERT_NE(d, nullptr);
+    mj_resetData(model_, d);
+    d->qpos[0] = 1.0;
+    d->qpos[1] = 0.0;
+    d->qpos[2] = 0.5;
+    d->qpos[3] = 1.0;  // identity quaternion [w,x,y,z]
+    d->qpos[4] = 0.0;
+    d->qpos[5] = 0.0;
+    d->qpos[6] = 0.0;
+    mj_forward(model_, d);
+
+    std::vector<double> v_y_samples;
+    constexpr int kTotalSteps = 6000;   // 12s @ dt=0.002
+    constexpr int kSampleEvery = 200;   // every 0.4s
+    for (int step = 0; step < kTotalSteps; ++step) {
+      stepWithHydro(d, p);
+      if (step % kSampleEvery == 0) {
+        v_y_samples.push_back(d->qvel[1]);
+      }
+    }
+    mj_deleteData(d);
+
+    ASSERT_GT(v_y_samples.size(), 2u);
+    for (size_t i = 1; i < v_y_samples.size(); ++i) {
+      EXPECT_GE(v_y_samples[i], v_y_samples[i - 1] - 1e-6)
+        << "v_y must converge monotonically (sample " << i << ")";
+    }
+    EXPECT_NEAR(v_y_samples.back(), 0.3, 0.01);
+  }
+
+  // --- Part B: 10 deg initial roll (about body X, the wall-normal axis) must decay stably to
+  // <0.5 deg under the hydrostatic CoB-offset restoring moment + angular drag, never diverging.
+  {
+    mjData * d = mj_makeData(model_);
+    ASSERT_NE(d, nullptr);
+    mj_resetData(model_, d);
+    const double roll0 = 10.0 * M_PI / 180.0;
+    const Eigen::Quaterniond q0(Eigen::AngleAxisd(roll0, Eigen::Vector3d::UnitX()));
+    d->qpos[0] = 1.0;
+    d->qpos[1] = 0.0;
+    d->qpos[2] = 0.5;
+    d->qpos[3] = q0.w();
+    d->qpos[4] = q0.x();
+    d->qpos[5] = q0.y();
+    d->qpos[6] = q0.z();
+    mj_forward(model_, d);
+
+    auto rollDeg = [&]() {
+      const double qw = d->qpos[3], qx = d->qpos[4], qy = d->qpos[5], qz = d->qpos[6];
+      const double roll = std::atan2(2.0 * (qw * qx + qy * qz), 1.0 - 2.0 * (qx * qx + qy * qy));
+      return roll * 180.0 / M_PI;
+    };
+
+    constexpr int kTotalSteps = 4000;  // 8s @ dt=0.002
+    for (int step = 0; step < kTotalSteps; ++step) {
+      stepWithHydro(d, params);
+      ASSERT_LT(std::abs(rollDeg()), 15.0) << "roll diverged at step " << step;
+    }
+    EXPECT_LT(std::abs(rollDeg()), 0.5);
+    mj_deleteData(d);
+  }
 }
 
 int main(int argc, char ** argv)

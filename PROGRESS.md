@@ -830,3 +830,86 @@ name="hydro_vehicle_mass" data="35.0"/>` 与一个 `ctrlrange="-60 60"` 的
   两种调用方式均成功 `configure()` 并输出"HydroGeometryModel built with 96
   surface patches"，确认启动时模型来源解析的默认路径与显式覆盖路径行为
   一致、零回归。
+
+## Phase 2.13（2026-10-16）：3 项跨模块修复、实时水动力分项遥测、五级水动力精确性 V&V 体系
+
+### 目标
+
+在锁定 Phase 2 转入 Phase 3（控制器包）之前做最后一轮跨模块审计：修复 3 处
+隐藏的模块间状态不同步问题，为 `FossenHydrodynamics::compute()` 增加可选的
+逐项力/力矩分解输出（供 `MujocoViewer` 实时示波器与自动化 V&V 测试共同使用），
+并补齐一套面向 *Elsevier Ocean Engineering* 发表级精确性要求的五级水动力精确性
+验证（5-Tier V&V）测试体系。
+
+### 3 项跨模块修复
+
+1. **`MujocoViewer` 根刚体 ID 硬编码**：`MujocoViewer::MujocoViewer()` 此前
+   独立执行一遍硬编码的 `mj_name2id(model_, mjOBJ_BODY, "rov_base")`，与
+   `AdhereMujocoHardware::configure()` 自己的回退链（`"rov_base"` →
+   `"base_link"` → 第一个 `mjJNT_FREE` 刚体）各自为政——换成根刚体命名为
+   `"base_link"` 的新模型时，`MujocoViewer::body_id_` 会静默变成 `-1`，导致
+   相机跟随/流速箭头/Rhombic Kern 菱形/`Ctrl+拖拽`扰动注入全部失效。新增
+   `MujocoVisBridge::root_body_id`（一次写入、全程只读，与
+   `pad_site_pos_body` 同一模式），由 `configure()` 在自己解析出
+   `body_id_` 之后立即写入；`MujocoViewer` 构造时改为优先读取这个值，只有
+   在 `bridge_` 尚未解析出有效值时才回退到原来的硬编码查找（防御性兜底，
+   正常路径下不会触发）。
+2. **`buildFromMjModel()` 未处理非零质心偏移 `body_ipos`**：
+   `AdhereMujocoHardware::applyHydrodynamics()` 始终以根刚体的 CoM
+   （`d->xipos`）为参考点求水动力微元的运动学/杠杆臂，但
+   `HydroGeometryModel::buildFromMjModel()` 切分出的微元质心此前是相对刚体
+   关节原点（`<geom>`/`<body>` 位姿复合后的坐标，等价于 `d->xpos` 系）而非
+   CoM。`rov_wall.xml` 声明 `<inertial pos="0 0 0"/>`，两者正好重合，故这
+   是一个此前零症状的潜伏 bug。修复为：切分完成后，所有微元质心与包围盒
+   统一减去 `m->body_ipos[root_body_id]`，使其严格以 CoM 为原点——对现有
+   模型是零改动（减去零向量），只在未来 CAD 模型声明非零 `<inertial pos>`
+   时才会产生实际差异。
+3. **`kStonefishGeometryDriven` 缺失二次角阻尼**：该分支此前只叠加了线性
+   角阻尼 `-D_ang_lin ⊙ ω^B`，遗漏了 `kParametricLumped` 分支一直具备的
+   二次项 `-D_ang_quad ⊙ (ω^B ⊙ |ω^B|)`。由于微元杠杆臂很小
+   （`r_p~0.15m => r_p^3~0.0034 m^3`），仅靠微元法向阻力积分在高角速度下
+   会低估钝体旋转涡脱阻尼一个数量级。补齐后两种模式的角阻尼公式完全对称。
+
+### 实时水动力分项遥测：`HydroWrenchBreakdown`
+
+`fossen_hydrodynamics.hpp` 新增 `struct HydroWrenchBreakdown`（`f_drag_body`/
+`f_venturi_body`/`f_squeeze_body`/`f_fk_am_body`/`f_buoy_world`/
+`t_munk_body`，外加一个供 Tier 4 被动性校验使用的耗散性旋转阻尼分量
+`t_drag_body`），`FossenHydrodynamics::compute()` 新增一个默认 `nullptr` 的
+可选输出指针参数 `breakdown`（不影响任何既有调用点的签名/行为），非空时在两种
+模式下都逐项回填。`MujocoVisBridge` 新增 4 个原子量
+（`hydro_f_drag_y`/`hydro_f_venturi_x`/`hydro_f_squeeze_x`/
+`hydro_f_fk_am_y`），由 `AdhereMujocoHardware::applyHydrodynamics()` 每拍
+500Hz 写入；`MujocoViewer::buildUi1()` 的 "Live Scope → Scope Plot" 单选新增
+第 6 个选项 `Hydro Breakdown (N)`，可在运行时实时查看各项水动力效应的真实
+牛顿量级。
+
+### 五级水动力精确性验证体系（5-Tier V&V）
+
+`test_fossen_hydrodynamics_geometry.cpp` 新增 5 个测试，覆盖 Lamb 球解析极限
+（`HydroVV_Tier1`）、微元-集总模型退化精确等价（`HydroVV_Tier2_
+PatchToLumpedExactEquivalence`）、倾斜/旋转下的解析曲面积分基准
+（`HydroVV_Tier3_AnalyticalPitchSqueezeAndVenturiTorque`）、热力学被动性/
+Munk 无功定律（`HydroVV_Tier4_ThermodynamicPassivityAndWorklessMunk`，200
+组固定种子伪随机状态）、闭环 MuJoCo 动态轨迹（`HydroVV_Tier5_
+ClosedLoopTerminalVelocityAndRollStability`，实际 `mj_step` 仿真）。
+方法论细节见 `adhere_mujoco_hardware/README.md`"数值校验与五级水动力精确性
+验证体系（5-Tier V&V）"一节。Tier 1 的解析极限校验过程中发现
+`buildFromMjModel()` 的旋转附加惯量 `I_A` 启发式公式
+（`0.2*m_A_i*(其余两轴半长²之和)`）在 `a=b=c`（球体）处不收敛于 Lamb 的
+经典零值结论，补充了一个球形特判（三轴半长近似相等时直接返回
+`I_A=Zero()`），非球形壳体的既有启发式公式不变。
+
+### 验证结果
+
+- `colcon build --packages-up-to simplified_v1_description adhere_mujoco_hardware
+  --symlink-install` 零警告零错误（唯一出现的 `CMake Warning (dev)` 来自
+  `FindOpenGL.cmake` 的策略提示，与本次改动无关，`main` 分支上同样存在）。
+- `colcon test --packages-select adhere_mujoco_hardware` 的 `gtest`
+  （`test_fossen_hydrodynamics_geometry`）**13/13 全部通过**（原有 8 组
+  + 本次新增 5 组 5-Tier V&V），原有 `kParametricLumped` 逐位核验、
+  `rov_wall.xml` 的 `96` 个微元/`0.24 m^2` 正面板面积、焊接子刚体递归等
+  既有测试零回归。
+- `ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py headless:=true
+  use_rviz:=false` 成功 `configure()` 并输出 "HydroGeometryModel built with
+  96 surface patches"，确认 3 项修复未破坏启动路径。

@@ -51,8 +51,12 @@ void HydroParams::applyMjModelOverrides(const mjModel * m, HydroParams & params)
 
 Wrench FossenHydrodynamics::compute(
   const RigidBodyState & state, double t, const HydroParams & params, HydroModelMode mode,
-  const HydroGeometryModel * geo)
+  const HydroGeometryModel * geo, HydroWrenchBreakdown * breakdown)
 {
+  if (breakdown) {
+    *breakdown = HydroWrenchBreakdown{};
+  }
+
   if (mode == HydroModelMode::kParametricLumped || geo == nullptr) {
     // --- HydroModelMode::kParametricLumped: unchanged from Phase 2, byte-identical to the
     // Python-reference-matched implementation. Do not edit this branch without re-verifying
@@ -108,6 +112,16 @@ Wrench FossenHydrodynamics::compute(
     wrench.force_world =
       F_drag_world * submerged_ratio + F_buoy_world + F_suction_world * submerged_ratio;
     wrench.torque_world = tau_drag_world * submerged_ratio + tau_restore_world;
+
+    if (breakdown) {
+      breakdown->f_drag_body = F_drag_body * submerged_ratio;
+      breakdown->f_venturi_body = F_suction_body * submerged_ratio;
+      breakdown->f_buoy_world = F_buoy_world;
+      breakdown->t_drag_body = tau_drag_body * submerged_ratio;
+      // f_squeeze_body, f_fk_am_body, t_munk_body: kParametricLumped has no squeeze-film,
+      // unsteady Froude-Krylov/added-mass, or Munk term -- left at HydroWrenchBreakdown{}'s zero
+      // default above.
+    }
     return wrench;
   }
 
@@ -121,6 +135,13 @@ Wrench FossenHydrodynamics::compute(
 
   Eigen::Vector3d F_total_body = Eigen::Vector3d::Zero();
   Eigen::Vector3d T_total_body = Eigen::Vector3d::Zero();
+
+  // Per-term accumulators (Phase 2.13 HydroWrenchBreakdown), summed alongside F_total_body/
+  // T_total_body above without changing their values -- purely additional bookkeeping.
+  Eigen::Vector3d acc_f_drag = Eigen::Vector3d::Zero();     // patch normal pressure + skin
+  Eigen::Vector3d acc_f_venturi = Eigen::Vector3d::Zero();
+  Eigen::Vector3d acc_f_squeeze = Eigen::Vector3d::Zero();
+  Eigen::Vector3d acc_t_drag = Eigen::Vector3d::Zero();     // torque from the 3 terms above
 
   for (const SurfacePatch & p : geo->patches) {
     const Eigen::Vector3d & r_p = p.centroid_body;
@@ -174,12 +195,26 @@ Wrench FossenHydrodynamics::compute(
     const Eigen::Vector3d F_patch = F_drag_n + F_skin_t + F_suction_n + F_squeeze_n;
     F_total_body += F_patch;
     T_total_body += r_p.cross(F_patch);
+
+    acc_f_drag += F_drag_n + F_skin_t;
+    acc_f_venturi += F_suction_n;
+    acc_f_squeeze += F_squeeze_n;
+    acc_t_drag += r_p.cross(F_drag_n + F_skin_t + F_squeeze_n);
   }
 
   // Low-speed linear viscous damping (whole-body): purely quadratic patch drag has zero
-  // derivative at v_rel=0, losing damping stiffness during station-keeping.
-  F_total_body += -params.D_lin.cwiseProduct(v_cog_body);
-  T_total_body += -params.D_ang_lin.cwiseProduct(w_body);
+  // derivative at v_rel=0, losing damping stiffness during station-keeping. Quadratic angular
+  // damping (Phase 2.13 Fix 3) is also whole-body, not per-patch: patch lever arms are small
+  // (r_p ~ 0.15m => r_p^3 ~ 0.0034 m^3), so surface-patch normal drag alone under-predicts
+  // bluff-body rotational vortex-shedding damping by an order of magnitude at high angular
+  // rates -- matching kParametricLumped's tau_drag_body above.
+  const Eigen::Vector3d F_lin_damp_body = -params.D_lin.cwiseProduct(v_cog_body);
+  const Eigen::Vector3d T_ang_damp_body = -params.D_ang_lin.cwiseProduct(w_body) -
+    params.D_ang_quad.cwiseProduct(w_body.cwiseProduct(w_body.cwiseAbs()));
+  F_total_body += F_lin_damp_body;
+  T_total_body += T_ang_damp_body;
+  acc_f_drag += F_lin_damp_body;
+  acc_t_drag += T_ang_damp_body;
 
   // Unsteady Froude-Krylov (displaced-fluid inertia) + added-mass reaction force: fluid
   // accelerating around the body (gusts) exerts a reaction force proportional to both the
@@ -188,15 +223,17 @@ Wrench FossenHydrodynamics::compute(
   // scope here -- it belongs in the controller's effective mass matrix, not as an explicit
   // applied force).
   const Eigen::Vector3d a_fluid_body = R.transpose() * params.currentAccelerationWorld(t);
-  F_total_body +=
+  const Eigen::Vector3d F_fk_am_body =
     (params.rho_water * params.displaced_volume * Eigen::Matrix3d::Identity() +
      geo->added_mass_linear) *
     a_fluid_body;
+  F_total_body += F_fk_am_body;
 
   // Munk moment: classical rigid-body-in-ideal-fluid moment from added-mass anisotropy
   // coupling relative linear/angular velocity into a destabilizing moment.
-  T_total_body += -v_cog_body.cross(geo->added_mass_linear * v_cog_body) -
+  const Eigen::Vector3d T_munk_body = -v_cog_body.cross(geo->added_mass_linear * v_cog_body) -
     w_body.cross(geo->added_mass_angular * w_body);
+  T_total_body += T_munk_body;
 
   // Buoyancy/gravity-bias and the free-surface taper are whole-body effects independent of
   // the distributed-drag model; reuse the same lumped-model terms rather than re-deriving a
@@ -215,6 +252,16 @@ Wrench FossenHydrodynamics::compute(
   Wrench wrench;
   wrench.force_world = R * F_total_body * submerged_ratio + F_buoy_world;
   wrench.torque_world = R * T_total_body * submerged_ratio + tau_restore_world;
+
+  if (breakdown) {
+    breakdown->f_drag_body = acc_f_drag * submerged_ratio;
+    breakdown->f_venturi_body = acc_f_venturi * submerged_ratio;
+    breakdown->f_squeeze_body = acc_f_squeeze * submerged_ratio;
+    breakdown->f_fk_am_body = F_fk_am_body * submerged_ratio;
+    breakdown->f_buoy_world = F_buoy_world;
+    breakdown->t_munk_body = T_munk_body * submerged_ratio;
+    breakdown->t_drag_body = acc_t_drag * submerged_ratio;
+  }
   return wrench;
 }
 
@@ -659,6 +706,22 @@ HydroGeometryModel HydroGeometryModel::buildFromMjModel(const mjModel * m, int r
     return geo;  // degenerate: no geoms on this body, leave everything zeroed
   }
 
+  // CoM-relative patch coordinates (CLAUDE.md Phase 2.13 Fix 2): every patch above was
+  // tessellated relative to root_body_id's own BODY frame origin (xpos), composed through
+  // geom_pos/body_pos -- which coincides with its CoM (xipos) only when the MJCF declares
+  // <inertial pos="0 0 0"/> (true for rov_wall.xml today). FossenHydrodynamics::compute()
+  // always evaluates kinematics/lever-arms relative to the CoM (d->xipos), so shift every patch
+  // centroid and the AABB by -root_ipos here, once, so a future model with a non-zero <inertial
+  // pos> never silently mis-locates its patches relative to the CoM it's actually levered about.
+  const Eigen::Vector3d root_ipos(
+    m->body_ipos[3 * root_body_id + 0], m->body_ipos[3 * root_body_id + 1],
+    m->body_ipos[3 * root_body_id + 2]);
+  for (auto & p : raw) {
+    p.centroid_body -= root_ipos;
+  }
+  aabb_min -= root_ipos;
+  aabb_max -= root_ipos;
+
   geo.patches = decimatePatches(raw);
   geo.bbox_half_extents = (aabb_max - aabb_min) / 2.0;
 
@@ -682,10 +745,26 @@ HydroGeometryModel HydroGeometryModel::buildFromMjModel(const mjModel * m, int r
   const double m_A_y = k2 * displaced_mass;
   const double m_A_z = k3 * displaced_mass;
   geo.added_mass_linear = Eigen::Vector3d(m_A_x, m_A_y, m_A_z).asDiagonal();
-  geo.added_mass_angular = Eigen::Vector3d(
-    0.2 * m_A_x * (b * b + c * c), 0.2 * m_A_y * (a * a + c * c),
-    0.2 * m_A_z * (a * a + b * b))
-    .asDiagonal();
+
+  // Classical Lamb result (Hydrodynamics, Art. 114): a sphere rotating in an unbounded ideal
+  // fluid induces exactly zero fluid motion, so its added rotational inertia is exactly zero
+  // about every axis -- unlike the general heuristic below (0.2*m_A_i*(sum of the other two
+  // semi-axes^2), a solid-ellipsoid-MOI-shaped placeholder, documented above as "pending future
+  // tuning"), which does NOT itself vanish at a=b=c and must not be trusted there (CLAUDE.md
+  // Phase 2.13 Tier 1 V&V). Special-cased here rather than replacing the general heuristic with
+  // the full closed-form Lamb triaxial rotational-added-mass formula (k4'/k5'/k6'), which is
+  // out of this phase's scope and numerically singular (0/0) at exactly a=b=c anyway.
+  constexpr double kSphereRelTol = 1e-6;
+  const bool is_sphere =
+    std::abs(a - b) < kSphereRelTol * a && std::abs(b - c) < kSphereRelTol * a;
+  if (is_sphere) {
+    geo.added_mass_angular = Eigen::Matrix3d::Zero();
+  } else {
+    geo.added_mass_angular = Eigen::Vector3d(
+      0.2 * m_A_x * (b * b + c * c), 0.2 * m_A_y * (a * a + c * c),
+      0.2 * m_A_z * (a * a + b * b))
+      .asDiagonal();
+  }
 
   return geo;
 }

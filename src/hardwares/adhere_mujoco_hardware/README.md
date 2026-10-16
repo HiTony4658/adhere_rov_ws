@@ -150,9 +150,12 @@ hardware_interface::return_type write() override;  // 无参数！Foxy 特有
     `C_squeeze * A_plate = 15.36 N·s/m` 落在物理量级，而不是约 `2.4e-8 N`
     的近似于零的力（单元测试 `StonefishVenturiAndSqueezePhysicalSigns` 锁定
     靠近/远离壁面时的阻尼力符号与 `>0.5N` 量级）。
-  - **整体线性阻尼**（弥补纯二次微元阻力在 `v_rel=0` 处导数为零、定点悬停时
-    缺低速阻尼刚度的问题，复用与集中参数模型相同的 `D_lin`/`D_ang_lin`）：
-    `F_lin = -D_lin ⊙ v_rel,CoM^B`，`T_lin = -D_ang,lin ⊙ ω^B`；
+  - **整体线性+二次角阻尼**（弥补纯二次微元阻力在 `v_rel=0` 处导数为零、定点
+    悬停时缺低速阻尼刚度的问题；二次角阻尼项与集中参数模型的
+    `tau_drag_body` 完全对称，因为微元杠杆臂很小（`r_p~0.15m => r_p^3~
+    0.0034 m^3`），仅靠微元法向阻力本身量级上低估钝体旋转涡脱阻尼一个数量级）：
+    `F_lin = -D_lin ⊙ v_rel,CoM^B`，
+    `T_lin = -D_ang,lin ⊙ ω^B - D_ang,quad ⊙ (ω^B ⊙ |ω^B|)`；
   - **非定常 Froude-Krylov + 附加质量反力**（环境流体加速度 `a_fluid^B`，来自
     半正弦阵风的解析导数）：
     `F_FK+AM = (ρ V_disp I_3 + diag(M_A,lin)) a_fluid^B`；
@@ -163,6 +166,18 @@ hardware_interface::return_type write() override;  // 无参数！Foxy 特有
     时算一次）为上述两项提供系数；
   - 浮力/重力偏置与自由液面渐变复用集中参数模型的同一组公式（整体效应，
     与微元分布无关）。
+
+  `compute()` 还接受一个可选输出指针 `HydroWrenchBreakdown * breakdown`
+  （默认 `nullptr`，不影响任何既有调用点），逐项回填上述压阻+摩擦+线性
+  阻尼（`f_drag_body`）、Venturi 吸附（`f_venturi_body`）、挤膜阻尼
+  （`f_squeeze_body`）、非定常 Froude-Krylov+附加质量（`f_fk_am_body`）、
+  浮力（`f_buoy_world`）、Munk 力矩（`t_munk_body`）六项分量（外加一个
+  耗散性旋转阻尼分量 `t_drag_body`，供 Tier 4 被动性校验与实时
+  `Hydro Breakdown (N)` 示波器使用），`AdhereMujocoHardware::
+  applyHydrodynamics()` 每拍 500Hz 调用一次并写入
+  `MujocoVisBridge::hydro_f_*` 原子量供 `MujocoViewer` 的
+  `Live Scope → Hydro Breakdown (N)` 选项实时绘制（见下方"`MujocoVisBridge`
+  与 `MujocoViewer`"一节的控件表）。
 
   这一路径对几何**完全无感知假设**：换成任意 CAD 三角网格（未来
   `full_cad_description` 包）后 `buildFromMjModel()` 会自动识别
@@ -374,10 +389,16 @@ GLFW 窗口创建，仅空转等待停止信号。
   `thr_N*` 拉到正值可将 ROV 压向壁面，用于验证接触力/`Pad Contact Forces`
   可视化是否随指令动态响应 |
 | Live Scope（自定义） | `Scope Plot` 单选 | `Off` / `Pad Forces F_N` / `Kern Margin & minF_N` /
-  `Body Vel vs Flow` / `Thruster Commands`——在视口右下角嵌入一个 `mjvFigure` 实时滚动
-  示波器（约 400 帧滚动历史窗口），对应曲线由每帧的 `cached_*` 快照驱动；切换通道会
+  `Body Vel vs Flow` / `Thruster Commands` / `Hydro Breakdown (N)`——在视口右下角嵌入一个
+  `mjvFigure` 实时滚动示波器（约 400 帧滚动历史窗口），对应曲线由每帧的 `cached_*` 快照
+  （或 `Hydro Breakdown` 通道的 `MujocoVisBridge::hydro_f_*` 原子量）驱动；切换通道会
   清空历史缓冲，避免旧量级（如 `40N` 推力器）残留压扁新通道（如 `0.3m/s` 速度）的
-  自动量程 |
+  自动量程。`Hydro Breakdown (N)` 通道绘制 `FossenHydrodynamics::compute()` 返回的
+  `HydroWrenchBreakdown` 四条代表性分量：`F_drag_y`（压阻+摩擦+线性阻尼）、
+  `F_venturi_x`（近壁 Venturi 吸附）、`F_squeeze_x`（近壁挤压膜阻尼）、`F_fk_am_y`
+  （非定常 Froude-Krylov + 附加质量反力），均在 `AdhereMujocoHardware::
+  applyHydrodynamics()` 内随 500Hz 水动力求解同步写入，可直接读出每一项水动力效应
+  当前的真实牛顿量级，便于逐项核验/调参 |
 | Render Flags（默认折叠） | `Wireframe`/`Shadow`/`Reflection`/`Skybox`/`Fog`/`Haze` | 场景级渲染效果开关（`mjtRndFlag`），纯视觉，不影响物理 |
 | Label（默认折叠） | `Mode` 单选 | None/Body/Joint/Geom/Site/Camera/Light/Tendon/Actuator/Constraint/
   Flex/Skin/Selection/SelPoint/ContactPt/ContactForce/Island——在 3D 视口内
@@ -449,7 +470,7 @@ GLFW 窗口创建，仅空转等待停止信号。
 `configure()` 之后、`start()` 之前（也就是 `MujocoViewer` 真正被构造之前）
 到达硬件插件。
 
-## 数值校验
+## 数值校验与五级水动力精确性验证体系（5-Tier V&V）
 
 用 3 组随机 `(com_pos_world, orientation, ang_vel_world, lin_vel_world, t)` 状态
 分别调用 Python 参考实现（`mujoco_mppi_ws/src/env/hydrodynamics.py`，站位保持
@@ -462,6 +483,64 @@ GLFW 窗口创建，仅空转等待停止信号。
 流速 `0.300 m/s`（`X`/`Z` 方向速度趋近于零）持续收敛，相对造浪时钟 `τ∈[3.0,4.2]s`
 与 `[7.0,8.2]s` 的阵风窗口内可观察到额外的侧向/吸附扰动，均与预期物理行为一致；
 再次切回模式 `1` 后环境流速立即归零。
+
+除上述整体一致性校验外，`test/test_fossen_hydrodynamics_geometry.cpp` 另包含一套
+面向 Elsevier *Ocean Engineering* 发表级精确性要求的**五级水动力精确性验证体系
+（5-Tier V&V）**，逐级从解析极限、退化等价、带几何细节的解析积分基准、热力学
+被动性定律直到闭环 MuJoCo 动态轨迹，系统性证明 `kStonefishGeometryDriven`
+（`Stonefish-Mesh`）与 `kParametricLumped`（`Lumped`）两套水动力引擎在各自适用
+范围内均物理自洽：
+
+1. **Tier 1（Lamb 球解析极限，`HydroVV_Tier1`）**：构造一个半径 `R=0.20m` 的纯球形
+   内存 MJCF，验证 `HydroGeometryModel::buildFromMjModel()` 基于 `ellipsoidAlpha()`
+   积分给出的线性附加质量 `M_A = 0.5 * ρ * (4/3)πR³`（`k1=k2=k3=0.5`）与经典
+   Lamb 椭球公式相对误差 `<0.1%`；同时验证旋转附加惯量 `I_A` 严格为零——球体在
+   无界理想流体中绕任意轴旋转不扰动流场，是 Lamb《Hydrodynamics》Art.114 的经典
+   结论，`buildFromMjModel()` 据此对近似球形壳体（三轴半长近似相等）特判返回
+   `I_A=0`，而非对所有壳体通用但在 `a=b=c` 处本身不收敛于零的 0.2m_Aᵢ(Σ其余两轴
+   半长²) 启发式近似公式（该公式仅对非球形壳体保留，继续标注为"待未来调参"的
+   占位近似）。
+2. **Tier 2（微元-集总模型退化精确等价，`HydroVV_Tier2_PatchToLumpedExactEquivalence`）**：
+   零转速、单位姿态下，`Stonefish-Mesh` 对前壁板 16 个微元的 Venturi 吸附力逐元
+   求和必须与 `Lumped` 单点公式的吸附力严格相等（`<1e-12 N`）；纯轴向相对速度
+   `v_y=0.4m/s` 下，总侧向力必须与解析正面压阻 + 摩擦积分
+   `F_y = -(D_lin,y·v_y + 0.5ρ(C_{d,n}·A_迎风 + C_{f,t}·A_切向)·v_y²)` 严格相等
+   （`<1e-11 N`，`A_迎风`/`A_切向` 直接从 `geo.patches` 法向筛选求和，不依赖硬编码
+   箱体尺寸）。
+3. **Tier 3（倾斜/旋转下的解析曲面积分基准，`HydroVV_Tier3_AnalyticalPitchSqueezeAndVenturiTorque`）**：
+   在额定间隙（`h_gap=h_gap_nominal`，衰减因子恒为 `1`）下施加纯俯仰角速度
+   `ω_y=0.5rad/s`（临时置零 `Cd_normal`/`Cf_tangent`/`D_ang_lin`/`D_ang_quad` 以
+   单独隔离挤压膜力矩项），离散挤压膜俯仰力矩 `τ_y = -C_squeeze·Σ(A_p·z_p²)·ω_y`
+   必须与代码内部逐元求和结果逐位一致（`<1e-9`），并与连续曲面积分闭式解
+   `τ_y ≈ -C_squeeze·A_plate·L_z²/3·ω_y`（`L_z` 取自 `geo.bbox_half_extents`，
+   非硬编码）相差在 `10%` 量化误差带内；俯仰倾角 `θ=0.05rad` 叠加 `V_y=0.5m/s`
+   横流时，前壁板沿 `Z` 的两半因间隙不对称（更近一侧衰减更弱、吸附更强）产生
+   `Stonefish-Mesh` 独有的非零俯仰力矩，而 `Lumped` 模式（零 CoB 偏置以剔除
+   静水回正力矩干扰后）该力矩严格为零——验证的是"几何驱动模型能捕捉集总模型
+   天然缺失的姿态耦合效应"这一物理论断本身，符号方向由测试内部按两侧间隙大小
+   动态判定（而非预先硬编码），避免押注未经独立验证的旋转约定符号。
+4. **Tier 4（热力学被动性 / 能量耗散定律，`HydroVV_Tier4_ThermodynamicPassivityAndWorklessMunk`）**：
+   以固定种子 `std::mt19937(42)` 生成 200 组伪随机 6-DOF 状态
+   （`x_CoM∈[0.105,0.5]m`，`v^B∈[-1,1]³m/s`，`ω^B∈[-2,2]³rad/s`，静水），对每组
+   验证耗散功率严格为负：
+   `P_diss = v^B·(f_drag^B+f_squeeze^B) + ω^B·τ_drag^B < 0`
+   （`f_drag_body`/`f_squeeze_body`/`t_drag_body` 均来自新增的
+   `HydroWrenchBreakdown` 输出，刚体功率恒等式 `ΣF_i·v_i = v_cog·ΣF_i+ω·Σr_i×F_i`
+   保证该式与逐微元耗散功率求和严格相等），且旋转自耦合 Munk 项严格无功：
+   `ω^B·(-ω^B×I_A ω^B) = 0`（`<1e-12 W`，三重积恒等式 `a·(a×b)≡0` 的直接验证，
+   与另一项耦合平动速度的 `-v^B×(M_lin v^B)` Munk 子项——该子项对 `ω^B` 一般
+   **不**无功，不包含在此断言范围内——相互独立）。
+5. **Tier 5（闭环 MuJoCo 动态轨迹验证，`HydroVV_Tier5_ClosedLoopTerminalVelocityAndRollStability`）**：
+   手动复现 `AdhereMujocoHardware::applyHydrodynamics()` 的"读状态 → 计算 Fossen
+   力矩 → 写入 `xfrc_applied` → `mj_step`"闭环（中性浮力参数，剔除与本测试无关
+   的既有 `+1.96N` 上浮漂移；远离壁面以避免接触力干扰），在 `0.3m/s` 定常横流下
+   验证 `v_y(t)` 单调（容差 `1e-6`）收敛至 `0.300±0.01 m/s`（12s/6000 步）；
+   `10°` 初始横滚（绕机体 `X` 轴，即垂直于壁面的法向轴）在 CoB 偏置静水回正
+   力矩 + 角阻尼联合作用下全程不超过 `15°`（验证不发散）并在 8s/4000 步内
+   稳定衰减至 `<0.5°`。
+
+执行 `colcon test --packages-select adhere_mujoco_hardware --event-handlers
+console_direct+` 即可同时跑完既有一致性回归测试与上述 5-Tier V&V 套件。
 
 ## 跨模型零重编扩展指南（如何无缝切换新的 ROV 模型包）
 
@@ -503,11 +582,22 @@ ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py \
    `tessellateBox`/`tessellateMesh` 等切分函数。对 `rov_wall.xml`
    （`rov_base` 无子刚体）该复合变换恒为单位变换，输出与改动前逐位一致的
    `96` 个微元；对未来带焊接整流罩/浮力泡沫子刚体的 CAD 模型，这些子刚体的
-   几何会被自动拉回 `root_body_id` 坐标系参与水动力切分。
+   几何会被自动拉回 `root_body_id` 坐标系参与水动力切分。所有微元质心最终
+   还会再整体减去 `root_body_id` 自身的 `<inertial pos>`
+   （`m->body_ipos[root_body_id]`），确保微元坐标严格以 CoM（`d->xipos`，
+   `FossenHydrodynamics::compute()` 唯一使用的参考点）而非刚体关节原点
+   （`d->xpos`）为原点——`rov_wall.xml` 声明 `<inertial pos="0 0 0"/>`，
+   两者重合，故这一步对现有模型是零改动；只有未来 CAD 模型若声明非零
+   `<inertial pos>` 时才会产生实际偏移。
 3. **根刚体名称回退链**：`AdhereMujocoHardware::configure()` 依次尝试
    `"rov_base"` → `"base_link"` → 模型中第一个拥有自由关节
    （`mjJNT_FREE`）的刚体，不再要求新模型必须沿用 `"rov_base"` 这个具体
-   名字。
+   名字。该解析结果会同步写入 `MujocoVisBridge::root_body_id`
+   （一次写入、全程只读，与 `pad_site_pos_body` 同一模式），`MujocoViewer`
+   构造时直接复用这个已解析好的根刚体索引，而不是在自己的构造函数里重新
+   执行一遍硬编码的 `"rov_base"` 名称查找——否则换成命名为 `"base_link"`
+   的新模型时，`MujocoViewer::body_id_` 会静默变为 `-1`，导致相机跟随/
+   流速箭头/Rhombic Kern 菱形/`Ctrl+拖拽`扰动注入全部失效。
 4. **推力器轨道上限动态解析 + MJCF `<custom><numeric>` 水动力参数覆盖**：
    `configure()` 为每个推力器从其自身 `model_->actuator_ctrlrange` 读取
    量程（声明了 `ctrlrange` 则采用之，否则回退到 `±40N`），写入

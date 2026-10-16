@@ -146,6 +146,7 @@ hardware_interface::return_type AdhereMujocoHardware::configure(
   // duplicated/hardcoded copies). Safe unlocked: populated synchronously here, before
   // vis_bridge_ is ever handed to any other thread.
   vis_bridge_ = std::make_shared<MujocoVisBridge>(model_->nq, model_->nv);
+  vis_bridge_->root_body_id = body_id_;
 
   for (size_t i = 0; i < kPadNames.size(); ++i) {
     const std::string sensor_name = std::string("touch_") + kPadNames[i];
@@ -374,8 +375,17 @@ void AdhereMujocoHardware::applyHydrodynamics(const mjModel * m, mjData * d)
     gust_active ? gust_plugin_->getHydroParams() : calm_plugin_->getHydroParams();
   const double t_eval = gust_active ? std::max(0.0, d->time - wave_trigger_time_.load()) : d->time;
 
+  HydroWrenchBreakdown breakdown;
   const Wrench wrench = FossenHydrodynamics::compute(
-    state, t_eval, params, hydro_mode_.load(), &hydro_geometry_model_);
+    state, t_eval, params, hydro_mode_.load(), &hydro_geometry_model_, &breakdown);
+
+  // Live Hydro Breakdown telemetry (Phase 2.13 Section 2): plain atomic stores, same
+  // lock-free pattern as kern_val/m_kern in write() below -- safe from this 500Hz physics-
+  // thread callback without taking vis_bridge_->mtx.
+  vis_bridge_->hydro_f_drag_y.store(breakdown.f_drag_body.y());
+  vis_bridge_->hydro_f_venturi_x.store(breakdown.f_venturi_body.x());
+  vis_bridge_->hydro_f_squeeze_x.store(breakdown.f_squeeze_body.x());
+  vis_bridge_->hydro_f_fk_am_y.store(breakdown.f_fk_am_body.y());
 
   // Interactive mouse perturbation (CLAUDE.md Phase 2.6 Stage 3.1): MujocoViewer writes the
   // Ctrl+drag wrench it computed on its own secondary d_vis_ into vis_bridge_->xfrc_perturb;

@@ -61,7 +61,16 @@ MujocoViewer::MujocoViewer(
 {
   d_vis_ = mj_makeData(model_);
   mjv_defaultPerturb(&pert_);
-  body_id_ = mj_name2id(model_, mjOBJ_BODY, "rov_base");
+  // Phase 2.13 Section 1: reuse AdhereMujocoHardware::configure()'s already-resolved root body
+  // (its own "rov_base" -> "base_link" -> first mjJNT_FREE fallback chain) instead of
+  // re-running a hardcoded "rov_base" lookup here, which silently returned -1 (breaking Camera
+  // Follow/flow arrow/Kern diamond/Ctrl+drag perturbation) for any model naming its root body
+  // something else. Falls back to the same hardcoded lookup only if bridge_ has not resolved
+  // one yet (defensive; should not happen since configure() always runs before start()
+  // constructs this viewer).
+  body_id_ = (bridge_ && bridge_->root_body_id >= 0)
+    ? bridge_->root_body_id
+    : mj_name2id(model_, mjOBJ_BODY, "rov_base");
   for (int i = 0; i < kPadCount; ++i) {
     pad_site_id_[i] = mj_name2id(model_, mjOBJ_SITE, kPadSiteNames[i]);
   }
@@ -247,8 +256,10 @@ void MujocoViewer::buildUi1()
 
   mjuiDef def_scope[] = {
     {mjITEM_SECTION, "Live Scope", mjSECT_OPEN, nullptr, "", 0},
-    {mjITEM_RADIO, "Scope Plot", 5, &scope_mode_,
-     "Off\nPad Forces F_N\nKern Margin & minF_N\nBody Vel vs Flow\nThruster Commands", 0},
+    {mjITEM_RADIO, "Scope Plot", 6, &scope_mode_,
+     "Off\nPad Forces F_N\nKern Margin & minF_N\nBody Vel vs Flow\nThruster Commands\n"
+     "Hydro Breakdown (N)",
+     0},
     {mjITEM_END, "", 0, nullptr, "", 0}};
   mjui_add(&ui1_, def_scope);
 
@@ -845,6 +856,17 @@ void MujocoViewer::updateAndDrawScope(mjrRect full_viewport)
         samples[i] = static_cast<float>(d_vis_->ctrl[i]);
         names[i] = kThrusterLabels[i];
       }
+      break;
+    case 5:  // Hydro Breakdown (N): one representative scalar per HydroWrenchBreakdown term.
+      n_series = 4;
+      samples[0] = static_cast<float>(bridge_->hydro_f_drag_y.load());
+      samples[1] = static_cast<float>(bridge_->hydro_f_venturi_x.load());
+      samples[2] = static_cast<float>(bridge_->hydro_f_squeeze_x.load());
+      samples[3] = static_cast<float>(bridge_->hydro_f_fk_am_y.load());
+      names[0] = "F_drag_y";
+      names[1] = "F_venturi_x";
+      names[2] = "F_squeeze_x";
+      names[3] = "F_fk_am_y";
       break;
     default:
       return;

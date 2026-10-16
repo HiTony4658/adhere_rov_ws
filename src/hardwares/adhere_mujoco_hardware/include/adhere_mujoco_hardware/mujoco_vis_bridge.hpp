@@ -50,6 +50,13 @@ struct MujocoVisBridge
   //     precedent) ---
   std::array<std::array<double, 3>, 4> pad_site_pos_body{};  // [TL,TR,BL,BR] body-local (x,y,z)
 
+  // Resolved root-body mjModel index (Phase 2.13 Section 1), set once by
+  // AdhereMujocoHardware::configure() right after its own fallback-chain resolution
+  // ("rov_base" -> "base_link" -> first mjJNT_FREE body) -- lets MujocoViewer reuse the exact
+  // same root body instead of re-running (and risking drifting out of sync with) its own
+  // hardcoded "rov_base" lookup.
+  int root_body_id = -1;
+
   // Per-thruster rail limits (Phase 2.12 Section 3), resolved once from
   // model_->actuator_ctrlrange in AdhereMujocoHardware::configure() -- lets MujocoViewer's
   // thruster sliders adapt to any future MJCF's actuator bounds instead of a hardcoded
@@ -88,6 +95,17 @@ struct MujocoVisBridge
   std::atomic<int> active_pads{4};              // 4 - (pads currently at/below F_N <= 1e-3 N)
   std::atomic<double> cop_y{0.0};          // Center of Pressure, body-local y, m
   std::atomic<double> cop_z{0.0};          // Center of Pressure, body-local z, m
+
+  // Live HydroWrenchBreakdown summary (Phase 2.13 Section 2/Stage 4.2): one representative
+  // scalar per term -- the axis each term is physically dominant on for rov_wall.xml's wall-
+  // pressing geometry (X = normal-to-wall suction/squeeze/added-mass-reaction, Y = the
+  // station-keeping crossflow drag axis) -- written every write() tick from the 500Hz physics
+  // thread (lock-free atomics, same pattern as kern_val/m_kern above) and read by
+  // MujocoViewer's "Hydro Breakdown (N)" Live Scope option.
+  std::atomic<double> hydro_f_drag_y{0.0};
+  std::atomic<double> hydro_f_venturi_x{0.0};
+  std::atomic<double> hydro_f_squeeze_x{0.0};
+  std::atomic<double> hydro_f_fk_am_y{0.0};
 };
 
 }  // namespace adhere_mujoco_hardware

@@ -182,6 +182,27 @@ struct HydroGeometryModel
   static HydroGeometryModel buildFromMjModel(const mjModel * m, int root_body_id);
 };
 
+// Per-term decomposition of the wrench FossenHydrodynamics::compute() returns (Phase 2.13),
+// for live inspection (MujocoViewer's "Hydro Breakdown (N)" scope) and for the Tier 4
+// thermodynamic-passivity V&V test. All vectors are in the *_body/_world frame their name says;
+// each already includes the same submerged_ratio scaling applied to the term it mirrors inside
+// compute(), so summing every f_*_body (rotated to world) plus f_buoy_world reproduces
+// wrench.force_world exactly. t_drag_body is not part of the CLAUDE.md Phase 2.13 struct
+// contract verbatim but is required to express the Tier 4 dissipative-power law
+// (v^B . (f_drag+f_squeeze) + w^B . tau_drag < 0): it is the dissipative rotational counterpart
+// of f_drag_body (patch pressure/skin/squeeze torques + whole-body D_ang_lin/D_ang_quad angular
+// damping), deliberately excluding the workless Munk term t_munk_body.
+struct HydroWrenchBreakdown
+{
+  Eigen::Vector3d f_drag_body = Eigen::Vector3d::Zero();     // pressure + skin + linear drag
+  Eigen::Vector3d f_venturi_body = Eigen::Vector3d::Zero();  // near-wall Venturi suction
+  Eigen::Vector3d f_squeeze_body = Eigen::Vector3d::Zero();  // near-wall squeeze-film damping
+  Eigen::Vector3d f_fk_am_body = Eigen::Vector3d::Zero();    // unsteady Froude-Krylov + added mass
+  Eigen::Vector3d f_buoy_world = Eigen::Vector3d::Zero();    // net buoyancy + added-mass bias
+  Eigen::Vector3d t_munk_body = Eigen::Vector3d::Zero();     // Munk overturning moment (workless)
+  Eigen::Vector3d t_drag_body = Eigen::Vector3d::Zero();     // dissipative drag/skin/squeeze torque
+};
+
 // Exact C++ port of mujoco_mppi_ws/src/env/hydrodynamics.py::setup_hydrodynamics_callback's
 // per-tick passive_callback body. Stateless/pure: all per-step quantities are passed in, so
 // the same implementation can be shared by AdhereMujocoHardware (at 500 Hz) and any future
@@ -197,10 +218,14 @@ public:
   // default) or geo == nullptr, this executes exactly the original point-CoM model,
   // byte-identical to the Phase 2 Python-reference-matched implementation -- a hard parity
   // requirement that must never regress.
+  //
+  // breakdown is an optional output (Phase 2.13): when non-null, it is overwritten with this
+  // call's per-term decomposition (see HydroWrenchBreakdown). Defaults to nullptr so every
+  // existing caller needs zero changes.
   static Wrench compute(
     const RigidBodyState & state, double t, const HydroParams & params,
     HydroModelMode mode = HydroModelMode::kParametricLumped,
-    const HydroGeometryModel * geo = nullptr);
+    const HydroGeometryModel * geo = nullptr, HydroWrenchBreakdown * breakdown = nullptr);
 };
 
 }  // namespace adhere_mujoco_hardware
