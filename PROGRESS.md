@@ -379,3 +379,77 @@ Phase 2.7 之后进一步实际操作 MuJoCo 窗口发现："Coord Frames" 显�
   的巨大三色坐标轴，符合"至少缩小到 1/50"的要求）；左右两侧边栏新增的
   `Step Once`/`Reset Camera View`/`Center of Mass`/`Inertia Box`/
   `Zero All` 控件与 `Body AngVel` 遥测行均正确渲染。
+
+---
+
+## Phase 2.9（2026-10-15）：对齐官方 `simulate` UI 功能、面板内容溢出 bug、坐标系缩放定位
+
+### 目标
+
+用户继续实际操作后反馈三点：1）`Coord Frames` 坐标系标记依旧偏大，要求至少
+缩小到 `1/50`；2）希望把官方 MuJoCo `simulate` 应用的可视化/调试功能尽量搬到
+左右两侧边栏，包括让 ROV 船体透明的功能；3）希望知道坐标系缩放系数可以在
+哪里手动调整。
+
+### 坐标系缩放定位（问题 3 的直接答案）
+
+缩放系数是 `mjModel::vis.scale.framelength`/`framewidth` 两个模型级字段，在
+`adhere_mujoco_hardware.cpp::configure()` 内、`mj_loadXML` 成功之后被覆写为
+`0.02`/`0.002`（MuJoCo 默认 `1.0`/`0.1`）。这是运行时对已加载 `mjModel` 的
+覆写，不是编辑 `mjcf/rov_wall.xml`（后者按约定与只读参考仓库保持字节一致，
+因为这是纯可视化参数、不参与任何物理计算，运行时覆写不影响数值一致性契约）。
+
+### 新增内容（问题 2）
+
+- 左侧边栏 `Visualize` 新分组：`Transparent Hull`（`mjVIS_TRANSPARENT`，船体
+  半透明，直接回应"让 ROV 透明"的请求）、`Joint`/`Actuator`/`Activation`/
+  `Camera`/`Light`/`Constraint`/`Contact Point`/`Contact Force`/
+  `Contact Split`/`Perturb Force`/`Perturb Object`/`Center of Mass`/
+  `Select Point`/`Static Body`/`Inertia Box`/`Scale Inertia w/ Mass`/
+  `Auto Connect`，以及扩展为 8 态的 `Coord Frames` 单选（None/Body/Geom/Site/
+  Camera/Light/Contact/World）。除 `ROV Overlays`（Pad Contact Forces/Flow
+  Velocity Arrow，纯自定义）外，全部直接绑定到 `opt_.flags[...]`/`opt_.frame`，
+  不经过中间镜像变量——`mjv_defaultOption()` 已为它们设好 MuJoCo 自身默认值。
+- 右侧边栏新增 `Render Flags`（Wireframe/Shadow/Reflection/Skybox/Fog/Haze，
+  绑定 `scn_.flags[...]`）、`Label`（17 态单选，绑定 `opt_.label`）、
+  `Visibility Groups`（Geom/Site Group 0，绑定 `opt_.geomgroup[0]`/
+  `sitegroup[0]`——`rov_wall.xml` 目前所有元素都在默认组 0，故只暴露这一组）、
+  新增 `Screenshot` 按钮（左侧边栏，`mjr_readPixels` + 自写 PPM 编码器，保存至
+  `/tmp/adhere_mujoco_screenshot_<ms>.ppm`，终端打印路径）。
+- 修复一个潜藏 bug：`Reset` 按钮自 Phase 2.6 起就被赋予了 `userid`，但
+  `onMouseButton()`/`onCursorPos()` 从未检查 `mjui_event()` 的返回值，点击
+  坐标翻转修好后它仍然静默无效。新增统一的 `handleUiAction(int userid)`
+  分发函数，在两处调用点都接住返回值。
+
+### 面板内容溢出 bug 的定位与修复
+
+初次加满全部新控件后（单侧约 45 个条目），左侧边栏从第一次渲染起就固定显示
+在"Visualize"小节中部（"Camera"开始），`Simulation`/`Wave Environment`/
+`ROV Overlays` 等更靠前的小节完全不可见；鼠标滚轮上下滚动 100+ 格均无效果。
+排查过程：
+- 确认不是 y 坐标翻转问题（Phase 2.7 已修）：手动把 `ui0_.scroll`/`ui1_.scroll`
+  在 `layoutRects()` 的 `mjui_resize()` 调用后强制复位为 `0`，并新增
+  `ui0_scroll_`/`ui1_scroll_` 成员，在 `onScroll()` 里从 `mjui_event()` 的
+  计算结果同步，仍未解决——证明这不是"初始滚动位置不对"，而是
+  `mjui_resize()` 在内容显著超过一屏高度后，其内部布局/裁剪行为本身变得
+  不可靠（不只是 scroll 字段的问题）。
+- 定位方法：把新增的两大块内容（`Render Flags`/`Label`/`Visibility Groups`）
+  从左侧边栏整体移到右侧边栏，让左侧边栏内容回落到明显小于一屏高度——
+  移动后左侧边栏立即恢复从 `Simulation` 正常显示到底，验证了"内容过高"
+  确系根因，而非 y 翻转或其他坐标计算错误。
+- 右侧边栏移入这些内容后仍有约 2 行的轻微裁切（`thr_N1`/`Thrusters (Manual)`
+  标题被遮住一部分），进一步把价值最低的 `Visibility Groups`
+  （对当前 MJCF 而言，组 `1..5` 全部为空操作，只有组 `0` 有实际效果）从
+  "6 个 Geom Group + 6 个 Site Group 共 12 行"精简为"仅 Geom Group 0 + Site
+  Group 0 共 2 行"，右侧边栏恢复完全正常显示。
+- 结论记录在 `mujoco_viewer.hpp` 的 `ui0_scroll_`/`ui1_scroll_` 成员注释中：
+  单侧面板内容应控制在明显小于一屏高度的范围内，超过后 `mjui_resize()` 的
+  滚动/裁剪行为不可信赖，与是否手动管理 `scroll` 字段无关。
+
+### 验证结果
+
+- `colcon build --symlink-install`（全工作空间 6/6 包）零警告通过。
+- 真实桌面会话截图确认：左右两侧边栏现在均从各自第一个小节（`Simulation`/
+  `Thrusters (Manual)`）开始完整显示到最后一个小节（`Coord Frames`/
+  `Telemetry`），无任何裁切，无需滚动；点击 `Transparent` 复选框后 ROV
+  船体渲染为半透明，可透过船体看到内部的接触垫球体与推力器站点标记。

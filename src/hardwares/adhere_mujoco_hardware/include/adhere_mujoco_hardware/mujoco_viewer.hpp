@@ -66,6 +66,7 @@ private:
   void handleUiAction(int userid);
   void stepOnce();
   void resetCameraView();
+  void saveScreenshot();
 
   const mjModel * model_;
   mjData * d_vis_ = nullptr;
@@ -91,22 +92,28 @@ private:
   int aux0_w_ = -1, aux0_h_ = -1;
   int aux1_w_ = -1, aux1_h_ = -1;
 
+  // With ~45 items spread across 6 sections, ui0_'s content is much taller than the window;
+  // mjui_resize() (called every frame from layoutRects()) does not reliably preserve the
+  // mujoco-internal scroll offset across resizes once content exceeds one screen, so we track
+  // our own desired scroll position here and reassert it on ui0_/ui1_ right after every
+  // mjui_resize() call -- onScroll() updates these from the mjui_event()-computed value
+  // whenever the user actually turns the mouse wheel over a panel.
+  int ui0_scroll_ = 0;
+  int ui1_scroll_ = 0;
+
   // mjUI-bound storage (mjITEM_* pdata must be plain, directly-addressable members).
+  // Most MuJoCo-native visualization toggles below are NOT mirrored into separate members --
+  // they bind mjITEM_CHECKBYTE/RADIO directly to the corresponding field inside opt_/scn_
+  // (e.g. &opt_.flags[mjVIS_ACTUATOR], &scn_.flags[mjRND_SHADOW], &opt_.frame, &opt_.label,
+  // &opt_.geomgroup[i]/sitegroup[i]) since those fields are already plain, stably-addressed
+  // members of this class and mjv_defaultOption()/mjv_defaultScene() already initialize them
+  // to MuJoCo's own sane defaults before buildUi0() runs. Only genuinely custom (non-MuJoCo)
+  // toggles need a dedicated ui_* member here.
   int ui_running_ = 1;         // 1 = running, 0 = paused (mirrors bridge_->paused, inverted)
   int ui_wave_mode_ = 0;       // radio index: 0 = Calm, 1 = Gust
-  mjtByte ui_show_pad_forces_ = 1;
-  mjtByte ui_show_flow_arrow_ = 1;
-  mjtByte ui_transparent_ = 0;
-  mjtByte ui_wireframe_ = 0;
-  mjtByte ui_show_contact_ = 0;
-  mjtByte ui_show_com_ = 0;
-  mjtByte ui_show_inertia_ = 0;
-  int ui_coord_frames_ = 0;    // radio index: 0 = None, 1 = Body, 2 = All
+  mjtByte ui_show_pad_forces_ = 1;  // custom green capsule bars, not a MuJoCo opt_/scn_ flag
+  mjtByte ui_show_flow_arrow_ = 1;  // custom blue flow arrow, not a MuJoCo opt_/scn_ flag
   double thruster_slider_[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-
-  // Debug-step request: Step Once only ever acts while paused, taking exactly one 2.0ms
-  // physics tick. Set here by the button/key handler, consumed (and cleared) by
-  // AdhereMujocoHardware::write() via MujocoVisBridge::step_once_request.
 
   int pad_site_id_[4] = {-1, -1, -1, -1};
   int body_id_ = -1;

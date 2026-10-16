@@ -5,6 +5,9 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <utility>
+#include <vector>
 
 #include <GLFW/glfw3.h>
 
@@ -28,6 +31,21 @@ constexpr int kUidReset = 100;
 constexpr int kUidStepOnce = 101;
 constexpr int kUidResetView = 102;
 constexpr int kUidZeroThrusters = 103;
+constexpr int kUidScreenshot = 104;
+
+// Appends a single mjITEM_CHECKBYTE item directly bound to *pdata (used throughout buildUi0()
+// to bind MuJoCo-native toggles straight to a field inside opt_/scn_, e.g. &opt_.flags[idx] or
+// &scn_.flags[idx], instead of introducing a dedicated mirror member per toggle).
+void addCheckbox(mjUI * ui, int section, const char * name, mjtByte * pdata)
+{
+  mjuiDef def[2] = {};
+  def[0].type = mjITEM_CHECKBYTE;
+  std::snprintf(def[0].name, sizeof(def[0].name), "%s", name);
+  def[0].state = 1;
+  def[0].pdata = pdata;
+  def[1].type = mjITEM_END;
+  mjui_addToSection(ui, section, def);
+}
 }  // namespace
 
 MujocoViewer::MujocoViewer(
@@ -85,6 +103,12 @@ void MujocoViewer::layoutRects(int fb_width, int fb_height)
   mjui_resize(&ui0_, &con_);
   mjui_resize(&ui1_, &con_);
 
+  // Reassert our own tracked scroll position (see header comment on ui0_scroll_/ui1_scroll_):
+  // mjui_resize() does not reliably keep ui0_/ui1_.scroll pinned to where the user left it
+  // once content is taller than the panel.
+  ui0_.scroll = std::clamp(ui0_scroll_, 0, std::max(0, ui0_.maxheight - ui0_.height));
+  ui1_.scroll = std::clamp(ui1_scroll_, 0, std::max(0, ui1_.maxheight - ui1_.height));
+
   // mjUI panels render into dedicated aux framebuffers (mjUI::auxid indexes con_.auxFBO[]);
   // mjr_makeContext() does not allocate these on its own -- mjr_addAux() must be called
   // explicitly, and only when the panel's pixel dimensions actually change (it is relatively
@@ -103,7 +127,6 @@ void MujocoViewer::layoutRects(int fb_width, int fb_height)
 
 void MujocoViewer::buildUi0()
 {
-  ui0_.sect[0].state = mjSECT_FIXED;  // placeholder cleared by mjui_add below
   ui0_.nsect = 0;
 
   mjuiDef def_sim[] = {
@@ -112,10 +135,12 @@ void MujocoViewer::buildUi0()
     {mjITEM_BUTTON, "Step Once (S)", 1, nullptr, "", 0},
     {mjITEM_BUTTON, "Reset (Backspace)", 1, nullptr, "", 0},
     {mjITEM_BUTTON, "Reset Camera View", 1, nullptr, "", 0},
+    {mjITEM_BUTTON, "Screenshot", 1, nullptr, "", 0},
     {mjITEM_END, "", 0, nullptr, "", 0}};
   def_sim[2].otherint = kUidStepOnce;
   def_sim[3].otherint = kUidReset;
   def_sim[4].otherint = kUidResetView;
+  def_sim[5].otherint = kUidScreenshot;
   mjui_add(&ui0_, def_sim);
 
   mjuiDef def_wave[] = {
@@ -124,18 +149,54 @@ void MujocoViewer::buildUi0()
     {mjITEM_END, "", 0, nullptr, "", 0}};
   mjui_add(&ui0_, def_wave);
 
-  mjuiDef def_render[] = {
-    {mjITEM_SECTION, "Rendering", mjSECT_OPEN, nullptr, "", 0},
+  // Custom ROV-specific overlays (not MuJoCo-native: no corresponding opt_/scn_ flag).
+  mjuiDef def_rov[] = {
+    {mjITEM_SECTION, "ROV Overlays", mjSECT_OPEN, nullptr, "", 0},
     {mjITEM_CHECKBYTE, "Pad Contact Forces", 1, &ui_show_pad_forces_, "", 0},
     {mjITEM_CHECKBYTE, "Flow Velocity Arrow", 1, &ui_show_flow_arrow_, "", 0},
-    {mjITEM_CHECKBYTE, "Transparent Hull", 1, &ui_transparent_, "", 0},
-    {mjITEM_CHECKBYTE, "Wireframe", 1, &ui_wireframe_, "", 0},
-    {mjITEM_CHECKBYTE, "Contact Points", 1, &ui_show_contact_, "", 0},
-    {mjITEM_CHECKBYTE, "Center of Mass", 1, &ui_show_com_, "", 0},
-    {mjITEM_CHECKBYTE, "Inertia Box", 1, &ui_show_inertia_, "", 0},
-    {mjITEM_RADIO, "Coord Frames", 3, &ui_coord_frames_, "None\nBody\nSite", 0},
     {mjITEM_END, "", 0, nullptr, "", 0}};
-  mjui_add(&ui0_, def_render);
+  mjui_add(&ui0_, def_rov);
+
+  // Core MuJoCo mjvOption visualization toggles every official `simulate` build exposes,
+  // bound directly to opt_.flags[...]/opt_.frame (see header comment). "Transparent Hull"
+  // directly answers the explicit request to make the ROV body see-through. The remaining
+  // official toggles (render flags, geom/site groups, Label) live in buildUi1() -- splitting
+  // across both panels keeps either side from needing to scroll past a full screen of content.
+  mjuiDef def_vis[] = {
+    {mjITEM_SECTION, "Visualize", mjSECT_OPEN, nullptr, "", 0},
+    {mjITEM_END, "", 0, nullptr, "", 0}};
+  mjui_add(&ui0_, def_vis);
+  const int sect_vis = ui0_.nsect - 1;
+  static const std::pair<const char *, int> kVisFlags[] = {
+    {"Transparent Hull", mjVIS_TRANSPARENT},
+    {"Joint", mjVIS_JOINT},
+    {"Actuator", mjVIS_ACTUATOR},
+    {"Activation", mjVIS_ACTIVATION},
+    {"Camera", mjVIS_CAMERA},
+    {"Light", mjVIS_LIGHT},
+    {"Constraint", mjVIS_CONSTRAINT},
+    {"Contact Point", mjVIS_CONTACTPOINT},
+    {"Contact Force", mjVIS_CONTACTFORCE},
+    {"Contact Split", mjVIS_CONTACTSPLIT},
+    {"Perturb Force", mjVIS_PERTFORCE},
+    {"Perturb Object", mjVIS_PERTOBJ},
+    {"Center of Mass", mjVIS_COM},
+    {"Select Point", mjVIS_SELECT},
+    {"Static Body", mjVIS_STATIC},
+    {"Inertia Box", mjVIS_INERTIA},
+    {"Scale Inertia w/ Mass", mjVIS_SCLINERTIA},
+    {"Auto Connect", mjVIS_AUTOCONNECT},
+  };
+  for (const auto & [name, flag] : kVisFlags) {
+    addCheckbox(&ui0_, sect_vis, name, &opt_.flags[flag]);
+  }
+  {
+    mjuiDef def_frame[] = {
+      {mjITEM_RADIO, "Coord Frames", 8, &opt_.frame,
+       "None\nBody\nGeom\nSite\nCamera\nLight\nContact\nWorld", 0},
+      {mjITEM_END, "", 0, nullptr, "", 0}};
+    mjui_addToSection(&ui0_, sect_vis, def_frame);
+  }
 }
 
 void MujocoViewer::buildUi1()
@@ -158,6 +219,49 @@ void MujocoViewer::buildUi1()
     def_slider[1].type = mjITEM_END;
     mjui_addToSection(&ui1_, 0, def_slider);
   }
+
+  // Scene-level render flags (mjtRndFlag), bound directly to scn_.flags[...] -- paired here
+  // with Label/geom-site-group visibility (also MuJoCo-native) rather than in buildUi0(), to
+  // keep either panel's total content within roughly one screen's height.
+  mjuiDef def_rndflags[] = {
+    {mjITEM_SECTION, "Render Flags", mjSECT_OPEN, nullptr, "", 0},
+    {mjITEM_END, "", 0, nullptr, "", 0}};
+  mjui_add(&ui1_, def_rndflags);
+  const int sect_rnd = ui1_.nsect - 1;
+  static const std::pair<const char *, int> kRndFlags[] = {
+    {"Wireframe", mjRND_WIREFRAME},
+    {"Shadow", mjRND_SHADOW},
+    {"Reflection", mjRND_REFLECTION},
+    {"Skybox", mjRND_SKYBOX},
+    {"Fog", mjRND_FOG},
+    {"Haze", mjRND_HAZE},
+  };
+  for (const auto & [name, flag] : kRndFlags) {
+    addCheckbox(&ui1_, sect_rnd, name, &scn_.flags[flag]);
+  }
+
+  mjuiDef def_label_sect[] = {
+    {mjITEM_SECTION, "Label", mjSECT_OPEN, nullptr, "", 0},
+    {mjITEM_RADIO, "Mode", 17, &opt_.label,
+     "None\nBody\nJoint\nGeom\nSite\nCamera\nLight\nTendon\nActuator\nConstraint\nFlex\n"
+     "Skin\nSelection\nSelPoint\nContactPt\nContactForce\nIsland",
+     0},
+    {mjITEM_END, "", 0, nullptr, "", 0}};
+  mjui_add(&ui1_, def_label_sect);
+
+  // Geom/site visibility by group, bound directly to opt_.geomgroup[i]/sitegroup[i].
+  // rov_wall.xml puts every geom/site in the default group (0), so only group 0 has any
+  // visible effect today -- trimmed to just that (instead of all mjNGROUP=6 slots) both
+  // because groups 1-5 are inert until the MJCF assigns something to them, and because this
+  // panel's total content must stay within roughly one screen's height (see the
+  // ui0_scroll_/ui1_scroll_ comment in the header: mjui_resize()'s layout math gets unreliable
+  // well past that, independent of our scroll override).
+  mjuiDef def_groups[] = {
+    {mjITEM_SECTION, "Visibility Groups", mjSECT_OPEN, nullptr, "", 0},
+    {mjITEM_CHECKBYTE, "Geom Group 0", 1, &opt_.geomgroup[0], "", 0},
+    {mjITEM_CHECKBYTE, "Site Group 0", 1, &opt_.sitegroup[0], "", 0},
+    {mjITEM_END, "", 0, nullptr, "", 0}};
+  mjui_add(&ui1_, def_groups);
 
   mjuiDef def_tele_header[] = {
     {mjITEM_SECTION, "Telemetry", mjSECT_OPEN, nullptr, "", 0},
@@ -398,8 +502,10 @@ void MujocoViewer::onScroll(double, double yoffset)
   uistate_.sy = yoffset;
   if (uistate_.mouserect == 1) {
     mjui_event(&ui0_, &uistate_, &con_);
+    ui0_scroll_ = ui0_.scroll;  // persisted across layoutRects()'s per-frame mjui_resize() calls
   } else if (uistate_.mouserect == 2) {
     mjui_event(&ui1_, &uistate_, &con_);
+    ui1_scroll_ = ui1_.scroll;
   } else {
     mjv_moveCamera(model_, mjMOUSE_ZOOM, 0.0, -0.05 * yoffset, &cam_);
   }
@@ -457,6 +563,9 @@ void MujocoViewer::handleUiAction(int userid)
         v = 0.0;
       }
       break;
+    case kUidScreenshot:
+      saveScreenshot();
+      break;
     default:
       break;  // not an action button (slider/checkbox/radio changes are read directly via pdata)
   }
@@ -479,6 +588,34 @@ void MujocoViewer::resetCameraView()
   cam_.lookat[0] = 0.0;
   cam_.lookat[1] = 0.0;
   cam_.lookat[2] = 0.6;
+}
+
+void MujocoViewer::saveScreenshot()
+{
+  // Official MuJoCo `simulate` saves PNG; writing a simple PPM here instead avoids pulling in
+  // a PNG encoder dependency. PPM (P6) is still natively readable by GIMP/most image viewers,
+  // and trivially convertible (e.g. `convert shot.ppm shot.png`) if a PNG is needed.
+  mjrRect viewport = uistate_.rect[0];
+  std::vector<unsigned char> rgb(static_cast<size_t>(viewport.width) * viewport.height * 3);
+  mjr_readPixels(rgb.data(), nullptr, viewport, &con_);
+
+  const auto now = std::chrono::system_clock::now().time_since_epoch();
+  const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+  char path[256];
+  std::snprintf(path, sizeof(path), "/tmp/adhere_mujoco_screenshot_%lld.ppm", static_cast<long long>(ms));
+
+  std::ofstream out(path, std::ios::binary);
+  if (!out) {
+    std::fprintf(stderr, "[MujocoViewer] Failed to open '%s' for screenshot\n", path);
+    return;
+  }
+  out << "P6\n" << viewport.width << " " << viewport.height << "\n255\n";
+  // mjr_readPixels returns rows bottom-up (OpenGL convention); PPM expects top-down rows.
+  const size_t row_bytes = static_cast<size_t>(viewport.width) * 3;
+  for (int row = viewport.height - 1; row >= 0; --row) {
+    out.write(reinterpret_cast<const char *>(rgb.data() + static_cast<size_t>(row) * row_bytes), row_bytes);
+  }
+  std::fprintf(stdout, "[MujocoViewer] Screenshot saved to %s\n", path);
 }
 
 void MujocoViewer::drawOverlayTelemetry(mjrRect viewport)
@@ -557,12 +694,9 @@ void MujocoViewer::renderFrame()
     }
   }
 
-  opt_.flags[mjVIS_TRANSPARENT] = ui_transparent_;
-  opt_.flags[mjVIS_CONTACTPOINT] = ui_show_contact_;
-  opt_.flags[mjVIS_CONTACTFORCE] = ui_show_contact_;
-  opt_.flags[mjVIS_COM] = ui_show_com_;
-  opt_.flags[mjVIS_INERTIA] = ui_show_inertia_;
-  opt_.frame = (ui_coord_frames_ == 1) ? mjFRAME_BODY : (ui_coord_frames_ == 2) ? mjFRAME_SITE : mjFRAME_NONE;
+  // Note: opt_.flags[*], opt_.frame, opt_.label, opt_.geomgroup/sitegroup[*], and
+  // scn_.flags[*] are all mjUI-bound directly (see buildUi0()) and therefore already current
+  // here -- mjui_event() writes straight into these fields, no per-frame copy needed.
 
   if (pert_.active) {
     mjv_applyPerturbForce(model_, d_vis_, &pert_);
@@ -574,7 +708,6 @@ void MujocoViewer::renderFrame()
   }
 
   mj_forward(model_, d_vis_);
-  scn_.flags[mjRND_WIREFRAME] = ui_wireframe_;
 
   int fb_w = 0, fb_h = 0;
   glfwGetFramebufferSize(window_, &fb_w, &fb_h);

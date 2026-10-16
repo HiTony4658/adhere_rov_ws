@@ -203,7 +203,15 @@ GLFW 窗口创建，仅空转等待停止信号。
 | `1` / `2` | 切换静水 / 造浪模式（与左侧边栏 "Wave Environment" 单选按钮等价） |
 | `Tab` | 隐藏/显示左侧边栏（腾出视口空间） |
 
-**左侧边栏（`ui0`：仿真 / 造浪 / 渲染调试选项）**：
+内容已尽量对齐官方 `simulate` 应用暴露的可视化/调试开关，并拆分到左右两侧，
+避免单侧内容超过一屏高度（`mjui_resize()` 在内容过高时的滚动行为不可靠，详见
+`mujoco_viewer.hpp` 中 `ui0_scroll_`/`ui1_scroll_` 的注释）。除标注"自定义"外，
+其余控件均直接绑定到 `mjvOption opt_`/`mjvScene scn_` 内部字段（如
+`&opt_.flags[mjVIS_ACTUATOR]`、`&scn_.flags[mjRND_SHADOW]`、`&opt_.frame`、
+`&opt_.label`、`&opt_.geomgroup[i]`），不经过额外镜像变量，`mjv_defaultOption()`/
+`mjv_defaultScene()` 已为它们设好 MuJoCo 自身的默认值。
+
+**左侧边栏（`ui0`）**：
 
 | 分组 | 控件 | 说明 |
 |---|---|---|
@@ -211,30 +219,53 @@ GLFW 窗口创建，仅空转等待停止信号。
 | | `Step Once` 按钮 | 与 `S` 等价 |
 | | `Reset` 按钮 | 与 `Backspace` 等价 |
 | | `Reset Camera View` 按钮 | 相机环绕/拖拽"迷路"后一键恢复默认视角（`distance=2.8, azimuth=-135°, elevation=-20°`） |
+| | `Screenshot` 按钮 | 将当前整个窗口帧保存为 `/tmp/adhere_mujoco_screenshot_<ms>.ppm`（PPM 格式，GIMP/大多数看图软件可直接打开；若需要 PNG 可用 `convert shot.ppm shot.png` 转换），终端会打印保存路径 |
 | Wave Environment | `Mode` 单选 | Calm Water / Station-Keeping Gust，与 `1`/`2` 键等价 |
-| Rendering | `Pad Contact Forces` | 4 个接触垫受力柱状图开关（绿色胶囊，长度正比于法向力） |
+| ROV Overlays（自定义） | `Pad Contact Forces` | 4 个接触垫受力柱状图开关（绿色胶囊，长度正比于法向力） |
 | | `Flow Velocity Arrow` | 环境流速箭头开关（蓝色，从机体质心指向流速方向） |
-| | `Transparent Hull` | 船体半透明（便于观察内部接触点/质心） |
-| | `Wireframe` | 线框渲染 |
-| | `Contact Points` | MuJoCo 原生接触点 + 接触力标记（调试碰撞检测用） |
+| Visualize | `Transparent Hull` (`mjVIS_TRANSPARENT`) | 船体半透明——**可直接看到内部的接触垫/惯量箱/质心标记** |
+| | `Joint`/`Actuator`/`Activation` | 关节、执行器、激活状态的原生可视化标记 |
+| | `Camera`/`Light` | 相机/光源位置标记 |
+| | `Constraint` | 等式约束标记（本模型无等式约束，预留） |
+| | `Contact Point`/`Contact Force`/`Contact Split` | MuJoCo 原生接触点 + 接触力箭头（可拆分法向/切向分量） |
+| | `Perturb Force`/`Perturb Object` | `Ctrl`+拖拽扰动时的力箭头/高亮物体渲染 |
 | | `Center of Mass` | 显示每个刚体的质心标记（验证浮力/重力作用点） |
-| | `Inertia Box` | 显示等效惯量长方体（核对 `diaginertia` 是否符合预期） |
-| | `Coord Frames` | None / Body / Site 三态单选——坐标系标记长度/线宽已按
-  `model_->vis.scale.framelength/framewidth` 整体缩小至 MuJoCo 默认值的 `1/50`
-  （`0.02`/`0.002`），避免在这个 `~0.2-0.6m` 尺度的 ROV 上喧宾夺主 |
+| | `Select Point` | 双击选中后的选中点标记 |
+| | `Static Body` | 以不同样式标出静态刚体（如壁面） |
+| | `Inertia Box`/`Scale Inertia w/ Mass` | 等效惯量长方体（核对 `diaginertia`），后者按质量缩放箱体视觉大小 |
+| | `Auto Connect` | 关节-刚体连接引导线 |
+| | `Coord Frames` | None/Body/Geom/Site/Camera/Light/Contact/World 八态单选——标记长度/线宽已
+  整体缩小至 MuJoCo 默认值的 `1/50`（见下方"坐标系缩放"一节） |
 
-**右侧边栏（`ui1`：推力器手动控制 + 实时遥测）**：
+**右侧边栏（`ui1`）**：
 
 | 分组 | 控件 | 说明 |
 |---|---|---|
-| Thrusters (Manual) | `Zero All` 按钮 | 一键将全部 8 个滑条归零 |
+| Thrusters (Manual)（自定义） | `Zero All` 按钮 | 一键将全部 8 个滑条归零 |
 | | `thr_N1..4` / `thr_T5..8` 滑条 | `[-40, 40] N`，叠加写入
   `MujocoVisBridge::manual_ctrl`（与上层控制器指令相加），可在未挂载控制器时
   手动测试单个推力器——例如把 4 个 `thr_N*` 拉到正值可将 ROV 压向壁面，
   用于验证接触力/`Pad Contact Forces` 可视化是否随指令动态响应 |
-| Telemetry | （说明性条目，指向视口左上角的实时数值浮层） | 浮层内容：物理频率（Hz）、
+| Render Flags | `Wireframe`/`Shadow`/`Reflection`/`Skybox`/`Fog`/`Haze` | 场景级渲染效果开关（`mjtRndFlag`），纯视觉，不影响物理 |
+| Label | `Mode` 单选 | None/Body/Joint/Geom/Site/Camera/Light/Tendon/Actuator/Constraint/
+  Flex/Skin/Selection/SelPoint/ContactPt/ContactForce/Island——在 3D 视口内
+  叠加对应类型的文字标签 |
+| Visibility Groups | `Geom Group 0`/`Site Group 0` | 整体隐藏/显示所有几何体/站点（`rov_wall.xml`
+  目前所有元素都在默认组 `0`，故只有这一组有实际效果；`opt_.geomgroup[1..5]`/
+  `sitegroup[1..5]` 仍可通过代码按需启用，这里暂不在 UI 上重复暴露） |
+| Telemetry（自定义） | （说明性条目，指向视口左上角的实时数值浮层） | 浮层内容：物理频率（Hz）、
   仿真时间、造浪模式与 `τ`、环境流速、4 个接触垫受力、ROV 位姿
   `(X,Y,Z,φ,θ,ψ)`、机体线速度 `(vx,vy,vz)`、机体角速度 `(ωx,ωy,ωz)` |
+
+### 坐标系（Coord Frames）缩放在哪里调
+
+`Coord Frames`/`Label` 等标记的长度/线宽不是 UI 可调参数，而是
+`mjModel::vis.scale.framelength`/`framewidth` 这两个模型级字段，在
+`AdhereMujocoHardware::configure()`（`adhere_mujoco_hardware.cpp`，紧跟在
+`mj_loadXML` 成功之后）被覆写为 `0.02`/`0.002`（MuJoCo 默认值为 `1.0`/`0.1`，
+相对这个 `~0.2-0.6m` 尺度的 ROV 明显过大）。这是运行时对已加载 `mjModel` 的
+覆写，而不是编辑 `mjcf/rov_wall.xml`（该文件按约定与只读参考仓库保持字节
+一致）；需要进一步调整时直接改这两行代码即可，不涉及 MJCF 或任何 UI 控件。
 
 ## `adhere_mujoco_node`：单进程宿主 + RViz2 同步
 
