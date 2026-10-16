@@ -18,6 +18,10 @@ class FlowEnvironmentPlugin
 public:
   virtual ~FlowEnvironmentPlugin() = default;
   virtual const HydroParams & getHydroParams() const = 0;
+  // Non-const accessor used only by AdhereMujocoHardware::configure()'s one-time
+  // HydroParams::applyMjModelOverrides() pass (CLAUDE.md Phase 2.12 Section 4) -- every other
+  // call site must go through the const getHydroParams() above.
+  virtual HydroParams & mutableHydroParams() = 0;
   virtual Eigen::Vector3d ambientVelocityWorld(double t) const
   {
     return getHydroParams().currentWorld(t);
@@ -36,6 +40,7 @@ class CalmWaterPlugin : public FlowEnvironmentPlugin
 {
 public:
   const HydroParams & getHydroParams() const override { return params_; }
+  HydroParams & mutableHydroParams() override { return params_; }
   std::string profileName() const override { return "calm"; }
 
 private:
@@ -60,6 +65,7 @@ public:
   }
 
   const HydroParams & getHydroParams() const override { return params_; }
+  HydroParams & mutableHydroParams() override { return params_; }
   std::string profileName() const override { return "station_keeping_gust"; }
 
 private:

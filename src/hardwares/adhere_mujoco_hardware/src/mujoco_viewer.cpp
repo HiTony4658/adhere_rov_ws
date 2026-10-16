@@ -235,7 +235,12 @@ void MujocoViewer::buildUi1()
     std::snprintf(def_slider[0].name, sizeof(def_slider[0].name), "%s", kThrusterLabels[i]);
     def_slider[0].state = 1;
     def_slider[0].pdata = &thruster_slider_[i];
-    std::snprintf(def_slider[0].other, sizeof(def_slider[0].other), "-40 40");
+    // Phase 2.12 Section 3: slider bounds mirror this thruster's own MJCF ctrlrange (resolved
+    // once by AdhereMujocoHardware::configure(), write-once static data in bridge_ -- same
+    // pattern as pad_site_pos_body) instead of a hardcoded "-40 40" string.
+    std::snprintf(
+      def_slider[0].other, sizeof(def_slider[0].other), "%g %g", bridge_->thruster_ctrl_min[i],
+      bridge_->thruster_ctrl_max[i]);
     def_slider[1].type = mjITEM_END;
     mjui_addToSection(&ui1_, 0, def_slider);
   }

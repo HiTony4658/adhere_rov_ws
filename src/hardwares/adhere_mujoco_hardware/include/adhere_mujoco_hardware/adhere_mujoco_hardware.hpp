@@ -83,6 +83,16 @@ public:
   // what constructs MujocoViewer with the requested headless flag.
   void setHeadless(bool headless) { headless_ = headless; }
 
+  // Model-agnostic zero-recompile model switching (CLAUDE.md Phase 2.12 Section 1): must be
+  // called BEFORE the ResourceManager that will pluginlib-construct this hardware is
+  // constructed, since configure() runs synchronously inside that constructor -- there is no
+  // activeInstance() to reach yet at this point, so a static override (consulted by the next
+  // configure() call) is the only way in. Empty strings mean "no override": configure() then
+  // falls back to the <hardware><param name="pkg_description"/mjcf_file"> HardwareInfo entries
+  // if present, and finally to "simplified_v1_description"/"mjcf/rov_wall.xml" otherwise.
+  static void setModelSourceOverride(
+    const std::string & pkg_description, const std::string & mjcf_file);
+
 private:
   // Installed as the body of the global mjcb_passive hook (see adhere_mujoco_hardware.cpp);
   // computes and injects the Fossen hydrodynamic wrench at exactly the point in mj_step
@@ -122,6 +132,12 @@ private:
   int body_id_ = -1;
   std::array<int, 4> pad_touch_sensor_adr_{};
   std::array<int, kNumThrusters> actuator_id_{};
+
+  // Per-thruster rail limits (CLAUDE.md Phase 2.12 Section 3), resolved at configure() time
+  // from model_->actuator_ctrlrange instead of a hardcoded +-40N constant: defaults to
+  // [-40, 40] only when the MJCF actuator itself declares no ctrlrange.
+  std::array<double, kNumThrusters> thruster_ctrl_min_{};
+  std::array<double, kNumThrusters> thruster_ctrl_max_{};
 
   // Body-local (y, z) of the 4 pad sites, resolved at configure() time from
   // model_->site_pos[pad_*_site] instead of being hardcoded (CLAUDE.md Phase 2.6 Stage 2.1

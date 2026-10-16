@@ -737,3 +737,96 @@ bug（均局限于 `kStonefishGeometryDriven` 分支，`kParametricLumped` 零�
   `copyright`/`cpplint`/`flake8`/`pep257`/`uncrustify` 风格检查与
   `gtest`（未 `source install/setup.bash` 时找不到包共享目录）在未改动的
   `main` 分支上同样失败，与本次改动无关，未处理。
+
+---
+
+## Phase 2.12（2026-10-16）：`adhere_mujoco_hardware` 模型无关化（零重编模型切换）+ 2 项物理细节修复
+
+### 目标
+
+消除 `adhere_mujoco_hardware` 中残留的 5 处与 `simplified_v1_description`/
+`rov_wall.xml` 绑定的硬编码假设，使切换到未来的新 ROV 模型包（不同壳体尺寸、
+焊接子刚体、质量/浮力、推力器量程）只需改动启动参数与新模型自己的 MJCF，无需
+修改或重新编译 `adhere_mujoco_hardware` 的任何 C++ 源码；同时修复 2 项代码
+审计中发现的物理细节问题。
+
+### 修复/新增内容
+
+1. **启动时模型来源解析（零重编模型切换）**：新增
+   `AdhereMujocoHardware::setModelSourceOverride(pkg, mjcf)` 静态方法（必须
+   在 `ResourceManager` 构造——即 `configure()` 同步执行——之前调用，因为此时
+   尚无实例可通过 `activeInstance()` 访问），由 `adhere_mujoco_node` 从新增的
+   `pkg_description`/`mjcf_file` 节点参数调用；`mujoco_sim.launch.py` 新增
+   `pkg_description`/`mjcf_file`/`xacro_file` 三个 launch 参数（默认值分别为
+   `simplified_v1_description`/`mjcf/rov_wall.xml`/
+   `urdf/simplified_v1.urdf.xacro`，与改动前行为逐位一致）。`configure()`
+   解析优先级：静态覆盖 → `<hardware><param>` HardwareInfo → 硬编码默认值。
+2. **焊接子刚体递归 + 根刚体名称回退链**：`HydroGeometryModel::
+   buildFromMjModel()` 不再假设 `root_body_id` 的所有水动力几何都是其直属
+   `<geom>`，改为单次正向遍历 `mjModel`（利用 `body_parentid[b] < b` 的
+   MuJoCo 保证）判定每个刚体是否通过一条全程零自由度
+   （`body_jntnum==0`，真正"焊接"）的父链归属于 `root_body_id` 的刚性壳体
+   子树，并沿该父链累乘 `body_pos`/`body_quat` 把子刚体的每个 `<geom>`
+   复合变换进 `root_body_id` 坐标系后再送入切分函数。`AdhereMujocoHardware::
+   configure()` 的根刚体解析新增回退链：`"rov_base"` → `"base_link"` →
+   模型中第一个拥有 `mjJNT_FREE` 自由关节的刚体。
+3. **推力器轨道上限动态解析**：`configure()` 为 8 个推力器分别从
+   `model_->actuator_ctrlrange` 读取量程（未声明则回退 `±40N`），写入新增的
+   `MujocoVisBridge::thruster_ctrl_min/max`（一次写入、全程只读，与
+   `pad_site_pos_body` 同一模式）；`write()` 的钳位与 `MujocoViewer::
+   buildUi1()` 右侧边栏 8 个滑条的量程字符串均改为读取这对数组，不再硬编码
+   `±40.0N`/`"-40 40"`。
+4. **MJCF `<custom><numeric>` 水动力参数覆盖**：新增
+   `HydroParams::applyMjModelOverrides(m, params)`，扫描 MJCF 的
+   `<custom><numeric name="hydro_..." data="..."/>` 条目并覆盖 14 个可选字段
+   （`hydro_vehicle_mass`/`hydro_augmented_mass`/`hydro_displaced_volume`/
+   `hydro_cob_offset_body`/`hydro_z_surface`/`hydro_D_lin`/`hydro_D_quad`/
+   `hydro_D_ang_lin`/`hydro_D_ang_quad`/`hydro_C_venturi`/
+   `hydro_h_gap_nominal`/`hydro_A_plate`/`hydro_C_squeeze`/`hydro_Cd_normal`/
+   `hydro_Cf_tangent`），MJCF 未声明的字段保持 `HydroParams` 默认值不变。
+   `FlowEnvironmentPlugin` 新增 `mutableHydroParams()` 虚接口（供
+   `configure()` 的这一次性覆盖调用使用，其余调用点仍走原有的只读
+   `getHydroParams()`），`configure()` 对 `calm_plugin_`/`gust_plugin_`
+   各调用一次。
+5. **2 项物理细节修复**：
+   - `FossenHydrodynamics::compute()` 的 `kStonefishGeometryDriven` 分支，
+     壁面吸附项的 `v_tan_sq_p` 由手写的 `v_t.y()^2+v_t.z()^2`（隐含假设贴壁
+     微元法向恒为 `[-1,0,0]^T`）改为 `v_t.squaredNorm()`——对平板场景数值
+     完全相同，对未来弯曲 CAD 壳体的任意法向方向微元才是严格正确的切向
+     速度模长平方。
+   - `AdhereMujocoHardware::write()` 的 `did_reset` 分支新增
+     `applied_thrust_.fill(0.0);`，避免 `enable_thruster_lag` 开启时复位前
+     残留的一阶惯性延迟状态泄漏进复位后的第一拍。
+
+### 单元测试新增
+
+`test_fossen_hydrodynamics_geometry.cpp` 新增
+`TEST(ModelAgnosticHydro, WeldedChildBodyRecursionAndCustomNumerics)`：
+构造一个内存中（经临时文件加载）的最小 MJCF，包含一个自由浮动根刚体
+`base_link`、一个零自由度焊接子刚体 `fairing_child`（各带一个 `0.1m`/
+`0.05m` 半边长的 box 几何）、一条 `<custom><numeric
+name="hydro_vehicle_mass" data="35.0"/>` 与一个 `ctrlrange="-60 60"` 的
+推力器。验证：（a）`buildFromMjModel()` 递归产出 `96+96=192` 个微元（均在
+`256` 上限内，无有损合并），且至少一个微元质心在 `root` 坐标系下
+`x>0.15m`——只有递归穿过焊接子刚体才可能出现（`fairing_child` 相对
+`base_link` 偏移 `0.2m`）；（b）`applyMjModelOverrides()` 把
+`vehicle_mass` 覆盖为 `35.0`，而 MJCF 未声明的 `augmented_mass` 保持
+默认值 `26.0` 不变。
+
+### 验证结果
+
+- `colcon build --packages-up-to simplified_v1_description adhere_mujoco_hardware
+  --symlink-install` 零警告零错误。
+- `colcon test --packages-select adhere_mujoco_hardware` 的 `gtest`
+  （`test_fossen_hydrodynamics_geometry`，`source install/setup.bash` 后
+  直接运行二进制）8/8 全部通过（原有 7 组 + 本次新增 1 组），原有
+  `kParametricLumped` 逐位核验与 `rov_wall.xml` 的 `96` 个微元/`0.24 m^2`
+  正面板面积零回归；既存的
+  `copyright`/`cpplint`/`flake8`/`pep257`/`uncrustify`/`xmllint` 风格检查
+  在未改动的 `main` 分支上同样失败，与本次改动无关，未处理。
+- `ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py headless:=true
+  use_rviz:=false`（默认参数）与追加显式
+  `pkg_description:=simplified_v1_description mjcf_file:=mjcf/rov_wall.xml`
+  两种调用方式均成功 `configure()` 并输出"HydroGeometryModel built with 96
+  surface patches"，确认启动时模型来源解析的默认路径与显式覆盖路径行为
+  一致、零回归。

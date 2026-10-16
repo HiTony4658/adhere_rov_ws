@@ -102,13 +102,26 @@ int main(int argc, char ** argv)
   auto node = std::make_shared<rclcpp::Node>("adhere_mujoco_node");
   node->declare_parameter<std::string>("robot_description", "");
   node->declare_parameter<bool>("headless", false);
+  // Zero-recompile model switching (CLAUDE.md Phase 2.12 Section 1): defaults reproduce the
+  // exact pre-Phase-2.12 hardcoded path, so every existing launch invocation that passes
+  // neither parameter is unaffected.
+  node->declare_parameter<std::string>("pkg_description", "simplified_v1_description");
+  node->declare_parameter<std::string>("mjcf_file", "mjcf/rov_wall.xml");
   const std::string urdf = node->get_parameter("robot_description").as_string();
   const bool headless = node->get_parameter("headless").as_bool();
+  const std::string pkg_description = node->get_parameter("pkg_description").as_string();
+  const std::string mjcf_file = node->get_parameter("mjcf_file").as_string();
   if (urdf.empty()) {
     RCLCPP_FATAL(node->get_logger(), "robot_description parameter is empty, cannot start");
     rclcpp::shutdown();
     return 1;
   }
+
+  // Must run BEFORE the ResourceManager below is constructed: that constructor is what
+  // pluginlib-instantiates AdhereMujocoHardware and synchronously calls its configure(), which
+  // is where this override is consulted (CLAUDE.md Phase 2.12 Section 1 -- there is no
+  // activeInstance() to reach yet at this point).
+  adhere_mujoco_hardware::AdhereMujocoHardware::setModelSourceOverride(pkg_description, mjcf_file);
 
   // Constructing ResourceManager parses the URDF and runs AdhereMujocoHardware::configure(),
   // which registers itself via activeInstance() -- but defers MujocoViewer construction to

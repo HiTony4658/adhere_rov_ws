@@ -27,7 +27,30 @@ AdhereMujocoHardware * g_active_instance = nullptr;
 
 constexpr const char * kPadSiteNames[4] = {
   "pad_TL_site", "pad_TR_site", "pad_BL_site", "pad_BR_site"};
+
+// Launch-time model-source override (CLAUDE.md Phase 2.12 Section 1), consulted by the next
+// configure() call. Function-local statics (lazily constructed on first call, not namespace-
+// scope globals) because they must be reachable before any AdhereMujocoHardware instance
+// exists -- see the header comment on setModelSourceOverride() -- while avoiding the
+// unspecified cross-translation-unit initialization-order hazard of non-POD global variables.
+std::string & pkgDescriptionOverride()
+{
+  static std::string value;
+  return value;
+}
+std::string & mjcfFileOverride()
+{
+  static std::string value;
+  return value;
+}
 }  // namespace
+
+void AdhereMujocoHardware::setModelSourceOverride(
+  const std::string & pkg_description, const std::string & mjcf_file)
+{
+  pkgDescriptionOverride() = pkg_description;
+  mjcfFileOverride() = mjcf_file;
+}
 
 AdhereMujocoHardware::~AdhereMujocoHardware()
 {
@@ -49,9 +72,29 @@ hardware_interface::return_type AdhereMujocoHardware::configure(
     return hardware_interface::return_type::ERROR;
   }
 
-  const std::string pkg_share =
-    ament_index_cpp::get_package_share_directory("simplified_v1_description");
-  const std::string mjcf_path = pkg_share + "/mjcf/rov_wall.xml";
+  // Zero-recompile model switching (CLAUDE.md Phase 2.12 Section 1): priority order is (1) the
+  // static setModelSourceOverride() set by adhere_mujoco_node from its pkg_description/
+  // mjcf_file node parameters, (2) the <hardware><param name="pkg_description"/"mjcf_file">
+  // HardwareInfo entries (useful for standalone pluginlib use without adhere_mujoco_node), (3)
+  // the original hardcoded default -- preserving byte-identical behavior for every existing
+  // launch invocation that passes neither.
+  std::string pkg_description = "simplified_v1_description";
+  std::string mjcf_file = "mjcf/rov_wall.xml";
+  if (info.hardware_parameters.count("pkg_description")) {
+    pkg_description = info.hardware_parameters.at("pkg_description");
+  }
+  if (info.hardware_parameters.count("mjcf_file")) {
+    mjcf_file = info.hardware_parameters.at("mjcf_file");
+  }
+  if (!pkgDescriptionOverride().empty()) {
+    pkg_description = pkgDescriptionOverride();
+  }
+  if (!mjcfFileOverride().empty()) {
+    mjcf_file = mjcfFileOverride();
+  }
+
+  const std::string pkg_share = ament_index_cpp::get_package_share_directory(pkg_description);
+  const std::string mjcf_path = pkg_share + "/" + mjcf_file;
 
   char error[1000] = "";
   model_ = mj_loadXML(mjcf_path.c_str(), nullptr, error, sizeof(error));
@@ -70,9 +113,29 @@ hardware_interface::return_type AdhereMujocoHardware::configure(
   model_->vis.scale.framelength = 0.04;
   model_->vis.scale.framewidth = 0.002;
 
+  // Root-body resolution fallback chain (CLAUDE.md Phase 2.12 Section 2): "rov_base" first
+  // (rov_wall.xml and every existing model), then the quadruped_ros2_control-style convention
+  // "base_link", and finally -- for a totally unnamed future model -- the first body owning a
+  // free joint (mjJNT_FREE), since this hardware is only ever meaningful for a single floating
+  // rigid vehicle.
   body_id_ = mj_name2id(model_, mjOBJ_BODY, "rov_base");
   if (body_id_ < 0) {
-    RCLCPP_ERROR(logger(), "Body 'rov_base' not found in MJCF");
+    body_id_ = mj_name2id(model_, mjOBJ_BODY, "base_link");
+  }
+  if (body_id_ < 0) {
+    for (int b = 1; b < model_->nbody; ++b) {
+      if (model_->body_jntnum[b] == 1 &&
+          model_->jnt_type[model_->body_jntadr[b]] == mjJNT_FREE) {
+        body_id_ = b;
+        break;
+      }
+    }
+  }
+  if (body_id_ < 0) {
+    RCLCPP_ERROR(
+      logger(),
+      "No root body found in MJCF '%s' (tried 'rov_base', 'base_link', and any free-joint body)",
+      mjcf_path.c_str());
     return hardware_interface::return_type::ERROR;
   }
 
@@ -114,12 +177,32 @@ hardware_interface::return_type AdhereMujocoHardware::configure(
       return hardware_interface::return_type::ERROR;
     }
     actuator_id_[i] = act_id;
+
+    // Dynamic thruster rail limits (CLAUDE.md Phase 2.12 Section 3): read straight from this
+    // actuator's own ctrlrange instead of a hardcoded +-40N constant, so a future model
+    // declaring different bounds in its MJCF never needs a C++ recompile. Falls back to
+    // [-40, 40] only if the actuator declares no limit (ctrlrange[0] >= ctrlrange[1]).
+    const bool has_ctrlrange =
+      model_->actuator_ctrllimited[act_id] != 0 &&
+      model_->actuator_ctrlrange[2 * act_id + 0] < model_->actuator_ctrlrange[2 * act_id + 1];
+    thruster_ctrl_min_[i] = has_ctrlrange ? model_->actuator_ctrlrange[2 * act_id + 0] : -40.0;
+    thruster_ctrl_max_[i] = has_ctrlrange ? model_->actuator_ctrlrange[2 * act_id + 1] : 40.0;
+    vis_bridge_->thruster_ctrl_min[i] = thruster_ctrl_min_[i];
+    vis_bridge_->thruster_ctrl_max[i] = thruster_ctrl_max_[i];
   }
 
   // Always starts in Calm Water (CLAUDE.md Phase 2.5 Stage 2.3): both plugins are constructed
   // up front and selected at runtime via setWaveMode(), never by a static launch-time param.
   calm_plugin_ = std::make_unique<CalmWaterPlugin>();
   gust_plugin_ = std::make_unique<StationKeepingGustPlugin>();
+
+  // Optional per-model MJCF <custom><numeric> overrides (CLAUDE.md Phase 2.12 Section 4):
+  // a no-op for rov_wall.xml (it declares none of the "hydro_*" numeric names), preserving
+  // every existing HydroParams default bit-for-bit; a future model's MJCF can override any
+  // subset of them without touching this header/source.
+  HydroParams::applyMjModelOverrides(model_, calm_plugin_->mutableHydroParams());
+  HydroParams::applyMjModelOverrides(model_, gust_plugin_->mutableHydroParams());
+
   wave_mode_.store(1);
   wave_trigger_time_.store(0.0);
   RCLCPP_INFO(logger(), "AdhereMujocoHardware: configured, starting in Calm Water mode");
@@ -416,6 +499,10 @@ hardware_interface::return_type AdhereMujocoHardware::write()
     step_count_ = 0;
     have_prev_vel_ = false;
     last_accel_step_count_ = -1;
+    // Phase 2.12 Item 5B: clear the first-order ESC lag filter state too, otherwise stale
+    // lagged thrust from before the reset leaks into the first post-reset step whenever
+    // enable_thruster_lag is active.
+    applied_thrust_.fill(0.0);
   }
 
   // GUI "Reset Stats" request (Phase 2.11 Section 2), independent of the full physics reset
@@ -456,16 +543,18 @@ hardware_interface::return_type AdhereMujocoHardware::write()
   // so a controller and manual testing never silently fight over the same channel without the
   // user noticing. AdhereMujocoHardware reads whatever value currently sits in hw_commands_
   // regardless of which rate last wrote it (ESC zero-order hold emulation per CLAUDE.md Sec.3).
-  // Phase 2.11 Section 4: clamp to the +-40N rail limit before applying, and optionally run a
-  // first-order ESC lag filter (tau_T = 15ms) instead of writing the target thrust directly.
-  constexpr double kThrusterRailLimit = 40.0;
+  // Phase 2.11 Section 4 / Phase 2.12 Section 3: clamp to this thruster's own rail limit
+  // (resolved from model_->actuator_ctrlrange at configure() time, not a hardcoded +-40N
+  // constant) before applying, and optionally run a first-order ESC lag filter (tau_T = 15ms)
+  // instead of writing the target thrust directly.
   constexpr double kTauThruster = 0.015;
   const double dt = model_->opt.timestep;
   const double alpha_t = 1.0 - std::exp(-dt / kTauThruster);
   const bool lag_enabled = vis_bridge_->enable_thruster_lag.load();
   for (size_t i = 0; i < kThrusterNames.size(); ++i) {
     const double u_target = std::clamp(
-      hw_commands_[i] + vis_bridge_->manual_ctrl[i].load(), -kThrusterRailLimit, kThrusterRailLimit);
+      hw_commands_[i] + vis_bridge_->manual_ctrl[i].load(), thruster_ctrl_min_[i],
+      thruster_ctrl_max_[i]);
     if (lag_enabled) {
       if (step_occurs) {
         applied_thrust_[i] = (1.0 - alpha_t) * applied_thrust_[i] + alpha_t * u_target;

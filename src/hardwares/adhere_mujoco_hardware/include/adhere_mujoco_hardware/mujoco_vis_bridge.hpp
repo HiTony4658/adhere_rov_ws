@@ -50,6 +50,13 @@ struct MujocoVisBridge
   //     precedent) ---
   std::array<std::array<double, 3>, 4> pad_site_pos_body{};  // [TL,TR,BL,BR] body-local (x,y,z)
 
+  // Per-thruster rail limits (Phase 2.12 Section 3), resolved once from
+  // model_->actuator_ctrlrange in AdhereMujocoHardware::configure() -- lets MujocoViewer's
+  // thruster sliders adapt to any future MJCF's actuator bounds instead of a hardcoded
+  // "-40 40" string.
+  std::array<double, 8> thruster_ctrl_min{};
+  std::array<double, 8> thruster_ctrl_max{};
+
   // --- GUI -> hardware control requests (lock-free atomics) ---
   std::atomic<bool> paused{false};
   std::atomic<bool> reset_request{false};

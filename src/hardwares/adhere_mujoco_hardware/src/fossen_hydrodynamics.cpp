@@ -8,6 +8,47 @@
 namespace adhere_mujoco_hardware
 {
 
+void HydroParams::applyMjModelOverrides(const mjModel * m, HydroParams & params)
+{
+  // Looks up a <custom><numeric name="name" data="..."/> entry by name; returns nullptr (and
+  // leaves the corresponding field untouched) if the MJCF declares no numeric of that name --
+  // true for every name below on rov_wall.xml today, which is exactly the required zero-
+  // regression default.
+  auto findNumeric = [m](const char * name, int min_size) -> const double * {
+    const int id = mj_name2id(m, mjOBJ_NUMERIC, name);
+    if (id < 0 || m->numeric_size[id] < min_size) {
+      return nullptr;
+    }
+    return m->numeric_data + m->numeric_adr[id];
+  };
+  auto scalarOverride = [&](const char * name, double & field) {
+    if (const double * d = findNumeric(name, 1)) {
+      field = d[0];
+    }
+  };
+  auto vec3Override = [&](const char * name, Eigen::Vector3d & field) {
+    if (const double * d = findNumeric(name, 3)) {
+      field = Eigen::Vector3d(d[0], d[1], d[2]);
+    }
+  };
+
+  scalarOverride("hydro_vehicle_mass", params.vehicle_mass);
+  scalarOverride("hydro_augmented_mass", params.augmented_mass);
+  scalarOverride("hydro_displaced_volume", params.displaced_volume);
+  vec3Override("hydro_cob_offset_body", params.cob_offset_body);
+  scalarOverride("hydro_z_surface", params.z_surface);
+  vec3Override("hydro_D_lin", params.D_lin);
+  vec3Override("hydro_D_quad", params.D_quad);
+  vec3Override("hydro_D_ang_lin", params.D_ang_lin);
+  vec3Override("hydro_D_ang_quad", params.D_ang_quad);
+  scalarOverride("hydro_C_venturi", params.C_venturi);
+  scalarOverride("hydro_h_gap_nominal", params.h_gap_nominal);
+  scalarOverride("hydro_A_plate", params.A_plate);
+  scalarOverride("hydro_C_squeeze", params.C_squeeze);
+  scalarOverride("hydro_Cd_normal", params.Cd_normal);
+  scalarOverride("hydro_Cf_tangent", params.Cf_tangent);
+}
+
 Wrench FossenHydrodynamics::compute(
   const RigidBodyState & state, double t, const HydroParams & params, HydroModelMode mode,
   const HydroGeometryModel * geo)
@@ -112,7 +153,11 @@ Wrench FossenHydrodynamics::compute(
       // X=0 wall -- do NOT subtract params.wall_x_offset a second time.
       const double x_world_p = state.com_pos_world.x() + (R * r_p).x();
       const double h_gap_p = std::max(x_world_p, 0.005);
-      const double v_tan_sq_p = v_t.y() * v_t.y() + v_t.z() * v_t.z();
+      // v_t is already the exact 3D tangential velocity on the patch plane (v_p_body minus
+      // its normal component) -- squaredNorm() is identical to y^2+z^2 for a flat [-1,0,0]^T
+      // patch (rov_wall.xml) and generalizes correctly to curved 3D CAD hull patches whose
+      // normal is not axis-aligned (Phase 2.12 Item 5A).
+      const double v_tan_sq_p = v_t.squaredNorm();
       const double decay =
         std::exp(-std::max(0.0, h_gap_p - params.h_gap_nominal) / params.h0_decay);
       // n_p = [-1,0,0]^T here, so the +sign below yields a -X (wall-attractive) suction force.
@@ -451,15 +496,45 @@ HydroGeometryModel HydroGeometryModel::buildFromMjModel(const mjModel * m, int r
   HydroGeometryModel geo;
   std::vector<SurfacePatch> raw;
 
-  // rov_wall.xml confirmed: root_body_id ("rov_base") has no welded child bodies -- all pad
-  // and chassis geoms are direct geoms of this one body. TODO: if a future MJCF adds welded
-  // child bodies, extend this filter to recurse via m->body_parentid.
+  // Welded-subtree membership + composed root-frame transform (CLAUDE.md Phase 2.12 Section
+  // 2): body b belongs to root_body_id's rigid hull subtree iff b == root_body_id, or its
+  // parent already belongs to the subtree AND b itself carries zero joints (body_jntnum == 0,
+  // i.e. rigidly welded to that parent -- NOT merely "reachable", since a non-welded
+  // intermediate body breaks the rigid chain for every one of its descendants too). MuJoCo
+  // guarantees body_parentid[b] < b for every b > 0, so a single forward pass over increasing
+  // body index is sufficient -- no need to walk the tree recursively or sort it first.
+  std::vector<bool> is_rigid(static_cast<size_t>(m->nbody), false);
+  std::vector<Eigen::Vector3d> pos_in_root(static_cast<size_t>(m->nbody), Eigen::Vector3d::Zero());
+  std::vector<Eigen::Quaterniond> quat_in_root(
+    static_cast<size_t>(m->nbody), Eigen::Quaterniond::Identity());
+  is_rigid[static_cast<size_t>(root_body_id)] = true;
+  for (int b = 0; b < m->nbody; ++b) {
+    if (b == root_body_id || is_rigid[static_cast<size_t>(b)]) {
+      continue;  // root itself, already resolved above
+    }
+    const int parent = m->body_parentid[b];
+    if (parent < 0 || !is_rigid[static_cast<size_t>(parent)] || m->body_jntnum[b] != 0) {
+      continue;  // not reachable, or this body itself has a non-welded joint to its parent
+    }
+    is_rigid[static_cast<size_t>(b)] = true;
+    const Eigen::Vector3d local_pos(
+      m->body_pos[3 * b + 0], m->body_pos[3 * b + 1], m->body_pos[3 * b + 2]);
+    const Eigen::Quaterniond local_quat(
+      m->body_quat[4 * b + 0], m->body_quat[4 * b + 1], m->body_quat[4 * b + 2],
+      m->body_quat[4 * b + 3]);
+    pos_in_root[static_cast<size_t>(b)] =
+      pos_in_root[static_cast<size_t>(parent)] +
+      quat_in_root[static_cast<size_t>(parent)] * local_pos;
+    quat_in_root[static_cast<size_t>(b)] = quat_in_root[static_cast<size_t>(parent)] * local_quat;
+  }
+
   Eigen::Vector3d aabb_min = Eigen::Vector3d::Constant(1e9);
   Eigen::Vector3d aabb_max = Eigen::Vector3d::Constant(-1e9);
   bool any_geom = false;
 
   for (int g = 0; g < m->ngeom; ++g) {
-    if (m->geom_bodyid[g] != root_body_id) {
+    const int gbody = m->geom_bodyid[g];
+    if (!is_rigid[static_cast<size_t>(gbody)]) {
       continue;
     }
     // The 4 small rubber contact-pad spheres are modeled by MuJoCo's own Kelvin-Voigt contact
@@ -471,8 +546,28 @@ HydroGeometryModel HydroGeometryModel::buildFromMjModel(const mjModel * m, int r
       continue;
     }
     any_geom = true;
-    const double * geom_pos = &m->geom_pos[3 * g];
-    const double * geom_quat = &m->geom_quat[4 * g];
+
+    // Compose this geom's own body-local pose with its body's accumulated welded-chain
+    // transform, so every patch below ends up expressed in root_body_id's frame regardless of
+    // how many welded child bodies it had to pass through (identity composition when gbody ==
+    // root_body_id, reproducing Phase 2.11's exact byte-identical output for rov_wall.xml).
+    const Eigen::Vector3d geom_local_pos(
+      m->geom_pos[3 * g + 0], m->geom_pos[3 * g + 1], m->geom_pos[3 * g + 2]);
+    const Eigen::Quaterniond geom_local_quat(
+      m->geom_quat[4 * g + 0], m->geom_quat[4 * g + 1], m->geom_quat[4 * g + 2],
+      m->geom_quat[4 * g + 3]);
+    const Eigen::Vector3d composed_pos_vec =
+      pos_in_root[static_cast<size_t>(gbody)] +
+      quat_in_root[static_cast<size_t>(gbody)] * geom_local_pos;
+    const Eigen::Quaterniond composed_quat_eigen =
+      quat_in_root[static_cast<size_t>(gbody)] * geom_local_quat;
+    const double composed_pos[3] = {
+      composed_pos_vec.x(), composed_pos_vec.y(), composed_pos_vec.z()};
+    const double composed_quat[4] = {
+      composed_quat_eigen.w(), composed_quat_eigen.x(), composed_quat_eigen.y(),
+      composed_quat_eigen.z()};
+    const double * geom_pos = composed_pos;
+    const double * geom_quat = composed_quat;
     const double * size = &m->geom_size[3 * g];
     const double rbound = m->geom_rbound[g];
     const Eigen::Vector3d center(geom_pos[0], geom_pos[1], geom_pos[2]);

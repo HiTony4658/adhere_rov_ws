@@ -106,6 +106,14 @@ struct HydroParams
     }
     return a;
   }
+
+  // Optional per-model override hook (CLAUDE.md Phase 2.12 Section 4): scans m->nnumeric for
+  // <custom><numeric name="hydro_..." data="..."/> entries by name and overwrites the
+  // corresponding field in params if present, leaving params completely untouched for any
+  // name absent from the MJCF (true for rov_wall.xml today -- zero regression). Lets a future
+  // ROV model embed its own dry mass/displaced volume/drag coefficients/etc directly in its
+  // own MJCF without editing this header's hardcoded defaults.
+  static void applyMjModelOverrides(const mjModel * m, HydroParams & params);
 };
 
 // Rigid-body kinematic state needed to evaluate the hydrodynamic wrench, expressed exactly
@@ -156,14 +164,21 @@ struct HydroGeometryModel
   Eigen::Matrix3d added_mass_linear = Eigen::Matrix3d::Zero();    // M_A (3x3), Lamb-ellipsoid est.
   Eigen::Matrix3d added_mass_angular = Eigen::Matrix3d::Zero();   // I_A (3x3), Lamb-ellipsoid est.
 
-  // Tessellates every geom belonging to root_body_id into surface patches (box: 6 faces x
-  // 4x4 grid; sphere/capsule/cylinder/ellipsoid: latitude/longitude grids; mesh: one patch
-  // per triangle), decimates to <=256 patches via area-weighted spatial-grid bucketing if
-  // needed, and estimates the anisotropic added-mass tensors from the resulting bounding-box
-  // half-extents via Lamb's classical ellipsoid approximation. root_body_id's geoms are
-  // assumed to all be direct geoms of that one body (no welded child-body recursion -- true
-  // for the current rov_wall.xml; extend via m->body_parentid if a future model adds welded
-  // children).
+  // Tessellates every geom belonging to root_body_id's rigid hull subtree into surface patches
+  // (box: 6 faces x 4x4 grid; sphere/capsule/cylinder/ellipsoid: latitude/longitude grids;
+  // mesh: one patch per triangle), decimates to <=256 patches via area-weighted spatial-grid
+  // bucketing if needed, and estimates the anisotropic added-mass tensors from the resulting
+  // bounding-box half-extents via Lamb's classical ellipsoid approximation.
+  //
+  // "Rigid hull subtree" (CLAUDE.md Phase 2.12 Section 2) includes root_body_id itself plus any
+  // body reachable from it through a chain of welded (body_jntnum == 0) child bodies -- e.g. a
+  // future CAD model's hull fairing or buoyancy foam attached as a welded <body> rather than a
+  // direct <geom> of root_body_id. Each such child body's geoms are composed through its own
+  // welded parent chain (via m->body_pos/body_quat) into root_body_id's frame before
+  // tessellation, so every patch's centroid_body/normal_body stays in the one consistent root-
+  // body frame FossenHydrodynamics::compute() expects. For rov_wall.xml (root_body_id has no
+  // child bodies) the composed transform is always the identity, reproducing the exact same 96
+  // patches as before this generalization.
   static HydroGeometryModel buildFromMjModel(const mjModel * m, int root_body_id);
 };
 

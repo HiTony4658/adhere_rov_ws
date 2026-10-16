@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstdio>
+#include <fstream>
+#include <string>
 
 #include "adhere_mujoco_hardware/fossen_hydrodynamics.hpp"
 #include "ament_index_cpp/get_package_share_directory.hpp"
@@ -224,6 +227,84 @@ TEST_F(HydroGeometryModelFixture, StonefishVenturiAndSqueezePhysicalSigns)
   const Wrench w_sep = FossenHydrodynamics::compute(
     state_sep, 0.0, params, HydroModelMode::kStonefishGeometryDriven, &geo);
   EXPECT_LT(w_sep.force_world.x(), w_rest.force_world.x() - 0.5);
+}
+
+// Phase 2.12 Section 2/4/3: a minimal in-memory MJCF (written to a temp file for mj_loadXML,
+// which has no pure-string-buffer entry point) exercising the three model-agnostic additions
+// together: a welded child body ("fairing_child", zero joints -- rigidly attached) whose geom
+// must be recursively pulled into "base_link"'s frame by HydroGeometryModel::buildFromMjModel(),
+// a <custom><numeric> hydro_vehicle_mass override, and an actuator with a non-default
+// ctrlrange (verifying the MJCF itself carries whatever bounds a future model declares, which
+// AdhereMujocoHardware::configure() -- not exercised directly by this gtest binary, which has
+// no ResourceManager/pluginlib context -- would read via actuator_ctrlrange).
+TEST(ModelAgnosticHydro, WeldedChildBodyRecursionAndCustomNumerics)
+{
+  constexpr const char * kMjcf = R"xml(
+<mujoco model="welded_test">
+  <compiler angle="radian"/>
+  <option timestep="0.002"/>
+  <custom>
+    <numeric name="hydro_vehicle_mass" data="35.0"/>
+  </custom>
+  <worldbody>
+    <body name="base_link" pos="0 0 0.5">
+      <freejoint name="base_free"/>
+      <inertial pos="0 0 0" mass="35.0" diaginertia="1.0 1.0 1.0"/>
+      <geom name="base_box" type="box" size="0.1 0.1 0.1"/>
+      <site name="thr_test_site" pos="0 0 0" size="0.01"/>
+      <body name="fairing_child" pos="0.2 0 0">
+        <geom name="fairing_box" type="box" size="0.05 0.05 0.05"/>
+      </body>
+    </body>
+  </worldbody>
+  <actuator>
+    <general name="thr_test" site="thr_test_site" gear="1 0 0 0 0 0" ctrlrange="-60 60"
+              gaintype="fixed" gainprm="1" biastype="none"/>
+  </actuator>
+</mujoco>
+)xml";
+
+  const std::string path = "/tmp/adhere_mujoco_hardware_test_welded_body.xml";
+  {
+    std::ofstream out(path);
+    out << kMjcf;
+  }
+
+  char error[1000] = "";
+  mjModel * model = mj_loadXML(path.c_str(), nullptr, error, sizeof(error));
+  std::remove(path.c_str());
+  ASSERT_NE(model, nullptr) << "Failed to load in-memory welded-body MJCF: " << error;
+
+  const int body_id = mj_name2id(model, mjOBJ_BODY, "base_link");
+  ASSERT_GE(body_id, 0);
+  const int act_id = mj_name2id(model, mjOBJ_ACTUATOR, "thr_test");
+  ASSERT_GE(act_id, 0);
+  EXPECT_NEAR(model->actuator_ctrlrange[2 * act_id + 0], -60.0, 1e-9);
+  EXPECT_NEAR(model->actuator_ctrlrange[2 * act_id + 1], 60.0, 1e-9);
+
+  // Welded child-body recursion: base_box (6 faces x 4x4 = 96 patches) + fairing_box (96
+  // patches) = 192 total, all pulled into base_link's frame and under the 256-patch decimation
+  // budget, so this is an exact (not area-weighted-merged) count.
+  const HydroGeometryModel geo = HydroGeometryModel::buildFromMjModel(model, body_id);
+  EXPECT_EQ(geo.patches.size(), 192u);
+
+  // fairing_child is only reachable from base_link through the welded-subtree recursion (its
+  // geom is a direct child of "fairing_child", not "base_link") -- a patch centroid this far
+  // along +X in base_link's own frame is only possible if that recursion actually ran.
+  double max_x = -1e9;
+  for (const auto & p : geo.patches) {
+    max_x = std::max(max_x, p.centroid_body.x());
+  }
+  EXPECT_GT(max_x, 0.15);
+
+  // <custom><numeric name="hydro_vehicle_mass" data="35.0"/> override.
+  HydroParams params;  // default vehicle_mass == 20.0
+  HydroParams::applyMjModelOverrides(model, params);
+  EXPECT_NEAR(params.vehicle_mass, 35.0, 1e-9);
+  // Names absent from this MJCF must leave their defaults untouched.
+  EXPECT_NEAR(params.augmented_mass, 26.0, 1e-9);
+
+  mj_deleteModel(model);
 }
 
 int main(int argc, char ** argv)

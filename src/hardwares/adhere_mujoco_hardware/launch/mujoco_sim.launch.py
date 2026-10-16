@@ -7,6 +7,14 @@ not via a launch-time argument.
 One-line usage:
     ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py
     ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py headless:=true use_rviz:=false
+
+Zero-recompile model switching (CLAUDE.md Phase 2.12 Section 1): pkg_description/mjcf_file/
+xacro_file default to simplified_v1_description's rov_wall.xml + its xacro entry point.
+Switching to a future robot description package requires only overriding these three launch
+arguments -- no AdhereMujocoHardware C++ recompilation:
+    ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py \
+        pkg_description:=my_new_rov_description mjcf_file:=mjcf/my_rov.xml \
+        xacro_file:=urdf/my_rov.urdf.xacro
 """
 import os
 
@@ -20,7 +28,6 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    description_share = get_package_share_directory("simplified_v1_description")
     hardware_share = get_package_share_directory("adhere_mujoco_hardware")
 
     headless = LaunchConfiguration("headless")
@@ -31,8 +38,17 @@ def generate_launch_description():
         description="If true, AdhereMujocoHardware skips the embedded GLFW/OpenGL viewer window.")
     declare_use_rviz = DeclareLaunchArgument(
         "use_rviz", default_value="true", description="Whether to launch RViz2 alongside.")
-
-    xacro_file = os.path.join(description_share, "urdf", "simplified_v1.urdf.xacro")
+    declare_pkg_description = DeclareLaunchArgument(
+        "pkg_description", default_value="simplified_v1_description",
+        description="Robot description package providing the xacro/MJCF model (CLAUDE.md "
+                     "Phase 2.12): override to switch ROV models with zero C++ recompilation.")
+    declare_mjcf_file = DeclareLaunchArgument(
+        "mjcf_file", default_value="mjcf/rov_wall.xml",
+        description="MJCF file path, relative to pkg_description's share directory.")
+    declare_xacro_file = DeclareLaunchArgument(
+        "xacro_file", default_value="urdf/simplified_v1.urdf.xacro",
+        description="URDF/xacro entry-point file path, relative to pkg_description's share "
+                     "directory.")
 
     def _make_robot_description(context):
         # Pure-xacro decoupling (CLAUDE.md Phase 2.6 Stage 2.1): simplified_v1.urdf.xacro takes
@@ -40,6 +56,11 @@ def generate_launch_description():
         # `headless` is instead passed as a plain ROS 2 node parameter to adhere_mujoco_node,
         # which forwards it to AdhereMujocoHardware::setHeadless() after configure() but before
         # start_components() triggers start() (where MujocoViewer is actually constructed).
+        pkg_description_value = context.launch_configurations["pkg_description"]
+        mjcf_file_value = context.launch_configurations["mjcf_file"]
+        xacro_file_value = context.launch_configurations["xacro_file"]
+        description_share = get_package_share_directory(pkg_description_value)
+        xacro_file = os.path.join(description_share, xacro_file_value)
         processed = xacro.process_file(xacro_file).toxml()
         headless_value = context.launch_configurations["headless"] == "true"
         return [
@@ -55,7 +76,12 @@ def generate_launch_description():
                 executable="adhere_mujoco_node",
                 name="adhere_mujoco_node",
                 output="screen",
-                parameters=[{"robot_description": processed, "headless": headless_value}],
+                parameters=[{
+                    "robot_description": processed,
+                    "headless": headless_value,
+                    "pkg_description": pkg_description_value,
+                    "mjcf_file": mjcf_file_value,
+                }],
             ),
         ]
 
@@ -75,6 +101,9 @@ def generate_launch_description():
         [
             declare_headless,
             declare_use_rviz,
+            declare_pkg_description,
+            declare_mjcf_file,
+            declare_xacro_file,
             adhere_mujoco_node,
             rviz,
         ]

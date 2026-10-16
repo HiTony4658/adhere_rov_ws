@@ -463,6 +463,68 @@ GLFW 窗口创建，仅空转等待停止信号。
 与 `[7.0,8.2]s` 的阵风窗口内可观察到额外的侧向/吸附扰动，均与预期物理行为一致；
 再次切回模式 `1` 后环境流速立即归零。
 
+## 跨模型零重编扩展指南（如何无缝切换新的 ROV 模型包）
+
+`adhere_mujoco_hardware` 本身不包含任何与 `simplified_v1_description`/
+`rov_wall.xml` 绑定的硬编码假设——换到一个全新的 ROV 模型包（例如未来的全 CAD
+网格模型 `full_cad_description`，拥有不同的壳体尺寸、焊接子刚体、质量/浮力或
+推力器量程）只需要在启动时指定三个 launch 参数，**无需修改任何 C++ 源码或
+重新编译**：
+
+```bash
+ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py \
+    pkg_description:=full_cad_description \
+    mjcf_file:=mjcf/full_cad.xml \
+    xacro_file:=urdf/full_cad.urdf.xacro
+```
+
+不传任何参数时三者分别默认为 `simplified_v1_description`/`mjcf/rov_wall.xml`/
+`urdf/simplified_v1.urdf.xacro`，与改动前完全一致。支撑这一点的 4 项机制：
+
+1. **启动时模型来源解析**：`mujoco_sim.launch.py` 把 `pkg_description`/
+   `mjcf_file` 作为 `adhere_mujoco_node` 的 ROS 2 节点参数传入；该节点在构造
+   `hardware_interface::ResourceManager`（其构造函数内部同步调用
+   `AdhereMujocoHardware::configure()`）**之前**调用静态方法
+   `AdhereMujocoHardware::setModelSourceOverride(pkg, mjcf)` 把这两个值记入
+   一对静态变量——之所以必须是静态方法而不是实例方法，是因为此时
+   `AdhereMujocoHardware` 实例尚未被 pluginlib 构造出来，根本没有
+   `activeInstance()` 可调用。`configure()` 内部的解析优先级为：
+   ① `setModelSourceOverride` 的静态覆盖值 → ② `<hardware><param
+   name="pkg_description"/"mjcf_file">`（`HardwareInfo::hardware_parameters`，
+   供脱离 `adhere_mujoco_node`、直接用 pluginlib 的场景使用）→
+   ③ 硬编码默认值 `simplified_v1_description`/`mjcf/rov_wall.xml`。
+2. **焊接子刚体递归（`HydroGeometryModel::buildFromMjModel()`）**：不再只收集
+   `root_body_id` 自身的直属 `<geom>`，而是先对 `mjModel` 做一次正向遍历
+   （MuJoCo 保证 `body_parentid[b] < b`，单次遍历即可），判定每个刚体 `b`
+   是否属于 `root_body_id` 的"刚性壳体子树"——即 `b` 本身零自由度
+   （`body_jntnum[b]==0`，真正被"焊接"而非挂关节）且其父节点也在该子树内；
+   再沿焊接父链累乘 `body_pos`/`body_quat` 得到每个子刚体相对 `root_body_id`
+   的复合位姿，把该子刚体每个 `<geom>` 的局部位姿与之复合后才送入
+   `tessellateBox`/`tessellateMesh` 等切分函数。对 `rov_wall.xml`
+   （`rov_base` 无子刚体）该复合变换恒为单位变换，输出与改动前逐位一致的
+   `96` 个微元；对未来带焊接整流罩/浮力泡沫子刚体的 CAD 模型，这些子刚体的
+   几何会被自动拉回 `root_body_id` 坐标系参与水动力切分。
+3. **根刚体名称回退链**：`AdhereMujocoHardware::configure()` 依次尝试
+   `"rov_base"` → `"base_link"` → 模型中第一个拥有自由关节
+   （`mjJNT_FREE`）的刚体，不再要求新模型必须沿用 `"rov_base"` 这个具体
+   名字。
+4. **推力器轨道上限动态解析 + MJCF `<custom><numeric>` 水动力参数覆盖**：
+   `configure()` 为每个推力器从其自身 `model_->actuator_ctrlrange` 读取
+   量程（声明了 `ctrlrange` 则采用之，否则回退到 `±40N`），写入
+   `MujocoVisBridge::thruster_ctrl_min/max`（与 `pad_site_pos_body` 相同的
+   "一次写入、全程只读"模式），`write()` 的钳位与 `MujocoViewer` 右侧边栏的
+   8 个滑条量程均读取这对数组，而不是硬编码的 `"-40 40"`。同时
+   `HydroParams::applyMjModelOverrides(m, params)` 会扫描 MJCF 的
+   `<custom><numeric name="hydro_..." data="..."/>` 条目（支持
+   `hydro_vehicle_mass`/`hydro_augmented_mass`/`hydro_displaced_volume`/
+   `hydro_cob_offset_body`/`hydro_z_surface`/`hydro_D_lin`/`hydro_D_quad`/
+   `hydro_D_ang_lin`/`hydro_D_ang_quad`/`hydro_C_venturi`/
+   `hydro_h_gap_nominal`/`hydro_A_plate`/`hydro_C_squeeze`/`hydro_Cd_normal`/
+   `hydro_Cf_tangent` 共 14 个名字），MJCF 未声明的名字保持 `HydroParams`
+   默认值不变（`rov_wall.xml` 目前一个都未声明，因此零回归）；未来模型可以
+   直接在自己的 MJCF 里覆盖任意子集的水动力参数，完全不需要改动这个包的
+   头文件默认值。
+
 ## 运行
 
 ```bash
@@ -474,6 +536,11 @@ ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py
 
 # 无头模式（无 GLFW 窗口），不启动 RViz2
 ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py headless:=true use_rviz:=false
+
+# 切换到另一个模型描述包，零 C++ 重编译（见上方"跨模型零重编扩展指南"）
+ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py \
+    pkg_description:=full_cad_description mjcf_file:=mjcf/full_cad.xml \
+    xacro_file:=urdf/full_cad.urdf.xacro
 
 # 无 GUI 窗口时，用话题一次性切换造浪（例如配合 headless:=true 做脚本化测试）
 ros2 topic pub /rov/wave_mode_cmd std_msgs/msg/Int32 "{data: 2}" --once   # 开启造浪
