@@ -18,6 +18,7 @@
 #include "adhere_mujoco_hardware/fossen_hydrodynamics.hpp"
 #include "adhere_mujoco_hardware/mujoco_vis_bridge.hpp"
 #include "adhere_mujoco_hardware/mujoco_viewer.hpp"
+#include "adhere_mujoco_hardware/rhombic_kern.hpp"
 
 namespace adhere_mujoco_hardware
 {

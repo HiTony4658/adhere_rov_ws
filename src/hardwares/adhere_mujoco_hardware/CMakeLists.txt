@@ -144,6 +144,15 @@ if(BUILD_TESTING)
     include ${MUJOCO_INCLUDE_DIR} ${EIGEN3_INCLUDE_DIR})
   target_link_libraries(test_fossen_hydrodynamics_geometry ${MUJOCO_LIBRARY})
   ament_target_dependencies(test_fossen_hydrodynamics_geometry ament_index_cpp)
+
+  # Header-only (adhere_mujoco_hardware/rhombic_kern.hpp): no MuJoCo/mjModel/ResourceManager
+  # dependency, so this target needs neither MUJOCO_LIBRARY nor ament_index_cpp -- the
+  # hydrodynamic-accuracy audit's "no test coverage for the 500Hz ESC/Rhombic-Kern logic"
+  # finding, addressed by factoring that logic out into pure, independently-testable functions.
+  ament_add_gtest(test_rhombic_kern_and_thruster_model
+    test/test_rhombic_kern_and_thruster_model.cpp
+  )
+  target_include_directories(test_rhombic_kern_and_thruster_model PRIVATE include)
 endif()
 
 ament_package()

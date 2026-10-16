@@ -47,6 +47,15 @@
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
   <test_depend>ament_cmake_gtest</test_depend>
+  <!-- test/test_fossen_hydrodynamics_geometry.cpp loads simplified_v1_description's real
+       mjcf/rov_wall.xml via ament_index_cpp::get_package_share_directory() at test-run time
+       (hydrodynamic-accuracy audit finding: this was previously undeclared, so an isolated,
+       single-package colcon test invocation had no guarantee that package was already built).
+       Declaring it as test_depend only (not depend/exec_depend) does NOT reintroduce the
+       colcon build-order cycle documented above: simplified_v1_description's own package.xml
+       declares zero dependency (of any kind) back on this package, so this is a
+       one-directional edge, not a cycle. -->
+  <test_depend>simplified_v1_description</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

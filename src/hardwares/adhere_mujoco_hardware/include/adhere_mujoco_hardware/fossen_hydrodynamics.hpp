@@ -179,7 +179,17 @@ struct HydroGeometryModel
   // body frame FossenHydrodynamics::compute() expects. For rov_wall.xml (root_body_id has no
   // child bodies) the composed transform is always the identity, reproducing the exact same 96
   // patches as before this generalization.
-  static HydroGeometryModel buildFromMjModel(const mjModel * m, int root_body_id);
+  //
+  // rho_water (hydrodynamic-accuracy audit fix): the fluid density used to scale the Lamb-
+  // ellipsoid added-mass tensors below. Previously hardcoded to 1000.0 kg/m^3 independent of
+  // whatever HydroParams::rho_water the caller's FlowEnvironmentPlugin actually configured --
+  // inconsistent with F_fk_am_body's Froude-Krylov term in compute(), which always reads the
+  // live params.rho_water. The caller should pass the vehicle's one canonical water density
+  // (water density is an environmental constant, not a per-flow-profile property, so every
+  // FlowEnvironmentPlugin is expected to agree on it); defaults to 1000.0 so every existing call
+  // site/test that omits this argument reproduces prior behavior bit-for-bit.
+  static HydroGeometryModel buildFromMjModel(
+    const mjModel * m, int root_body_id, double rho_water = 1000.0);
 };
 
 // Per-term decomposition of the wrench FossenHydrodynamics::compute() returns (Phase 2.13),

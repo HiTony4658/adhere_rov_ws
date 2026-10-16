@@ -235,6 +235,7 @@ void MujocoViewer::buildUi1()
     {mjITEM_SECTION, "Thrusters (Manual)", mjSECT_OPEN, nullptr, "", 0},
     {mjITEM_BUTTON, "Zero All", 1, nullptr, "", 0},
     {mjITEM_CHECKBYTE, "Thruster Lag (15ms)", 1, &ui_thruster_lag_, "", 0},
+    {mjITEM_CHECKBYTE, "Thruster Deadzone (2.0N)", 1, &ui_thruster_deadzone_, "", 0},
     {mjITEM_END, "", 0, nullptr, "", 0}};
   def_thrust_header[1].otherint = kUidZeroThrusters;
   mjui_add(&ui1_, def_thrust_header);
@@ -1154,6 +1155,7 @@ void MujocoViewer::renderFrame()
   bridge_->hydro_mode.store(ui_hydro_mode_);
   bridge_->sim_speed_factor.store(kSimSpeedValues[ui_sim_speed_]);
   bridge_->enable_thruster_lag.store(ui_thruster_lag_ != 0);
+  bridge_->enable_thruster_deadzone.store(ui_thruster_deadzone_ != 0);
 
   for (int i = 0; i < 8; ++i) {
     bridge_->manual_ctrl[static_cast<size_t>(i)].store(thruster_slider_[i]);

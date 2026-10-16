@@ -913,3 +913,92 @@ ClosedLoopTerminalVelocityAndRollStability`，实际 `mj_step` 仿真）。
 - `ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py headless:=true
   use_rviz:=false` 成功 `configure()` 并输出 "HydroGeometryModel built with
   96 surface patches"，确认 3 项修复未破坏启动路径。
+
+## Phase 2.14（2026-10-16）：水动力学精度审计修复、壁面邻近附加质量增强、500Hz 逻辑测试覆盖补齐
+
+### 目标
+
+对 `adhere_mujoco_hardware` 全量源码（`adhere_mujoco_hardware.cpp/.hpp`、
+`fossen_hydrodynamics.cpp/.hpp`、`flow_environment_plugin.cpp/.hpp`、
+`mujoco_viewer.cpp/.hpp`、`adhere_mujoco_node.cpp`、构建/测试配置）做一次
+独立于具体 Phase 任务的逐行审计（线程安全、内存管理、ROS 2 Foxy API 兼容性、
+MuJoCo 数据/指针安全、500Hz 数值稳定性），并对审计中确认的问题逐一修复，
+同时实现一项水动力学精度增强、补齐此前完全缺失的 500Hz 逻辑单元测试覆盖。
+
+### 4 项审计修复
+
+1. **`configure()` 错误路径 `model_` 内存泄漏**：`body_id_`/pad 触摸传感器/
+   pad site/推力器 actuator 这 4 处"MJCF 解析失败"早退分支，此前
+   `mj_loadXML()` 已成功加载的 `model_` 未被释放就直接 `return ERROR`，
+   依赖"对象最终被析构"这一未经验证的外部生命周期假设。现在每个分支
+   在返回前显式 `mj_deleteModel(model_); model_ = nullptr;`，使错误路径
+   自身资源安全。
+2. **两种水动力学模式的近壁间隙下限不一致且未文档化**：`kParametricLumped`
+   用 `0.001m`（Python 参考逐位对等锁定的一部分，不可更改），
+   `kStonefishGeometryDriven` 的微元循环用 `0.005m`，此前是两个未命名、
+   未解释的裸常量。拆成 `fossen_hydrodynamics.cpp` 文件作用域内两个显式
+   命名常量 `kWallGapFloorComRef`（CoM 参考点）/`kWallGapFloorPatchRef`
+   （微元表面参考点），数值均未改动（避免打破前者的 Python 对等锁定、
+   或改变后者已被 V&V 套件验证过的近壁挤膜阻尼上限），但现在是有据可查的
+   设计决策而非隐性分歧。
+3. **`HydroGeometryModel` 附加质量张量硬编码 `rho_water=1000.0`，与
+   `FlowEnvironmentPlugin` 实际配置的密度脱节**：`buildFromMjModel()`
+   新增 `rho_water` 参数（默认 `1000.0`，向后兼容每一个既有调用点/测试），
+   `AdhereMujocoHardware::configure()` 改为显式传入
+   `calm_plugin_->getHydroParams().rho_water`，使附加质量张量与
+   `compute()` 内非定常 Froude-Krylov 力项共享同一个"环境水密度"口径。
+4. **Rhombic Kern 的 `L_y`/`L_z` 无下限保护，退化几何会产生 `NaN`**：
+   `write()` 内联的 CoP/`K_val`/掀离/角落陷阱分类逻辑提取为新文件
+   `include/adhere_mujoco_hardware/rhombic_kern.hpp` 的纯函数
+   `classifyRhombicKern()`（不依赖 `mjModel`/`ResourceManager`），为
+   `L_y`/`L_z` 加了 `1e-6m` 下限保护，彻底消除"未来 MJCF 若声明共线
+   （退化）贴垫几何，`kern_val` 会除零变成 `NaN/Inf` 并污染
+   `MujocoVisBridge` 全部下游消费者"的隐患。同一文件还把 ESC 死区
+   （`applyThrusterDeadzone`）与一阶惯性迟滞滤波单步
+   （`applyThrusterLagStep`）一并提取为纯函数，`write()` 中改为调用这三个
+   函数，行为完全不变。
+
+### 水动力学精度增强：壁面邻近附加质量
+
+`kStonefishGeometryDriven` 分支新增基于经典势流镜像法（Lamb, Newman
+*Marine Hydrodynamics* §4.14）的壁面邻近附加质量放大：法向轴
+`1+3(a/2h)³`、切向轴 `1+(3/16)(a/h)³`（`a` 取 `bbox_half_extents` 对应
+分量，`h` 为 CoM 到壁面间隙），应用于 `F_fk_am_body`/`T_munk_body` 内部
+使用的附加质量张量（不回写 `geo.added_mass_linear` 本身，仅在
+`compute()` 内按当次调用的 `h_gap` 局部缩放），钳位在 `6.0` 倍放大以内
+防止镜像级数在 `h→0` 处的理想流体奇异发散。旋转附加惯量未做同等修正
+（需要更高阶多极镜像分析，留作已记录的未来增强项，不虚构未经验证的
+公式）。详见 `adhere_mujoco_hardware/README.md` "双模式水动力引擎"一节。
+
+### 单元测试新增
+
+- `test/test_fossen_hydrodynamics_geometry.cpp` 新增 2 组回归测试：
+  `RhoWaterParameterizationScalesAddedMassLinearly`（验证 `rho_water`
+  对两个附加质量张量严格线性缩放、对几何量零影响）、
+  `WallProximityAddedMassAmplifiesNearWallAndIsBounded`（验证远壁退化、
+  近壁单调放大、贴壁有界钳位三段行为）。
+- 新建 `test/test_rhombic_kern_and_thruster_model.cpp`（9 个用例），覆盖
+  `rhombic_kern.hpp` 的 Rhombic Kern 分类（均匀受载/单垫掀离/角落陷阱/
+  全脱离默认值/**退化共线贴垫不产生 `NaN`**）与 ESC 死区/一阶迟滞滤波的
+  收敛性、平衡点保持、正负对称死区行为——这是 `adhere_mujoco_hardware.cpp`
+  500Hz 主循环逻辑第一次获得单元测试覆盖（此前只有
+  `fossen_hydrodynamics.cpp` 的纯函数被测试）。头文件无 MuJoCo 依赖，
+  `CMakeLists.txt` 新增的 `ament_add_gtest` 目标无需链接 `MUJOCO_LIBRARY`。
+- `package.xml` 补充 `simplified_v1_description` 的 `test_depend`
+  （此前完全未声明，隔离式 `colcon test --packages-select
+  adhere_mujoco_hardware` 在该包尚未构建时会直接运行期异常失败）。确认
+  `simplified_v1_description` 自身 `package.xml` 对本包零依赖声明，这是
+  单向边而非环，不违反现有"避免双向 `depend` 构建环"的约定。
+
+### 验证结果
+
+- `colcon build --packages-up-to adhere_mujoco_hardware` 零警告零错误
+  （`simplified_v1_description` 因新增 `test_depend` 被正确提前构建）。
+- `colcon test --packages-select adhere_mujoco_hardware` 的两个 `gtest`
+  目标合计 **25/25 全部通过**：`test_fossen_hydrodynamics_geometry`
+  16/16（原有 14 组零回归 + 本次新增 2 组），`test_rhombic_kern_and_
+  thruster_model` 9/9（全新）。既存的
+  `copyright`/`cpplint`/`flake8`/`pep257`/`uncrustify` 风格检查在改动前的
+  14 个文件上同样失败（每个文件均缺版权头，与本次改动无关），新增的
+  `rhombic_kern.hpp`/`test_rhombic_kern_and_thruster_model.cpp` 仅复现
+  同一"缺版权头"问题，未引入任何新增类别的风格问题，未处理。

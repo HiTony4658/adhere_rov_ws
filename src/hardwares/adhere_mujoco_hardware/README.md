@@ -21,7 +21,8 @@ include/adhere_mujoco_hardware/
 ├── fossen_hydrodynamics.hpp        # HydroParams / GustEvent / FossenHydrodynamics
 ├── flow_environment_plugin.hpp     # FlowEnvironmentPlugin 策略接口 + 2 个具体插件 + 工厂函数
 ├── mujoco_vis_bridge.hpp           # MujocoVisBridge：500Hz<->60Hz 双向快照/控制桥（mutex 快照 + 原子控制量）
-└── mujoco_viewer.hpp               # MujocoViewer：GLFW/OpenGL 60Hz 交互式渲染线程（mjUI 双侧边栏）
+├── mujoco_viewer.hpp               # MujocoViewer：GLFW/OpenGL 60Hz 交互式渲染线程（mjUI 双侧边栏）
+└── rhombic_kern.hpp                # classifyRhombicKern/ESC 死区+迟滞纯函数（无 mjModel 依赖，独立可测）
 
 src/
 ├── adhere_mujoco_hardware.cpp
@@ -68,7 +69,11 @@ hardware_interface::return_type write() override;  // 无参数！Foxy 特有
   绝不硬编码）。
 - **`write()`**：把 `hw_commands_[0:8]`（本阶段恒为零）与 `MujocoVisBridge::
   manual_ctrl[8]`（GUI 推力器滑条，叠加式）之和**先钳位到 `±40.0 N` 硬件轨道
-  极限**（`CLAUDE.md` §4.3），再可选经过一阶 ESC 惯性延迟滤波
+  极限**（`CLAUDE.md` §4.3），再可选将钳位后的目标推力按 ESC 死区归零
+  （`|u_target| < 2.0N` 时强制为 `0.0`，由右侧边栏 "Thruster Deadzone (2.0N)"
+  复选框 / `MujocoVisBridge::enable_thruster_deadzone` 开关，默认关闭，模拟
+  真实 ESC 最小 PWM 空当；`CLAUDE.md` §3.1 的 "thruster lag and deadzone"
+  契约），再可选经过一阶 ESC 惯性延迟滤波
   （`tau_T = 0.015s`，由右侧边栏 "Thruster Lag (15ms)" 复选框 /
   `MujocoVisBridge::enable_thruster_lag` 开关，默认关闭=直通），最终写入
   `d_->ctrl`；通过一个仅在本进程内安装的 `mjcb_passive` 回调（与 Python 原型
@@ -164,6 +169,24 @@ hardware_interface::return_type write() override;  // 无参数！Foxy 特有
   - 用 Lamb 椭球近似（由该模型的包围盒半轴 `bbox_half_extents` 通过数值积分
     得到各主轴附加质量/附加惯量系数 `M_A,lin`/`M_A,ang`，仅在 `buildFromMjModel()`
     时算一次）为上述两项提供系数；
+  - **壁面邻近附加质量增强**（水动力学精度审计新增）：`M_A,lin` 本身是无界流体
+    假设下的 Lamb 椭球估计，完全忽略了刚性壁面 `X=0` 的镜像流反作用——而这恰是
+    本项目贴壁工况的核心场景。`F_FK+AM`/`T_Munk` 实际使用前，按经典势流镜像法
+    （Lamb《Hydrodynamics》Art.98；Newman《Marine Hydrodynamics》(1977) §4.14
+    对球体在刚性平面附近平动的领先阶解）对 `M_A,lin` 做逐轴放大：法向
+    （壁面法线方向 `X`）`1 + 3(a/2h)³`，切向（沿壁面方向 `Y`/`Z`）更弱的
+    `1 + (3/16)(a/h)³`，其中 `a` 取该壳体自身 Lamb 椭球特征半轴
+    （`bbox_half_extents` 对应分量）代替球体半径，`h` 为质心到壁面间隙
+    （与 `kParametricLumped` 的 `h_gap` 同一 CoM 参考点，下限钳位
+    `0.001m`）。这是沿用本文件其余椭球近似风格的**工程近似**，并非非球形
+    箱体的精确解，有待未来 CFD/水池实验数据验证；放大系数额外钳位在 `6.0`
+    倍以内，因为理想流体镜像级数本身在 `h→0` 时发散，真实近壁挤膜阻尼
+    （上面已单独建模的 `F_squeeze,n`）才是物理上的最终限制。旋转附加惯量
+    `M_A,ang` **未**做同等修正（一致的壁面旋转修正需要更高阶多极镜像分析，
+    这里不虚构一个未经验证的公式，留作已记录的未来增强项）。单元测试
+    `WallProximityAddedMassAmplifiesNearWallAndIsBounded` 锁定：远离壁面时
+    放大系数 `<1%` 偏差地退化为无修正值、接近壁面时单调放大、贴壁极限下
+    有界不发散。
   - 浮力/重力偏置与自由液面渐变复用集中参数模型的同一组公式（整体效应，
     与微元分布无关）。
 
@@ -218,6 +241,13 @@ hardware_interface::return_type write() override;  // 无参数！Foxy 特有
 | `z_surface` | `1.0 m` | `A_plate` | `0.24 m^2` |
 | `z_transition` | `0.4 m` | `h0_decay` | `0.05 m` |
 | — | — | `wall_x_offset` | `0.1 m` |
+
+（水动力学精度审计修复：`HydroGeometryModel::buildFromMjModel()` 的 `rho_water`
+参数此前硬编码为 `1000.0`，与 `FlowEnvironmentPlugin` 实际配置的
+`HydroParams::rho_water` 脱节——如果后者被覆盖，附加质量张量与非定常
+Froude-Krylov 力项会隐性使用两个不同密度。现在 `configure()` 显式传入
+`calm_plugin_->getHydroParams().rho_water`，两者共享同一个"环境水密度"口径，
+默认值仍是 `1000.0`，对现有行为零回归。）
 
 `controller_manager` 运行参数（`update_rate: 500`）不通过 YAML 文件加载，而是由
 `adhere_mujoco_node` 内部的 `physics_thread`（`std::chrono::steady_clock::sleep_until`
@@ -382,7 +412,8 @@ GLFW 窗口创建，仅空转等待停止信号。
 | 分组 | 控件 | 说明 |
 |---|---|---|
 | Thrusters (Manual)（自定义） | `Zero All` 按钮 | 一键将全部 8 个滑条归零 |
-| | `Thruster Lag (15ms)` 复选框 | 默认关闭（直通，钳位后立即写入 `ctrl`）；勾选后对钳位后的目标推力额外叠加一阶 ESC 惯性延迟滤波（`tau_T=0.015s`，`alpha_T = 1-exp(-dt/tau_T)`），仅在物理确实前进一拍时积分，暂停时保持上次值不变 |
+| | `Thruster Deadzone (2.0N)` 复选框 | 默认关闭；勾选后钳位到轨道极限的目标推力若 `\|u_target\|<2.0N` 则强制归零（先于下方的 Lag 滤波生效），模拟真实 ESC 最小 PWM 空当（`CLAUDE.md` §3.1，占位量级，待真实推力器标定） |
+| | `Thruster Lag (15ms)` 复选框 | 默认关闭（直通，钳位/死区处理后立即写入 `ctrl`）；勾选后对处理后的目标推力额外叠加一阶 ESC 惯性延迟滤波（`tau_T=0.015s`，`alpha_T = 1-exp(-dt/tau_T)`），仅在物理确实前进一拍时积分，暂停时保持上次值不变 |
 | | `thr_N1..4` / `thr_T5..8` 滑条 | `[-40, 40] N`，叠加写入
   `MujocoVisBridge::manual_ctrl`（与上层控制器指令相加）后统一钳位到
   `±40.0 N` 硬件轨道极限，可在未挂载控制器时手动测试单个推力器——例如把 4 个
@@ -539,8 +570,24 @@ GLFW 窗口创建，仅空转等待停止信号。
    力矩 + 角阻尼联合作用下全程不超过 `15°`（验证不发散）并在 8s/4000 步内
    稳定衰减至 `<0.5°`。
 
+水动力学精度审计还补充了 2 组针对性回归测试（非新增 Tier，而是锁定本轮修复的
+具体行为）：`RhoWaterParameterizationScalesAddedMassLinearly` 验证
+`buildFromMjModel()` 的 `rho_water` 参数对两个附加质量张量严格线性缩放、
+对几何量（微元数、包围盒）零影响；`WallProximityAddedMassAmplifiesNearWallAndIsBounded`
+验证上文"壁面邻近附加质量增强"小节描述的单调放大 + 有界钳位行为。
+
+此外，`AdhereMujocoHardware::write()` 里原本内联、完全无单元测试覆盖的
+500Hz 逻辑（ESC 死区/一阶惯性迟滞滤波、Rhombic Kern 的 CoP/K_val/掀离/
+角落陷阱分类，含 `L_y`/`L_z` 退化为零时的除零防护）已提取为
+`include/adhere_mujoco_hardware/rhombic_kern.hpp` 的纯函数
+（`classifyRhombicKern`/`applyThrusterLagStep`/`applyThrusterDeadzone`），
+不依赖 `mjModel`/`ResourceManager`，由独立的
+`test/test_rhombic_kern_and_thruster_model.cpp`（9 个用例）直接覆盖。
+
 执行 `colcon test --packages-select adhere_mujoco_hardware --event-handlers
-console_direct+` 即可同时跑完既有一致性回归测试与上述 5-Tier V&V 套件。
+console_direct+` 即可同时跑完既有一致性回归测试、5-Tier V&V 套件、上述
+2 组针对性回归测试，以及 `test_rhombic_kern_and_thruster_model` 的 9 个
+500Hz 逻辑单元测试（合计 25/25 全部通过）。
 
 ## 跨模型零重编扩展指南（如何无缝切换新的 ROV 模型包）
 

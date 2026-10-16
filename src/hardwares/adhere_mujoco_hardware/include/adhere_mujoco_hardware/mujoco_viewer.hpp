@@ -138,6 +138,7 @@ private:
   int ui_sim_speed_ = 0;              // radio index: 0=1x,1=0.5x,2=0.2x,3=0.1x (Section C4)
   mjtByte ui_cam_follow_ = 0;         // Section C3 "Follow ROV" checkbox
   mjtByte ui_thruster_lag_ = 0;       // Phase 2.11 Section 4 "Thruster Lag (15ms)" checkbox
+  mjtByte ui_thruster_deadzone_ = 0;  // "Thruster Deadzone (2.0N)" checkbox
   int scope_mode_ = 0;  // radio index: 0=Off,1=Pad Forces,2=Kern Margin,3=Body Vel vs Flow,
                         // 4=Thruster Commands (Section C2)
 

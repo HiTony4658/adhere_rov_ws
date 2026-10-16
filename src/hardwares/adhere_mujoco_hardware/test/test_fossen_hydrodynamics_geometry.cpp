@@ -367,6 +367,54 @@ TEST(HydroVV_Tier1, LambSphereAddedMassAnalyticalExact)
   mj_deleteModel(model);
 }
 
+// Tier 1 companion (Spheroid Symmetry-Axis Limit): for a spheroid with two equal semi-axes
+// (b=c != a), Fossen (2011) Eq.(2.159)-(2.161)'s rotational added inertia about the distinct
+// symmetry axis (x, paired with the equal b=c pair) must vanish by the same ideal-fluid
+// symmetry argument as the sphere case, while the inertia about the two transverse axes (y,
+// z -- paired respectively with (a,c) and (a,b), neither of which are degenerate here) must be
+// strictly positive and finite (added rotational inertia can never be negative).
+TEST(HydroVV_Tier1, SpheroidSymmetryAxisRotationalInertiaVanishes)
+{
+  constexpr const char * kMjcf = R"xml(
+<mujoco model="spheroid_test">
+  <compiler angle="radian"/>
+  <option timestep="0.002"/>
+  <worldbody>
+    <body name="spheroid_body" pos="0 0 0.5">
+      <freejoint name="spheroid_free"/>
+      <inertial pos="0 0 0" mass="1.0" diaginertia="1.0 1.0 1.0"/>
+      <geom name="spheroid_geom" type="ellipsoid" size="0.3 0.1 0.1"/>
+    </body>
+  </worldbody>
+</mujoco>
+)xml";
+  const std::string path = "/tmp/adhere_mujoco_hardware_test_spheroid.xml";
+  {
+    std::ofstream out(path);
+    out << kMjcf;
+  }
+  char error[1000] = "";
+  mjModel * model = mj_loadXML(path.c_str(), nullptr, error, sizeof(error));
+  std::remove(path.c_str());
+  ASSERT_NE(model, nullptr) << "Failed to load in-memory spheroid MJCF: " << error;
+
+  const int body_id = mj_name2id(model, mjOBJ_BODY, "spheroid_body");
+  ASSERT_GE(body_id, 0);
+  const HydroGeometryModel geo = HydroGeometryModel::buildFromMjModel(model, body_id);
+
+  // a=0.3 (x), b=c=0.1 (y,z): rotation about x (paired with the degenerate b=c pair) vanishes;
+  // rotation about y/z (each paired with one non-degenerate axis, a) is strictly positive.
+  EXPECT_NEAR(geo.added_mass_angular(0, 0), 0.0, 1e-9);
+  EXPECT_GT(geo.added_mass_angular(1, 1), 0.0);
+  EXPECT_GT(geo.added_mass_angular(2, 2), 0.0);
+  ASSERT_TRUE(std::isfinite(geo.added_mass_angular(1, 1)));
+  ASSERT_TRUE(std::isfinite(geo.added_mass_angular(2, 2)));
+  // b=c exactly, so by construction the two transverse terms must agree.
+  EXPECT_NEAR(geo.added_mass_angular(1, 1), geo.added_mass_angular(2, 2), 1e-9);
+
+  mj_deleteModel(model);
+}
+
 // Tier 2 (Degenerate Patch-to-Lumped Exact Equivalence): under pure translation (omega=0,
 // identity orientation), kStonefishGeometryDriven's per-patch Venturi suction must sum to
 // exactly kParametricLumped's single-point Venturi force, and a pure axial crossflow velocity
@@ -679,6 +727,87 @@ TEST_F(HydroGeometryModelFixture, HydroVV_Tier5_ClosedLoopTerminalVelocityAndRol
     EXPECT_LT(std::abs(rollDeg()), 0.5);
     mj_deleteData(d);
   }
+}
+
+// ===========================================================================================
+// Hydrodynamic-accuracy audit: rho_water parameterization + wall-proximity added mass
+// ===========================================================================================
+
+// Audit fix 5.2: buildFromMjModel()'s rho_water parameter must scale both added-mass tensors
+// exactly linearly (M_A = k_i * rho_water * (4/3 pi a b c), k_i independent of rho_water), and
+// must leave every geometry-only quantity (patches, bbox) completely unaffected.
+TEST_F(HydroGeometryModelFixture, RhoWaterParameterizationScalesAddedMassLinearly)
+{
+  const HydroGeometryModel geo_default = HydroGeometryModel::buildFromMjModel(model_, body_id_);
+  const HydroGeometryModel geo_double_rho =
+    HydroGeometryModel::buildFromMjModel(model_, body_id_, 2000.0);
+
+  for (int i = 0; i < 3; ++i) {
+    ASSERT_GT(geo_default.added_mass_linear(i, i), 0.0);
+    EXPECT_NEAR(
+      geo_double_rho.added_mass_linear(i, i), 2.0 * geo_default.added_mass_linear(i, i),
+      1e-9 * geo_default.added_mass_linear(i, i));
+    if (geo_default.added_mass_angular(i, i) > 1e-9) {
+      EXPECT_NEAR(
+        geo_double_rho.added_mass_angular(i, i), 2.0 * geo_default.added_mass_angular(i, i),
+        1e-6 * geo_default.added_mass_angular(i, i));
+    }
+  }
+  EXPECT_EQ(geo_default.patches.size(), geo_double_rho.patches.size());
+  EXPECT_NEAR(geo_default.bbox_half_extents.x(), geo_double_rho.bbox_half_extents.x(), 1e-12);
+}
+
+// Wall-proximity added-mass enhancement: under a pure +World-X ambient-fluid acceleration (a
+// gust at its own t=0 window start), F_fk_am_body's X-component must grow strictly as the hull
+// approaches the World X=0 wall, must stay bounded (never diverge) arbitrarily close to it, and
+// must reduce to the unbounded free-stream tensor's own prediction far from the wall.
+TEST_F(HydroGeometryModelFixture, WallProximityAddedMassAmplifiesNearWallAndIsBounded)
+{
+  const HydroGeometryModel geo = HydroGeometryModel::buildFromMjModel(model_, body_id_);
+
+  HydroParams params;
+  // GustEvent::acceleration(t_start) = peak_x * pi/(t_end-t_start): a pure +World-X impulsive
+  // acceleration peak at t=0, the window's own start.
+  params.gust_events = {adhere_mujoco_hardware::GustEvent{0.0, 1.0, 0.0, 1.0}};
+
+  RigidBodyState state_far;
+  state_far.com_pos_world = Eigen::Vector3d(1.0, 0.0, 0.5);  // h_gap ~0.9m: negligible wall effect
+  state_far.orientation = Eigen::Quaterniond::Identity();
+
+  RigidBodyState state_near;
+  state_near.com_pos_world = Eigen::Vector3d(0.15, 0.0, 0.5);  // h_gap = 0.05m: strong wall effect
+  state_near.orientation = Eigen::Quaterniond::Identity();
+
+  RigidBodyState state_contact;
+  state_contact.com_pos_world = Eigen::Vector3d(0.1005, 0.0, 0.5);  // h_gap clamped to the floor
+  state_contact.orientation = Eigen::Quaterniond::Identity();
+
+  HydroWrenchBreakdown b_far, b_near, b_contact;
+  FossenHydrodynamics::compute(
+    state_far, 0.0, params, HydroModelMode::kStonefishGeometryDriven, &geo, &b_far);
+  FossenHydrodynamics::compute(
+    state_near, 0.0, params, HydroModelMode::kStonefishGeometryDriven, &geo, &b_near);
+  FossenHydrodynamics::compute(
+    state_contact, 0.0, params, HydroModelMode::kStonefishGeometryDriven, &geo, &b_contact);
+
+  ASSERT_GT(std::abs(b_far.f_fk_am_body.x()), 1e-6) << "test setup must produce a nonzero signal";
+  // Monotonic amplification as the hull approaches the wall.
+  EXPECT_GT(std::abs(b_near.f_fk_am_body.x()), std::abs(b_far.f_fk_am_body.x()) * 1.05);
+  EXPECT_GT(std::abs(b_contact.f_fk_am_body.x()), std::abs(b_near.f_fk_am_body.x()));
+
+  // Bounded: the leading-order image series itself diverges as h -> 0, so the implementation
+  // clamps at a finite ceiling (kMaxWallAmplification, an implementation-internal constant not
+  // re-derived exactly here -- loosely bounded at 10x the unbounded free-stream prediction).
+  ASSERT_TRUE(std::isfinite(b_contact.f_fk_am_body.x()));
+  EXPECT_LT(std::abs(b_contact.f_fk_am_body.x()), std::abs(b_far.f_fk_am_body.x()) * 10.0);
+
+  // Far from the wall, the correction must be negligible (within 1% of the unbounded
+  // free-stream tensor's own prediction, computed directly from geo.added_mass_linear).
+  const double a_fluid_x =
+    adhere_mujoco_hardware::GustEvent{0.0, 1.0, 0.0, 1.0}.acceleration(0.0).x();
+  const double expected_far =
+    (params.rho_water * params.displaced_volume + geo.added_mass_linear(0, 0)) * a_fluid_x;
+  EXPECT_NEAR(b_far.f_fk_am_body.x(), expected_far, std::abs(expected_far) * 0.01);
 }
 
 int main(int argc, char ** argv)

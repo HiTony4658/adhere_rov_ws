@@ -75,6 +75,10 @@ struct MujocoVisBridge
   std::atomic<int> hydro_mode{0};  // mirrors HydroModelMode: 0=ParametricLumped, 1=StonefishGeometryDriven
   std::atomic<double> sim_speed_factor{1.0};  // <=1.0, slow-motion scale for the physics thread period
   std::atomic<bool> enable_thruster_lag{false};  // first-order ESC lag (tau_T = 0.015s), off by default
+  // ESC null-band deadzone (CLAUDE.md Sec.3.1's "thruster lag and deadzone" contract), off by
+  // default: below the deadzone magnitude the commanded thrust is forced to exactly zero,
+  // mirroring a real ESC's minimum-PWM null band.
+  std::atomic<bool> enable_thruster_deadzone{false};
 
   // --- hardware -> GUI scalar telemetry (lock-free atomics) ---
   std::atomic<double> actual_physics_hz{0.0};

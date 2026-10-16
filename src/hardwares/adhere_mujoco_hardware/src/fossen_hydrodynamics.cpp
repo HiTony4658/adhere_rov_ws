@@ -8,6 +8,28 @@
 namespace adhere_mujoco_hardware
 {
 
+namespace
+{
+// Minimum body->wall gap floor, used to avoid a divide-by-zero/singularity in the near-wall
+// suction/squeeze force terms below (hydrodynamic-accuracy audit finding 5.1). The two
+// hydrodynamic modes measure "gap" from two different reference points and are deliberately
+// NOT unified to a single numeric value:
+//   - kWallGapFloorComRef (kParametricLumped's suction term, and the wall-proximity added-mass
+//     correction below): measured from the single lumped CoM proxy point. This exact literal
+//     (0.001) is part of kParametricLumped's byte-identical-to-Python-reference parity
+//     contract (see the "parity-locked" comment on that branch) and must never change.
+//   - kWallGapFloorPatchRef (kStonefishGeometryDriven's per-patch suction/squeeze loop): measured
+//     from each wall-facing patch's own true surface position, which is already much closer to
+//     the wall than the CoM by construction, so it needs a correspondingly looser floor to keep
+//     the cubic squeeze-film term (h_gap_nominal/h_gap)^3 from growing unreasonably large.
+// Silently forcing these to the same value would either break kParametricLumped's parity lock or
+// change kStonefishGeometryDriven's near-contact squeeze-force ceiling in a way not re-validated
+// against the V&V suite in test/test_fossen_hydrodynamics_geometry.cpp -- hence two named,
+// documented constants instead of one.
+constexpr double kWallGapFloorComRef = 0.001;    // m, CoM-referenced
+constexpr double kWallGapFloorPatchRef = 0.005;  // m, patch-surface-referenced
+}  // namespace
+
 void HydroParams::applyMjModelOverrides(const mjModel * m, HydroParams & params)
 {
   // Looks up a <custom><numeric name="name" data="..."/> entry by name; returns nullptr (and
@@ -101,7 +123,7 @@ Wrench FossenHydrodynamics::compute(
 
     // Venturi/Bernoulli wall-suction.
     const double x_com = state.com_pos_world.x();
-    const double h_gap = std::max(x_com - params.wall_x_offset, 0.001);
+    const double h_gap = std::max(x_com - params.wall_x_offset, kWallGapFloorComRef);
     const double v_tangent_sq = v_rel_body.y() * v_rel_body.y() + v_rel_body.z() * v_rel_body.z();
     const double F_suction_x = -0.5 * params.rho_water * params.C_venturi * params.A_plate *
       v_tangent_sq * std::exp(-(h_gap - params.h_gap_nominal) / params.h0_decay);
@@ -173,7 +195,7 @@ Wrench FossenHydrodynamics::compute(
       // plate), so x_world_p is already the true distance from the patch surface to the World
       // X=0 wall -- do NOT subtract params.wall_x_offset a second time.
       const double x_world_p = state.com_pos_world.x() + (R * r_p).x();
-      const double h_gap_p = std::max(x_world_p, 0.005);
+      const double h_gap_p = std::max(x_world_p, kWallGapFloorPatchRef);
       // v_t is already the exact 3D tangential velocity on the patch plane (v_p_body minus
       // its normal component) -- squaredNorm() is identical to y^2+z^2 for a flat [-1,0,0]^T
       // patch (rov_wall.xml) and generalizes correctly to curved 3D CAD hull patches whose
@@ -216,6 +238,39 @@ Wrench FossenHydrodynamics::compute(
   acc_f_drag += F_lin_damp_body;
   acc_t_drag += T_ang_damp_body;
 
+  // Wall-proximity added-mass enhancement (hydrodynamic-accuracy audit): geo->added_mass_linear
+  // is an unbounded-fluid Lamb-ellipsoid estimate (Section B3) that ignores the rigid World X=0
+  // wall's own image-flow reaction, which is exactly the regime this vehicle spends most of its
+  // time operating in. Leading-order potential-flow method-of-images correction for a sphere of
+  // radius a translating at CoM-to-wall distance h near a rigid plane (Lamb, Hydrodynamics,
+  // Art. 98; summarized in Newman, Marine Hydrodynamics (1977) Sec. 4.14): motion normal to the
+  // wall is amplified by a factor 1 + 3*(a/2h)^3 + O((a/h)^6); motion parallel to the wall by the
+  // much weaker 1 + (3/16)*(a/h)^3 + O(...). Generalized per-axis here using this hull's own
+  // Lamb-ellipsoid characteristic semi-axes (geo->bbox_half_extents) in place of a true sphere's
+  // single radius -- an engineering approximation consistent with the rest of this file's
+  // ellipsoid treatment, NOT an exact solution for a non-spherical box hull; pending validation
+  // against CFD/tow-tank data for this specific geometry. Only the translational tensor is
+  // corrected here: a consistent rotational (added-inertia) wall correction requires a
+  // higher-order multipole image analysis beyond this leading-order linear treatment and is left
+  // as a documented future enhancement, not fabricated here. Clamped at
+  // kMaxWallAmplification since the inviscid image series itself diverges as h -> 0; the
+  // physical near-contact regime is already separately captured by the per-patch squeeze-film
+  // term F_squeeze_n above.
+  constexpr double kMaxWallAmplification = 6.0;
+  const double h_gap_wall =
+    std::max(state.com_pos_world.x() - params.wall_x_offset, kWallGapFloorComRef);
+  const double a_normal = std::max(geo->bbox_half_extents.x(), 1e-6);
+  const double a_tangent =
+    std::max(0.5 * (geo->bbox_half_extents.y() + geo->bbox_half_extents.z()), 1e-6);
+  const double amp_normal = std::min(
+    1.0 + 3.0 * std::pow(a_normal / (2.0 * h_gap_wall), 3), kMaxWallAmplification);
+  const double amp_tangent = std::min(
+    1.0 + (3.0 / 16.0) * std::pow(a_tangent / h_gap_wall, 3), kMaxWallAmplification);
+  Eigen::Matrix3d added_mass_linear_wall = geo->added_mass_linear;
+  added_mass_linear_wall(0, 0) *= amp_normal;
+  added_mass_linear_wall(1, 1) *= amp_tangent;
+  added_mass_linear_wall(2, 2) *= amp_tangent;
+
   // Unsteady Froude-Krylov (displaced-fluid inertia) + added-mass reaction force: fluid
   // accelerating around the body (gusts) exerts a reaction force proportional to both the
   // displaced volume and the added-mass tensor. This is distinct from the body's own-
@@ -225,13 +280,13 @@ Wrench FossenHydrodynamics::compute(
   const Eigen::Vector3d a_fluid_body = R.transpose() * params.currentAccelerationWorld(t);
   const Eigen::Vector3d F_fk_am_body =
     (params.rho_water * params.displaced_volume * Eigen::Matrix3d::Identity() +
-     geo->added_mass_linear) *
+     added_mass_linear_wall) *
     a_fluid_body;
   F_total_body += F_fk_am_body;
 
   // Munk moment: classical rigid-body-in-ideal-fluid moment from added-mass anisotropy
   // coupling relative linear/angular velocity into a destabilizing moment.
-  const Eigen::Vector3d T_munk_body = -v_cog_body.cross(geo->added_mass_linear * v_cog_body) -
+  const Eigen::Vector3d T_munk_body = -v_cog_body.cross(added_mass_linear_wall * v_cog_body) -
     w_body.cross(geo->added_mass_angular * w_body);
   T_total_body += T_munk_body;
 
@@ -538,7 +593,8 @@ double ellipsoidAlpha(double semi, double a, double b, double c)
 
 }  // namespace
 
-HydroGeometryModel HydroGeometryModel::buildFromMjModel(const mjModel * m, int root_body_id)
+HydroGeometryModel HydroGeometryModel::buildFromMjModel(
+  const mjModel * m, int root_body_id, double rho_water)
 {
   HydroGeometryModel geo;
   std::vector<SurfacePatch> raw;
@@ -725,12 +781,12 @@ HydroGeometryModel HydroGeometryModel::buildFromMjModel(const mjModel * m, int r
   geo.patches = decimatePatches(raw);
   geo.bbox_half_extents = (aabb_max - aabb_min) / 2.0;
 
-  // Lamb's classical ellipsoid added-mass approximation (Section B3): assumed rho_water =
-  // 1000.0 kg/m^3, matching the only value ever used by CalmWaterPlugin/
-  // StationKeepingGustPlugin -- HydroGeometryModel is built once at configure() time, before
-  // HydroParams selection, so it cannot read a per-plugin rho_water; if a future plugin ever
-  // overrides rho_water, revisit this assumption.
-  constexpr double kRhoWater = 1000.0;
+  // Lamb's classical ellipsoid added-mass approximation (Section B3): scaled by the caller-
+  // supplied rho_water (hydrodynamic-accuracy audit fix) instead of a hardcoded 1000.0 kg/m^3,
+  // so this tensor stays physically consistent with FossenHydrodynamics::compute()'s live
+  // params.rho_water-scaled Froude-Krylov term -- both now trace back to the same one canonical
+  // water density the caller configured, rather than silently disagreeing if that density is
+  // ever overridden away from the historical 1000.0 default.
   const double a = std::max(geo.bbox_half_extents.x(), 1e-6);
   const double b = std::max(geo.bbox_half_extents.y(), 1e-6);
   const double c = std::max(geo.bbox_half_extents.z(), 1e-6);
@@ -740,31 +796,48 @@ HydroGeometryModel HydroGeometryModel::buildFromMjModel(const mjModel * m, int r
   const double k1 = alpha0 / (2.0 - alpha0);
   const double k2 = beta0 / (2.0 - beta0);
   const double k3 = gamma0 / (2.0 - gamma0);
-  const double displaced_mass = kRhoWater * (4.0 / 3.0) * M_PI * a * b * c;
+  const double displaced_mass = rho_water * (4.0 / 3.0) * M_PI * a * b * c;
   const double m_A_x = k1 * displaced_mass;
   const double m_A_y = k2 * displaced_mass;
   const double m_A_z = k3 * displaced_mass;
   geo.added_mass_linear = Eigen::Vector3d(m_A_x, m_A_y, m_A_z).asDiagonal();
 
-  // Classical Lamb result (Hydrodynamics, Art. 114): a sphere rotating in an unbounded ideal
-  // fluid induces exactly zero fluid motion, so its added rotational inertia is exactly zero
-  // about every axis -- unlike the general heuristic below (0.2*m_A_i*(sum of the other two
-  // semi-axes^2), a solid-ellipsoid-MOI-shaped placeholder, documented above as "pending future
-  // tuning"), which does NOT itself vanish at a=b=c and must not be trusted there (CLAUDE.md
-  // Phase 2.13 Tier 1 V&V). Special-cased here rather than replacing the general heuristic with
-  // the full closed-form Lamb triaxial rotational-added-mass formula (k4'/k5'/k6'), which is
-  // out of this phase's scope and numerically singular (0/0) at exactly a=b=c anyway.
-  constexpr double kSphereRelTol = 1e-6;
-  const bool is_sphere =
-    std::abs(a - b) < kSphereRelTol * a && std::abs(b - c) < kSphereRelTol * a;
-  if (is_sphere) {
-    geo.added_mass_angular = Eigen::Matrix3d::Zero();
-  } else {
-    geo.added_mass_angular = Eigen::Vector3d(
-      0.2 * m_A_x * (b * b + c * c), 0.2 * m_A_y * (a * a + c * c),
-      0.2 * m_A_z * (a * a + b * b))
-      .asDiagonal();
-  }
+  // Closed-form triaxial-ellipsoid rotational added inertia: Fossen (2011), Handbook of Marine
+  // Craft Hydrodynamics and Motion Control, Eq. (2.159)-(2.161) (kappa1/2/3 above are exactly
+  // alpha0/beta0/gamma0; displaced_mass is exactly rho*V). This replaces the old
+  // 0.2*m_A_i*(sum of the other two semi-axes^2) heuristic, which the previous revision of this
+  // file documented as an explicit placeholder "pending future tuning" and which does not itself
+  // vanish at a=b=c.
+  //
+  // NOTE on a transcription-sign correction: Eq.(2.161) as it appears in at least one
+  // reproduction of the textbook writes the I_A,22 term with (a^2-c^2) paired against
+  // (kappa1-kappa3) in the denominator's linear term -- this is NOT internally consistent with
+  // the shared cyclic pattern of the I_A,11/I_A,33 terms (both of which pair "(axis_j^2-axis_k^2)"
+  // with "(kappa_j-kappa_k)" using the SAME (j,k) order in both the linear term and the implicit
+  // numerator order) and was verified numerically to yield a NEGATIVE (unphysical -- added
+  // rotational inertia must be >= 0) value for this hull's actual bbox (a=0.1,b=0.3,c=0.2 m).
+  // The form used below instead continues the cyclic pattern established by I_A,11
+  // ((j,k)=(2,3)) and I_A,33 ((j,k)=(1,2)) to I_A,22 with (j,k)=(3,1), which is both internally
+  // consistent and numerically verified to give a strictly positive value for this geometry.
+  //
+  // Each I_A,ii is a 0/0 indeterminate exactly when its OTHER two semi-axes coincide (the body
+  // is then a spheroid and rotation about the remaining, distinct axis induces zero fluid
+  // motion by the same ideal-fluid symmetry argument as the sphere case) -- guarded per-axis
+  // below rather than relying on floating-point evaluation of the indeterminate form.
+  constexpr double kDegenerateRelTol = 1e-6;
+  const bool bc_equal = std::abs(b - c) < kDegenerateRelTol * std::max(b, c);
+  const bool ac_equal = std::abs(a - c) < kDegenerateRelTol * std::max(a, c);
+  const bool ab_equal = std::abs(a - b) < kDegenerateRelTol * std::max(a, b);
+  const double I_A11 = bc_equal ? 0.0 :
+    (displaced_mass / 5.0) * (b * b - c * c) * (b * b - c * c) * (gamma0 - beta0) /
+    (2.0 * (b * b - c * c) + (b * b + c * c) * (beta0 - gamma0));
+  const double I_A22 = ac_equal ? 0.0 :
+    (displaced_mass / 5.0) * (a * a - c * c) * (a * a - c * c) * (gamma0 - alpha0) /
+    (2.0 * (a * a - c * c) + (a * a + c * c) * (alpha0 - gamma0));
+  const double I_A33 = ab_equal ? 0.0 :
+    (displaced_mass / 5.0) * (a * a - b * b) * (a * a - b * b) * (beta0 - alpha0) /
+    (2.0 * (a * a - b * b) + (a * a + b * b) * (alpha0 - beta0));
+  geo.added_mass_angular = Eigen::Vector3d(I_A11, I_A22, I_A33).asDiagonal();
 
   return geo;
 }

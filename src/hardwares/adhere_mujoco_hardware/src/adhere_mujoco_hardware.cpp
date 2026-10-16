@@ -1,9 +1,9 @@
 #include "adhere_mujoco_hardware/adhere_mujoco_hardware.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
-#include <limits>
 #include <mutex>
 #include <utility>
 
@@ -23,7 +23,7 @@ rclcpp::Logger logger() { return rclcpp::get_logger("adhere_mujoco_hardware"); }
 // single static back-pointer is sufficient and keeps the passive-force injection calling
 // mj_step at exactly the same point the Python reference's mjcb_passive callback did --
 // required for <1e-5 numerical parity.
-AdhereMujocoHardware * g_active_instance = nullptr;
+std::atomic<AdhereMujocoHardware *> g_active_instance{nullptr};
 
 constexpr const char * kPadSiteNames[4] = {
   "pad_TL_site", "pad_TR_site", "pad_BL_site", "pad_BR_site"};
@@ -55,8 +55,8 @@ void AdhereMujocoHardware::setModelSourceOverride(
 AdhereMujocoHardware::~AdhereMujocoHardware()
 {
   stop();
-  if (g_active_instance == this) {
-    g_active_instance = nullptr;
+  if (g_active_instance.load() == this) {
+    g_active_instance.store(nullptr);
     mjcb_passive = nullptr;
   }
   if (model_) {
@@ -136,6 +136,8 @@ hardware_interface::return_type AdhereMujocoHardware::configure(
       logger(),
       "No root body found in MJCF '%s' (tried 'rov_base', 'base_link', and any free-joint body)",
       mjcf_path.c_str());
+    mj_deleteModel(model_);
+    model_ = nullptr;
     return hardware_interface::return_type::ERROR;
   }
 
@@ -153,6 +155,8 @@ hardware_interface::return_type AdhereMujocoHardware::configure(
     const int sensor_id = mj_name2id(model_, mjOBJ_SENSOR, sensor_name.c_str());
     if (sensor_id < 0) {
       RCLCPP_ERROR(logger(), "Sensor '%s' not found in MJCF", sensor_name.c_str());
+      mj_deleteModel(model_);
+      model_ = nullptr;
       return hardware_interface::return_type::ERROR;
     }
     pad_touch_sensor_adr_[i] = model_->sensor_adr[sensor_id];
@@ -163,6 +167,8 @@ hardware_interface::return_type AdhereMujocoHardware::configure(
     const int site_id = mj_name2id(model_, mjOBJ_SITE, kPadSiteNames[i]);
     if (site_id < 0) {
       RCLCPP_ERROR(logger(), "Site '%s' not found in MJCF", kPadSiteNames[i]);
+      mj_deleteModel(model_);
+      model_ = nullptr;
       return hardware_interface::return_type::ERROR;
     }
     pad_yz_[i] = {model_->site_pos[3 * site_id + 1], model_->site_pos[3 * site_id + 2]};
@@ -175,6 +181,8 @@ hardware_interface::return_type AdhereMujocoHardware::configure(
     const int act_id = mj_name2id(model_, mjOBJ_ACTUATOR, kThrusterNames[i]);
     if (act_id < 0) {
       RCLCPP_ERROR(logger(), "Actuator '%s' not found in MJCF", kThrusterNames[i]);
+      mj_deleteModel(model_);
+      model_ = nullptr;
       return hardware_interface::return_type::ERROR;
     }
     actuator_id_[i] = act_id;
@@ -215,8 +223,12 @@ hardware_interface::return_type AdhereMujocoHardware::configure(
 
   // CLAUDE.md Phase 2.10 Section B8: tessellate this robot's own geoms into a
   // HydroGeometryModel once, cached for the lifetime of this instance and reused by every
-  // kStonefishGeometryDriven compute() call.
-  hydro_geometry_model_ = HydroGeometryModel::buildFromMjModel(model_, body_id_);
+  // kStonefishGeometryDriven compute() call. rho_water is sourced from calm_plugin_'s
+  // configured HydroParams (hydrodynamic-accuracy audit fix): water density is an environmental
+  // constant every FlowEnvironmentPlugin is expected to agree on, not a per-flow-profile
+  // property, so the calm-water baseline is the canonical source of truth for it.
+  hydro_geometry_model_ = HydroGeometryModel::buildFromMjModel(
+    model_, body_id_, calm_plugin_->getHydroParams().rho_water);
   RCLCPP_INFO(
     logger(), "AdhereMujocoHardware: HydroGeometryModel built with %zu surface patches",
     hydro_geometry_model_.patches.size());
@@ -226,7 +238,7 @@ hardware_interface::return_type AdhereMujocoHardware::configure(
 
   // Set before start()/stop() so setHeadless() can reach this instance even though
   // mjcb_passive (which also needs data_ to exist) is only installed in start().
-  g_active_instance = this;
+  g_active_instance.store(this);
 
   return hardware_interface::return_type::OK;
 }
@@ -287,8 +299,9 @@ hardware_interface::return_type AdhereMujocoHardware::start()
   }
 
   mjcb_passive = [](const mjModel * m, mjData * d) {
-    if (g_active_instance && g_active_instance->data_ == d) {
-      g_active_instance->applyHydrodynamics(m, d);
+    AdhereMujocoHardware * active = g_active_instance.load();
+    if (active && active->data_ == d) {
+      active->applyHydrodynamics(m, d);
     }
   };
 
@@ -322,7 +335,7 @@ hardware_interface::return_type AdhereMujocoHardware::stop()
     viewer_->stop();
     viewer_.reset();
   }
-  if (g_active_instance == this) {
+  if (g_active_instance.load() == this) {
     mjcb_passive = nullptr;
   }
   if (data_) {
@@ -352,7 +365,7 @@ void AdhereMujocoHardware::setWaveMode(int mode)
   }
 }
 
-AdhereMujocoHardware * AdhereMujocoHardware::activeInstance() { return g_active_instance; }
+AdhereMujocoHardware * AdhereMujocoHardware::activeInstance() { return g_active_instance.load(); }
 
 void AdhereMujocoHardware::applyHydrodynamics(const mjModel * m, mjData * d)
 {
@@ -555,19 +568,28 @@ hardware_interface::return_type AdhereMujocoHardware::write()
   // regardless of which rate last wrote it (ESC zero-order hold emulation per CLAUDE.md Sec.3).
   // Phase 2.11 Section 4 / Phase 2.12 Section 3: clamp to this thruster's own rail limit
   // (resolved from model_->actuator_ctrlrange at configure() time, not a hardcoded +-40N
-  // constant) before applying, and optionally run a first-order ESC lag filter (tau_T = 15ms)
-  // instead of writing the target thrust directly.
+  // constant) before applying, optionally snap to zero inside the ESC deadzone (CLAUDE.md
+  // Sec.3.1), and optionally run a first-order ESC lag filter (tau_T = 15ms) instead of writing
+  // the target thrust directly.
   constexpr double kTauThruster = 0.015;
+  // Representative ESC null-band magnitude (~5% of the +-40N rail): below this |u_target|, a
+  // real ESC outputs exactly zero thrust rather than a small linear response. Placeholder value
+  // pending calibration against a real thruster's PWM-to-thrust curve.
+  constexpr double kThrusterDeadzoneN = 2.0;
   const double dt = model_->opt.timestep;
   const double alpha_t = 1.0 - std::exp(-dt / kTauThruster);
   const bool lag_enabled = vis_bridge_->enable_thruster_lag.load();
+  const bool deadzone_enabled = vis_bridge_->enable_thruster_deadzone.load();
   for (size_t i = 0; i < kThrusterNames.size(); ++i) {
-    const double u_target = std::clamp(
+    double u_target = std::clamp(
       hw_commands_[i] + vis_bridge_->manual_ctrl[i].load(), thruster_ctrl_min_[i],
       thruster_ctrl_max_[i]);
+    if (deadzone_enabled) {
+      u_target = applyThrusterDeadzone(u_target, kThrusterDeadzoneN);
+    }
     if (lag_enabled) {
       if (step_occurs) {
-        applied_thrust_[i] = (1.0 - alpha_t) * applied_thrust_[i] + alpha_t * u_target;
+        applied_thrust_[i] = applyThrusterLagStep(applied_thrust_[i], u_target, alpha_t);
       }
       // else: paused with lag enabled -- hold the last applied_thrust_ (no time has elapsed).
     } else {
@@ -585,58 +607,39 @@ hardware_interface::return_type AdhereMujocoHardware::write()
 
     // True 500Hz aliasing-free contact & Rhombic-Kern metrics (Phase 2.11 Section 2): evaluated
     // on every real physics step (not just the ~60Hz vis-bridge snapshot cadence below), so
-    // transient <5ms contact events are never missed.
-    double L_y = 0.0, L_z = 0.0;
-    for (const auto & yz : pad_yz_) {
-      L_y = std::max(L_y, std::abs(yz.first));
-      L_z = std::max(L_z, std::abs(yz.second));
-    }
-    double F_sum = 0.0, Fy_sum = 0.0, Fz_sum = 0.0;
-    double F_min = std::numeric_limits<double>::max();
-    int liftoff_pad_count = 0;
+    // transient <5ms contact events are never missed. classifyRhombicKern() (hydrodynamic-
+    // accuracy audit) factors the CoP/K_val/liftoff/corner-trap math into a unit-tested pure
+    // function (test/test_rhombic_kern_and_thruster_model.cpp), including the L_y/L_z
+    // divide-by-zero floor (finding 5.3).
+    std::array<double, 4> pad_force_now{};
     for (size_t i = 0; i < kPadNames.size(); ++i) {
-      const double F_i = std::max(0.0, data_->sensordata[pad_touch_sensor_adr_[i]]);
-      F_sum += F_i;
-      Fy_sum += F_i * pad_yz_[i].first;
-      Fz_sum += F_i * pad_yz_[i].second;
-      F_min = std::min(F_min, F_i);
-      if (F_i <= 1e-3) {
-        ++liftoff_pad_count;
-      }
+      pad_force_now[i] = data_->sensordata[pad_touch_sensor_adr_[i]];
     }
-    double p_y = 0.0, p_z = 0.0, kern_val = 2.0, m_kern = -1.0;
-    if (F_sum > 1e-3) {
-      p_y = Fy_sum / F_sum;
-      p_z = Fz_sum / F_sum;
-      kern_val = std::abs(p_y) / L_y + std::abs(p_z) / L_z;
-      m_kern = 1.0 - kern_val;
-    }
-    const bool is_liftoff = (F_min <= 1e-3);
-    const bool is_corner_trap =
-      (F_sum > 1e-3) && (std::abs(p_y) <= L_y) && (std::abs(p_z) <= L_z) && (kern_val > 1.0);
+    const RhombicKernResult kern = classifyRhombicKern(pad_force_now, pad_yz_);
 
     ++total_eval_steps_;
-    if (is_liftoff) {
+    if (kern.is_liftoff) {
       ++liftoff_steps_;
       if (!prev_is_liftoff_) {
         ++liftoff_events_;
       }
     }
-    if (is_corner_trap) {
+    if (kern.is_corner_trap) {
       ++corner_trap_steps_;
     }
-    prev_is_liftoff_ = is_liftoff;
+    prev_is_liftoff_ = kern.is_liftoff;
 
-    vis_bridge_->cop_y.store(p_y);
-    vis_bridge_->cop_z.store(p_z);
-    vis_bridge_->kern_val.store(kern_val);
-    vis_bridge_->m_kern.store(m_kern);
+    vis_bridge_->cop_y.store(kern.cop_y);
+    vis_bridge_->cop_z.store(kern.cop_z);
+    vis_bridge_->kern_val.store(kern.kern_val);
+    vis_bridge_->m_kern.store(kern.m_kern);
     vis_bridge_->liftoff_ratio.store(
       static_cast<double>(liftoff_steps_) / static_cast<double>(total_eval_steps_));
     vis_bridge_->corner_trap_ratio.store(
       static_cast<double>(corner_trap_steps_) / static_cast<double>(total_eval_steps_));
     vis_bridge_->liftoff_events.store(liftoff_events_);
-    vis_bridge_->active_pads.store(static_cast<int>(kPadNames.size()) - liftoff_pad_count);
+    vis_bridge_->active_pads.store(
+      static_cast<int>(kPadNames.size()) - kern.liftoff_pad_count);
   }
   vis_bridge_->sim_time.store(sim_time_);
 
