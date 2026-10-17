@@ -9,6 +9,7 @@
 
 #include "adhere_control_msgs/msg/fsm_command.hpp"
 #include "adhere_controller_common/common/enumClass.h"
+#include "adhere_controller_common/common/MultiRateDecimator.h"
 #include "adhere_controller_common/CtrlInterfaces.h"
 #include "adhere_controller_common/FSM/FSMState.h"
 #include "adhere_controller_common/FSM/StateDepthHold.h"
@@ -19,13 +20,16 @@ namespace adhere_kamr_controller
 
 // AdhereKamrController: the ROS 2 Foxy controller_interface::ControllerInterface plugin that
 // owns the FSM (CLAUDE.md Phase 3.1 Stage 2.3). Foxy has no on_init()/update(time, period)
-// overrides -- init(const std::string&) and update() (no args) are the real virtuals, so time
-// and period are computed here from get_node()->now() before being forwarded to
-// FSMState::run(time, period), exactly as CLAUDE.md Sec.2 specifies.
+// overrides -- init(const std::string&) and update() (no args) are the real virtuals, called by
+// ControllerManager on every 500Hz physics tick (CLAUDE.md Phase 3.1.1 Sec.3). A
+// MultiRateDecimator divides that master clock into a uniform inner_decimation_-ratio inner loop
+// (default 2 -> 250Hz, FSMState::run(time, period) with a *constant* period, zero
+// 4ms/6ms-style alternation) and an outer_decimation_-ratio outer-loop hook (default 20 -> 25Hz),
+// replacing the former non-uniform [3,3,3,3,3,2,2,2,2,2] substep schedule.
 //
-// Future KAMR-MPPI milestones (200Hz inner-loop Impedance PD + Pad-Force DOB + 12D OSQP, 20Hz
-// async CUDA outer loop) add further FSMState subclasses to this same state machine; Phase 3.1
-// only wires PASSIVE and DEPTH_HOLD.
+// Future KAMR-MPPI milestones (Impedance PD + Pad-Force DOB + 12D OSQP on the inner loop, async
+// CUDA MPPI rollout on the outer-loop hook) add further FSMState subclasses to this same state
+// machine; Phase 3.1 only wires PASSIVE and DEPTH_HOLD.
 class AdhereKamrController : public controller_interface::ControllerInterface
 {
 public:
@@ -78,10 +82,19 @@ private:
 
   rclcpp::Subscription<adhere_control_msgs::msg::FsmCommand>::SharedPtr fsm_command_subscription_;
 
-  // Measured directly from consecutive update() calls (Foxy's ControllerInterface::update()
-  // takes no time/period arguments, CLAUDE.md Sec.2), reset in on_activate() so a
-  // deactivate/reactivate cycle never produces one huge stale-period tick.
-  rclcpp::Time last_update_time_;
+  // Uniform integer-ratio multi-rate decimation (CLAUDE.md Phase 3.1.1 Stage 2.1): cm_update_rate_
+  // is the master controller_manager/AdhereMujocoHardware tick rate (500Hz); inner_decimation_/
+  // outer_decimation_ are read as ROS parameters in on_configure() (defaults 2 and 20 -> 250Hz
+  // inner / 25Hz outer). decimator_ is reconstructed from them and reset to tick 0 in
+  // on_activate() so a deactivate/reactivate cycle always restarts phase-aligned.
+  int cm_update_rate_ = 500;
+  int inner_decimation_ = 2;
+  int outer_decimation_ = 20;
+  std::shared_ptr<adhere_controller_common::MultiRateDecimator> decimator_;
+  // Constant inner-loop period (inner_decimation_ / cm_update_rate_ seconds) passed to every
+  // FSMState::run() call -- never measured from wall-clock deltas, so it carries zero scheduling
+  // jitter regardless of executor/OS timing noise.
+  rclcpp::Duration inner_period_ = rclcpp::Duration::from_seconds(0.004);
 };
 
 }  // namespace adhere_kamr_controller

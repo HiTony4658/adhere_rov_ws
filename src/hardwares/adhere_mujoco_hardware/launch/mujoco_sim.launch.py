@@ -8,12 +8,11 @@ One-line usage:
     ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py
     ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py headless:=true use_rviz:=false
 
-AdhereKamrController (CLAUDE.md Phase 3.1) is loaded/configured/activated programmatically by
-adhere_mujoco_node itself (no spawner node needed), always booting into the FSM's default
-PASSIVE state. spawn_fsm_console (default true) additionally opens the interactive FSM
-terminal console (adhere_keyboard_input's fsm_console_node) in its own gnome-terminal/xterm
-window; set spawn_fsm_console:=false and run it manually instead:
-    ros2 run adhere_keyboard_input fsm_console_node
+Pure open-loop hardware launch (CLAUDE.md Phase 3.1.1 Stage 2.2): this package has zero
+knowledge of any specific controller or teleop console. autostart_controllers defaults to an
+empty list, so adhere_mujoco_node always boots with exactly 0 active controllers and
+hw_commands_ stays at u=0. Closed-loop control has its own, separate launch file in the
+controller package that wants it.
 
 Zero-recompile model switching (CLAUDE.md Phase 2.12 Section 1): pkg_description/mjcf_file/
 xacro_file default to simplified_v1_description's rov_wall.xml + its xacro entry point.
@@ -26,9 +25,10 @@ arguments -- no AdhereMujocoHardware C++ recompilation:
 import os
 
 import xacro
+import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -56,10 +56,11 @@ def generate_launch_description():
         "xacro_file", default_value="urdf/simplified_v1.urdf.xacro",
         description="URDF/xacro entry-point file path, relative to pkg_description's share "
                      "directory.")
-    declare_spawn_fsm_console = DeclareLaunchArgument(
-        "spawn_fsm_console", default_value="true",
-        description="If true, opens adhere_keyboard_input's fsm_console_node in a dedicated "
-                     "gnome-terminal/xterm window (CLAUDE.md Phase 3.1 Stage 2.4).")
+    declare_autostart_controllers = DeclareLaunchArgument(
+        "autostart_controllers", default_value="[]",
+        description="Generic, controller-agnostic list of controller names to load/configure/"
+                     "activate in-process (CLAUDE.md Phase 3.1.1 Stage 2.2). Empty by default, "
+                     "so this launch file always starts exactly 0 controllers (u=0).")
 
     def _make_robot_description(context):
         # Pure-xacro decoupling (CLAUDE.md Phase 2.6 Stage 2.1): simplified_v1.urdf.xacro takes
@@ -74,6 +75,23 @@ def generate_launch_description():
         xacro_file = os.path.join(description_share, xacro_file_value)
         processed = xacro.process_file(xacro_file).toxml()
         headless_value = context.launch_configurations["headless"] == "true"
+        # yaml.safe_load (not a bare str) so a non-empty override (e.g.
+        # autostart_controllers:="['my_controller']") is passed to adhere_mujoco_node as an
+        # actual string array, not a single literal string (CLAUDE.md Phase 3.1.1 Stage 2.2).
+        autostart_controllers_value = yaml.safe_load(
+            context.launch_configurations["autostart_controllers"])
+        adhere_mujoco_node_parameters = {
+            "robot_description": processed,
+            "headless": headless_value,
+            "pkg_description": pkg_description_value,
+            "mjcf_file": mjcf_file_value,
+        }
+        # launch_ros cannot evaluate an empty-list ROS parameter (it can't infer the array's
+        # element type with zero elements), so the key is simply omitted when empty -- the
+        # C++-side declare_parameter default ({}) already matches this launch argument's own
+        # default, so the parameter's effective value is unaffected either way.
+        if autostart_controllers_value:
+            adhere_mujoco_node_parameters["autostart_controllers"] = autostart_controllers_value
         return [
             Node(
                 package="robot_state_publisher",
@@ -87,12 +105,7 @@ def generate_launch_description():
                 executable="adhere_mujoco_node",
                 name="adhere_mujoco_node",
                 output="screen",
-                parameters=[{
-                    "robot_description": processed,
-                    "headless": headless_value,
-                    "pkg_description": pkg_description_value,
-                    "mjcf_file": mjcf_file_value,
-                }],
+                parameters=[adhere_mujoco_node_parameters],
             ),
         ]
 
@@ -108,26 +121,6 @@ def generate_launch_description():
         condition=IfCondition(use_rviz),
     )
 
-    # gnome-terminal (fallback xterm) running fsm_console_node in its own window, so it keeps
-    # reading stdin independently of this launch file's own terminal/log output. Guarded by
-    # `which` + `||` so one missing terminal emulator falls back to the other instead of
-    # failing the whole launch.
-    fsm_console = ExecuteProcess(
-        cmd=[
-            "bash", "-c",
-            "if command -v gnome-terminal >/dev/null 2>&1; then "
-            "gnome-terminal --title='ROV FSM Console' -- "
-            "ros2 run adhere_keyboard_input fsm_console_node; "
-            "elif command -v xterm >/dev/null 2>&1; then "
-            "xterm -T 'ROV FSM Console' -e "
-            "ros2 run adhere_keyboard_input fsm_console_node; "
-            "else echo 'fsm_console: neither gnome-terminal nor xterm found, run "
-            "\"ros2 run adhere_keyboard_input fsm_console_node\" manually' >&2; fi",
-        ],
-        condition=IfCondition(LaunchConfiguration("spawn_fsm_console")),
-        output="screen",
-    )
-
     return LaunchDescription(
         [
             declare_headless,
@@ -135,9 +128,8 @@ def generate_launch_description():
             declare_pkg_description,
             declare_mjcf_file,
             declare_xacro_file,
-            declare_spawn_fsm_console,
+            declare_autostart_controllers,
             adhere_mujoco_node,
             rviz,
-            fsm_console,
         ]
     )

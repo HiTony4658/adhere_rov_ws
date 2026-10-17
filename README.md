@@ -15,8 +15,10 @@
 1. **零掀离（Zero Liftoff）约束**：任意时刻 4 个接触垫法向力 `min_i F_{N,i}(t) > 0`；
 2. **菱形核（Rhombic Kern）可行域约束**：压力中心（CoP）必须落在由接触几何与临界力
    `F_crit` 共同决定的菱形安全域内，`K_val <= 1 - 4*F_crit/F_press`；
-3. **多速率混叠抑制**：500Hz 物理 / 200Hz 内环 / 20Hz 外环 / 60Hz 可视化之间不产生
-   非预期的离散化伪影或代数环（如 `z = -K_f` 死循环）。
+3. **多速率混叠抑制**：500Hz 物理 / 250Hz 内环 / 25Hz 外环 / 60Hz 可视化之间不产生
+   非预期的离散化伪影或代数环（如 `z = -K_f` 死循环），且内外环均为 500Hz 主时钟的
+   **整数倍精确抽取**（`inner_decimation=2`、`outer_decimation=20`），不存在任何
+   非均匀交替子步调度。
 
 在 Python/JAX（MJX）原型 `pr_wbc_mppi_v4` 中，我们已经验证了算法层面的有效性
 （`0.9 m/s` 阵风扰动下 `5.83%` 掀离率、`11.6 mm` 位置 RMSE），但暴露出两个工程瓶颈：
@@ -61,7 +63,7 @@
 │                      adhere_mujoco_node（单进程，宿主一切）                 │
 │                                                                            │
 │  ┌────────────────────────────┐        ┌──────────────────────────────┐  │
-│  │   MujocoViewer (60Hz)      │        │  Async CUDA MPPI Thread (20Hz) │  │
+│  │   MujocoViewer (60Hz)      │        │  Async CUDA MPPI Thread (25Hz) │  │
 │  │   GLFW/OpenGL 渲染线程      │        │  w_cmd = [Fx,Fy,Fz,Tx]^T 采样  │  │
 │  │   d_vis_ = mj_makeData(m_) │        │  < 30ms 目标求解延迟           │  │
 │  └─────────────▲──────────────┘        └───────────────▲────────────────┘  │
@@ -78,10 +80,10 @@
 │  │   read(): d_ -> hw_states_[36]     │    │  FSM: PASSIVE/PRELOAD/      │ │
 │  │   write(): hw_commands_[8] ->      │    │       STATION_KEEP/TRAJ/    │ │
 │  │     Fossen水动力+阵风 -> mj_step    │    │       EMERGENCY_DETACH      │ │
-│  │   owns: mjModel* m_, mjData* d_,   │    │  Inner(>=200Hz): PD+DOB+    │ │
-│  │   FossenHydrodynamics,             │    │    12D Rhombic-Kern OSQP    │ │
-│  │   hw_states_[36], hw_commands_[8]  │    │  Outer(>=20Hz): 与CUDA线程  │ │
-│  └─────────────────────────────────────┘    │    交换 (qpos,qvel,...)    │ │
+│  │   owns: mjModel* m_, mjData* d_,   │    │  Inner(250Hz,抽取比2): PD+  │ │
+│  │   FossenHydrodynamics,             │    │    DOB+12D Rhombic-Kern OSQP│ │
+│  │   hw_states_[36], hw_commands_[8]  │    │  Outer(25Hz,抽取比20): 与   │ │
+│  └─────────────────────────────────────┘    │    CUDA线程交换(qpos,qvel..)│ │
 │                                              └─────────────────────────────┘ │
 │  controller_manager 以 update_rate: 500 严格驱动 read()/write()/update() │
 └──────────────────────────────────────────────────────────────────────────┘
@@ -94,21 +96,31 @@
 - **`read()`**：从 `d_` 中提取 IMU（姿态/角速度/加速度）、6-DOF 位姿/机体速度、
   4 个接触垫法向力 `F_N,i` 与分离速度 `v_sep,i`，写入 `hw_states_[36]`；同步记录
   500Hz ground-truth 掀离与菱形核余量 `M_kern` 遥测。
-- **`write()`**：读取当前内存中 `hw_commands_[0..7]`（无论控制器是在 `200Hz` 还是
-  `20Hz` 更新它、抑或本 tick 未更新——天然模拟硬件 ESC 零阶保持 ZOH！），
+- **`write()`**：读取当前内存中 `hw_commands_[0..7]`（无论控制器是在 `250Hz` 还是
+  `25Hz` 更新它、抑或本 tick 未更新——天然模拟硬件 ESC 零阶保持 ZOH！），
   施加可选推力器滞后 `tau_T` 与死区，计算 6-DOF Fossen 水动力 + 阵风并写入
   `d_->xfrc_applied`，调用 `mj_step(m_, d_)` 推进 `2.0 ms`。
 
-### 3.2 `AdhereKamrController` 速率解耦（`CtrlInterfaces` 零拷贝）
+### 3.2 `AdhereKamrController` 均匀整数抽取多速率解耦（`CtrlInterfaces` 零拷贝）
 
-`controller_manager` 以 500Hz 调用 `update()`，但控制器内部通过计数器实现速率解耦：
+`controller_manager` 与 `AdhereMujocoHardware` 均以严格 500Hz（`dt = 2.0 ms`）驱动
+`read()`/`write()`/`update()`。`AdhereKamrController::update()` 内部用
+`MultiRateDecimator`（`adhere_controller_common`）对 500Hz 主时钟做**纯整数取模抽取**，
+彻底取代早期 `[3,3,3,3,3,2,2,2,2,2]` 交替子步调度（该调度为凑出 `200Hz` 而在
+`4ms`/`6ms` 间抖动，给 Pad-Force DOB 等离散滤波器引入 `±20%` 采样周期抖动）：
 
-- **内环（`>=200Hz`）**：`FSMState::run()` → 平面阻抗 PD + 接触力 DOB
+- **内环（`inner_decimation=2` → 精确 250Hz，`dt = 4.0 ms` 恒定不抖动）**：
+  `tick % 2 == 0` 时触发 `FSMState::run(time, 4ms)` → 平面阻抗 PD + 接触力 DOB
   （`tau_dob = 0.02 s`）+ 12 维弹性菱形核 OSQP，更新 `hw_commands_[0..7]`；
-  非触发 tick 上 `hw_commands_` 保持不变。
-- **外环（`>=20Hz`）**：每 25 步（`50 ms`）通过 `realtime_tools::RealtimeBuffer`
-  与异步 CUDA MPPI 滚动线程交换 `(qpos, qvel, F_x_extra_preload)` 与名义
-  4 维力矩 `w_cmd = [F_x, F_y, F_z, T_x]^T`（目标求解延迟 `< 30 ms`）。
+  非触发 tick 上原样返回，`hw_commands_` 保持不变（硬件 ESC 零阶保持 ZOH）。
+- **外环（`outer_decimation=20` → 精确 25Hz，`dt = 40.0 ms` 恒定，每 10 个内环步
+  触发一次；也可配置为 `outer_decimation=25` 得到 `20Hz`）**：通过
+  `realtime_tools::RealtimeBuffer` 与异步 CUDA MPPI 滚动线程交换
+  `(qpos, qvel, F_x_extra_preload)` 与名义 4 维力矩
+  `w_cmd = [F_x, F_y, F_z, T_x]^T`（目标求解延迟 `< 30 ms`；Phase 4/5 前为占位钩子）。
+- `cm_update_rate`/`inner_decimation`/`outer_decimation` 均为 `AdhereKamrController` 的
+  ROS 参数（见 `simplified_v1_description/config/robot_control.yaml`），默认
+  `500`/`2`/`20`。
 
 ### 3.3 `MujocoViewer`（60Hz，异步可视化前端）
 
@@ -179,14 +191,19 @@ source install/setup.bash
 # 3a. 静态几何检视（RobotModel + TF，无物理仿真）
 ros2 launch simplified_v1_description visualize.launch.py
 
-# 3b. 完整 FSM 闭环仿真：AdhereKamrController 自动加载/配置/激活（默认 PASSIVE 态），
-# MuJoCo 窗口 + RViz2 双可视化同步，并自动弹出 FSM 终端控制台（输入 1 切 PASSIVE、
-# 输入 2 并指定目标深度切 DEPTH_HOLD 做闭环定深）
+# 3b. 纯开环硬件仿真：adhere_mujoco_hardware 对任何控制器/控制台零感知，
+# 默认 0 个控制器加载（u=0 被动漂移验证场景）
 ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py
+
+# 3c. 完整 FSM 闭环仿真：AdhereKamrController 自动加载/配置/激活（默认 PASSIVE 态，
+# 250Hz 均匀内环 / 25Hz 均匀外环），MuJoCo 窗口 + RViz2 双可视化同步，并自动弹出
+# FSM 终端控制台（输入 1 切 PASSIVE、输入 2 并指定目标深度切 DEPTH_HOLD 做闭环定深）
+ros2 launch adhere_kamr_controller mujoco.launch.py
 ```
 
 各命令的完整参数说明见 [`src/descriptions/simplified_v1_description/README.md`](src/descriptions/simplified_v1_description/README.md)、
-[`src/hardwares/adhere_mujoco_hardware/README.md`](src/hardwares/adhere_mujoco_hardware/README.md)
+[`src/hardwares/adhere_mujoco_hardware/README.md`](src/hardwares/adhere_mujoco_hardware/README.md)、
+[`src/controllers/adhere_kamr_controller/README.md`](src/controllers/adhere_kamr_controller/README.md)
 与 [`src/commands/adhere_keyboard_input/README.md`](src/commands/adhere_keyboard_input/README.md)
 （FSM 终端控制台用法）。
 
@@ -198,9 +215,10 @@ ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py
 |---|---|---|
 | **Phase 1** | 工作空间骨架、6 个包清单、全量中文 README | ✅ 完成 |
 | **Phase 2** | `AdhereMujocoHardware` 500Hz 读写循环 + Fossen 水动力 + 可插拔水流环境 + `MujocoViewer`/RViz2 双可视化 | ✅ 完成 |
-| **Phase 3.1** | `adhere_controller_common`（`CtrlInterfaces`/FSM/数学工具）+ `PASSIVE`/`DEPTH_HOLD` 两态 + `AdhereKamrController` 插件 + FSM 终端控制台 | ✅ 当前阶段 |
-| **Phase 4** | `AdhereKamrController` 200Hz 内环（PD + DOB + 12D OSQP） | 待开始 |
-| **Phase 5** | 20Hz 异步 CUDA MPPI 外环滚动线程（`sm_72`/`sm_75` 双架构） | 待开始 |
+| **Phase 3.1** | `adhere_controller_common`（`CtrlInterfaces`/FSM/数学工具）+ `PASSIVE`/`DEPTH_HOLD` 两态 + `AdhereKamrController` 插件 + FSM 终端控制台 | ✅ 完成 |
+| **Phase 3.1.1** | 均匀整数抽取多速率（500Hz→250Hz 内环/25Hz 外环，`MultiRateDecimator`）+ `adhere_mujoco_hardware`/`adhere_kamr_controller` 严格包解耦（独立 `mujoco_sim.launch.py` / `mujoco.launch.py`） | ✅ 当前阶段 |
+| **Phase 4** | `AdhereKamrController` 250Hz 内环（PD + DOB + 12D OSQP） | 待开始 |
+| **Phase 5** | 25Hz 异步 CUDA MPPI 外环滚动线程（`sm_72`/`sm_75` 双架构） | 待开始 |
 | **Phase 6** | 与 Python/JAX 基准（`mujoco_mppi_ws`）数值对齐验证 + 论文实验复现 | 待开始 |
 | **Phase 7** | Jetson AGX Xavier Sim-to-Real 真实硬件接口 `adhere_real_hardware` | 未来阶段 |
 

@@ -19,8 +19,8 @@ Architect"职责要求的**严格 Sim-to-Real 一致性**的工程落地方式�
 
 `AdhereMujocoHardware` 被 `controller_manager`（`update_rate: 500`）严格以
 `dt = 2.0 ms` 周期驱动，其 `read()`/`write()` 内部完整封装了"传感器读取 → 水动力
-计算 → 物理步进 → 状态更新"的闭环，**完全不关心**上层 `AdhereKamrController` 是以
-200Hz 还是 20Hz 更新 `hw_commands_`。详见
+计算 → 物理步进 → 状态更新"的闭环，**完全不关心**上层控制器是以 250Hz 还是 25Hz
+更新 `hw_commands_`，甚至不关心上层有没有加载任何控制器。详见
 [`adhere_mujoco_hardware/README.md`](adhere_mujoco_hardware/README.md) 的深度剖析。
 
 ## 当前软件包

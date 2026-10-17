@@ -1,8 +1,13 @@
 // adhere_mujoco_node: single-process host for AdhereMujocoHardware (500Hz) + the standard
 // ros2_control ResourceManager/ControllerManager plumbing, plus a 100Hz TF/Odometry/
 // JointState/MarkerArray publisher so RViz2 mirrors the embedded MuJoCo viewer in real time.
-// With no controller spawned, ControllerManager::update() is a no-op every tick and
-// hw_commands_ stays at zero -- this is exactly the "u=0 passive drift" verification harness.
+// With no controller spawned (the default), ControllerManager::update() is a no-op every tick
+// and hw_commands_ stays at zero -- this is exactly the "u=0 passive drift" verification
+// harness. This node has zero compile-time or runtime knowledge of any specific controller
+// (CLAUDE.md Phase 3.1.1 Stage 2.2): the optional `autostart_controllers` string-array
+// parameter (default empty) lets a separate closed-loop launch file bring up its own
+// controller in-process, entirely from launch-time parameters, with no package-level
+// coupling in either direction.
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -108,10 +113,19 @@ int main(int argc, char ** argv)
   // neither parameter is unaffected.
   node->declare_parameter<std::string>("pkg_description", "simplified_v1_description");
   node->declare_parameter<std::string>("mjcf_file", "mjcf/rov_wall.xml");
+  // Generic, controller-agnostic autostart list (CLAUDE.md Phase 3.1.1 Stage 2.2): each entry is
+  // a controller *name* only -- its plugin *type* must already be present in this process'
+  // "controller_manager" parameter namespace (e.g. robot_control.yaml's
+  // `controller_manager.ros__parameters.<name>.type`), which the single-arg
+  // load_controller(name) overload below reads. Empty by default, so mujoco_sim.launch.py's
+  // plain hardware-only launch starts exactly 0 controllers.
+  node->declare_parameter<std::vector<std::string>>("autostart_controllers", {});
   const std::string urdf = node->get_parameter("robot_description").as_string();
   const bool headless = node->get_parameter("headless").as_bool();
   const std::string pkg_description = node->get_parameter("pkg_description").as_string();
   const std::string mjcf_file = node->get_parameter("mjcf_file").as_string();
+  const std::vector<std::string> autostart_controllers =
+    node->get_parameter("autostart_controllers").as_string_array();
   if (urdf.empty()) {
     RCLCPP_FATAL(node->get_logger(), "robot_description parameter is empty, cannot start");
     rclcpp::shutdown();
@@ -146,29 +160,30 @@ int main(int argc, char ** argv)
   executor->add_node(controller_manager);
   executor->add_node(node);
 
-  // Programmatic load/configure/activate (CLAUDE.md Phase 3.1 Stage 2.3): the (name, type)
-  // load_controller() overload reads the plugin type straight from this call rather than from
-  // the parameter server, so launching mujoco_sim.launch.py always brings up
-  // adhere_kamr_controller in its default FSM state (PASSIVE) with no controllers.yaml param
-  // file required. The library itself is discovered via pluginlib's ament-index plugin
-  // manifest at runtime (adhere_kamr_controller.xml), not by linking against it here.
-  if (!controller_manager->load_controller(
-        "adhere_kamr_controller", "adhere_kamr_controller/AdhereKamrController")) {
-    RCLCPP_FATAL(node->get_logger(), "Failed to load adhere_kamr_controller");
-    rclcpp::shutdown();
-    return 1;
+  // Generic programmatic load/configure (CLAUDE.md Phase 3.1.1 Stage 2.2): the single-arg
+  // load_controller(name) overload reads each controller's plugin type from this process'
+  // "controller_manager" parameter namespace (populated by whatever --params-file the launch
+  // file passed, e.g. robot_control.yaml), so this node never names a specific controller type.
+  // Each plugin library is discovered via pluginlib's ament-index plugin manifest at runtime,
+  // not by linking against it here. switch_controller() itself is deferred until AFTER the
+  // physics thread starts (below): Foxy's ControllerManager::switch_controller() busy-waits for
+  // the pending switch to be APPLIED, which only happens inside a subsequent
+  // ControllerManager::update() call -- calling it here, before any thread is calling update(),
+  // would deadlock forever on the infinite default timeout.
+  for (const auto & controller_name : autostart_controllers) {
+    if (!controller_manager->load_controller(controller_name)) {
+      RCLCPP_FATAL(node->get_logger(), "Failed to load controller '%s'", controller_name.c_str());
+      rclcpp::shutdown();
+      return 1;
+    }
+    if (controller_manager->configure_controller(controller_name) !=
+        controller_interface::return_type::OK) {
+      RCLCPP_FATAL(
+        node->get_logger(), "Failed to configure controller '%s'", controller_name.c_str());
+      rclcpp::shutdown();
+      return 1;
+    }
   }
-  if (controller_manager->configure_controller("adhere_kamr_controller") !=
-      controller_interface::return_type::OK) {
-    RCLCPP_FATAL(node->get_logger(), "Failed to configure adhere_kamr_controller");
-    rclcpp::shutdown();
-    return 1;
-  }
-  // switch_controller() itself is deferred until AFTER the physics thread starts (below): Foxy's
-  // ControllerManager::switch_controller() busy-waits for the pending switch to be APPLIED,
-  // which only happens inside a subsequent ControllerManager::update() call -- calling it here,
-  // before any thread is calling update(), would deadlock forever on the infinite default
-  // timeout.
 
   auto tf_broadcaster = std::make_shared<tf2_ros::TransformBroadcaster>(node);
   auto odom_pub = node->create_publisher<nav_msgs::msg::Odometry>("/rov/odom", 10);
@@ -373,13 +388,13 @@ int main(int argc, char ** argv)
 
   // Now that physics_thread is concurrently calling controller_manager->update() every tick,
   // switch_controller()'s busy-wait for the pending switch to be applied resolves quickly
-  // (CLAUDE.md Phase 3.1 Stage 2.3): launching mujoco_sim.launch.py always brings up
-  // adhere_kamr_controller active and in its default FSM state (PASSIVE).
-  if (controller_manager->switch_controller(
-        {"adhere_kamr_controller"}, {},
-        controller_manager_msgs::srv::SwitchController::Request::STRICT, true) !=
-      controller_interface::return_type::OK) {
-    RCLCPP_FATAL(node->get_logger(), "Failed to activate adhere_kamr_controller");
+  // (CLAUDE.md Phase 3.1.1 Stage 2.2). Skipped entirely when autostart_controllers is empty --
+  // mujoco_sim.launch.py's default plain hardware launch stays at exactly 0 active controllers.
+  if (!autostart_controllers.empty() &&
+      controller_manager->switch_controller(
+        autostart_controllers, {}, controller_manager_msgs::srv::SwitchController::Request::STRICT,
+        true) != controller_interface::return_type::OK) {
+    RCLCPP_FATAL(node->get_logger(), "Failed to activate autostart_controllers");
     physics_running = false;
     physics_thread.join();
     rclcpp::shutdown();

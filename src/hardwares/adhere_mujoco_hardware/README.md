@@ -516,16 +516,21 @@ GLFW 窗口创建，仅空转等待停止信号。
    `resource_manager->start_components()`（触发 `start()`，此时才真正按
    `headless_` 构造 `MujocoViewer`）；
 2. 以该 `ResourceManager` 构造标准 `controller_manager::ControllerManager`，在专属
-   线程里以严格 `500Hz` 循环调用 `read()`/`update()`/`write()`。在该线程启动之前，
-   以编程方式（非 `controllers.yaml` 参数服务器查找）调用
-   `load_controller("adhere_kamr_controller", "adhere_kamr_controller/AdhereKamrController")`
-   + `configure_controller(...)`；`switch_controller(...)`（真正激活、默认进入
-   FSM 的 `PASSIVE` 态）则安排在物理线程**启动之后**才调用——Foxy 的
-   `switch_controller()` 会阻塞等待下一次 `ControllerManager::update()` 真正执行
-   切换，在物理线程开始循环调用 `update()` 之前调用它会死锁。物理循环线程本身
-   用 `std::chrono::steady_clock::sleep_until` 而非 `rclcpp::Rate`，并对每拍耗时
-   做指数滑动平均写入 `MujocoVisBridge::actual_physics_hz`，用于证明
-   `MujocoViewer`（60Hz GL）与 RViz2（100Hz 话题）都不会拖慢物理循环；
+   线程里以严格 `500Hz` 循环调用 `read()`/`update()`/`write()`。本包对任何具体控制器
+   或遥操作控制台**零编译期/运行期耦合**（CLAUDE.md Phase 3.1.1）：是否加载、加载
+   哪个控制器完全由可选的 `autostart_controllers` 字符串数组参数（默认空数组）
+   驱动，在该线程启动之前对列表中每个名字调用单参数 `load_controller(name)`
+   （插件类型从该进程 "controller_manager" 参数命名空间读取，而非硬编码
+   `(name, type)` 二参数重载）+ `configure_controller(name)`；`switch_controller(...)`
+   （真正激活）则安排在物理线程**启动之后**才调用，且仅当 `autostart_controllers`
+   非空时才调用——Foxy 的 `switch_controller()` 会阻塞等待下一次
+   `ControllerManager::update()` 真正执行切换，在物理线程开始循环调用 `update()`
+   之前调用它会死锁。`mujoco_sim.launch.py` 保持 `autostart_controllers` 默认空，
+   始终以 0 个控制器（`u=0`）纯开环启动；闭环控制器有自己独立的启动文件（不在本包
+   内）。物理循环线程本身用 `std::chrono::steady_clock::sleep_until` 而非
+   `rclcpp::Rate`，并对每拍耗时做指数滑动平均写入
+   `MujocoVisBridge::actual_physics_hz`，用于证明 `MujocoViewer`（60Hz GL）与
+   RViz2（100Hz 话题）都不会拖慢物理循环；
 3. 额外在 `100Hz` 定时器中，从 `AdhereMujocoHardware::visBridge()` 的快照（而非
    `claim_state_interface()`，后者与 `controller_manager` 所属的 `ResourceManager`
    跨线程竞争同一资源是不安全的）读取位姿/速度/接触力/环境流速，发布
@@ -752,13 +757,11 @@ ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py \
 # 无 GUI 窗口时，用话题一次性切换造浪（例如配合 headless:=true 做脚本化测试）
 ros2 topic pub /rov/wave_mode_cmd std_msgs/msg/Int32 "{data: 2}" --once   # 开启造浪
 ros2 topic pub /rov/wave_mode_cmd std_msgs/msg/Int32 "{data: 1}" --once   # 切回静水
-
-# 不自动弹出 FSM 终端控制台（例如脚本化测试场景），改用 ros2 run 手动启动或用
-# /rov/fsm_command 话题直接发布（见 adhere_keyboard_input/README.md）
-ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py spawn_fsm_console:=false
 ```
 
-默认（`spawn_fsm_console:=true`）会额外弹出一个独立终端窗口运行
-`adhere_keyboard_input` 的 `fsm_console_node`（CLAUDE.md Phase 3.1），用于在
-`AdhereKamrController` 的 `PASSIVE`/`DEPTH_HOLD` 两个 FSM 状态间切换、设定
-定深 PID 的目标深度。
+本包的 `mujoco_sim.launch.py` 是**纯开环硬件仿真**（CLAUDE.md Phase 3.1.1）：对任何
+具体控制器或 FSM 终端控制台零知晓，`autostart_controllers` 默认空数组，始终以
+`u=0` 启动。需要 `AdhereKamrController` 闭环 FSM（`PASSIVE`/`DEPTH_HOLD` 切换、
+定深 PID 目标深度设定）与 FSM 终端控制台时，改用
+[`adhere_kamr_controller/README.md`](../../controllers/adhere_kamr_controller/README.md)
+中的 `ros2 launch adhere_kamr_controller mujoco.launch.py`。

@@ -64,6 +64,15 @@ ament_export_dependencies(
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
+
+  find_package(ament_cmake_gtest REQUIRED)
+  # Header-only (MultiRateDecimator.h): no rclcpp/hardware_interface dependency, so the uniform
+  # 500Hz->250Hz/25Hz decimation contract (CLAUDE.md Phase 3.1.1 Stage 3.2) is verifiable in
+  # isolation, without standing up a full ControllerInterface/ResourceManager.
+  ament_add_gtest(test_multirate_decimator
+    test/test_multirate_decimator.cpp
+  )
+  target_include_directories(test_multirate_decimator PRIVATE include)
 endif()
 
 ament_package()

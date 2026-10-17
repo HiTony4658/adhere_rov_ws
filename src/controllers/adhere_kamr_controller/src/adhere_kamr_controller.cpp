@@ -104,6 +104,19 @@ CallbackReturn AdhereKamrController::on_configure(const rclcpp_lifecycle::State 
       ctrl_interfaces_.control_inputs_.target_y.store(msg->target_y);
       ctrl_interfaces_.control_inputs_.target_yaw.store(msg->target_yaw);
     });
+
+  // Uniform integer-ratio multi-rate parameters (CLAUDE.md Phase 3.1.1 Stage 2.1), read here
+  // (rather than on_activate()) so robot_control.yaml's adhere_kamr_controller.ros__parameters
+  // block is consulted exactly once per configure, same lifecycle point as the subscription
+  // above.
+  cm_update_rate_ = auto_declare<int>("cm_update_rate", cm_update_rate_);
+  inner_decimation_ = auto_declare<int>("inner_decimation", inner_decimation_);
+  outer_decimation_ = auto_declare<int>("outer_decimation", outer_decimation_);
+
+  decimator_ = std::make_shared<adhere_controller_common::MultiRateDecimator>(
+    cm_update_rate_, inner_decimation_, outer_decimation_);
+  inner_period_ = rclcpp::Duration::from_seconds(decimator_->innerPeriodSeconds());
+
   return CallbackReturn::SUCCESS;
 }
 
@@ -154,7 +167,13 @@ CallbackReturn AdhereKamrController::on_activate(const rclcpp_lifecycle::State &
   next_state_ = current_state_;
   next_state_name_ = current_state_->state_name;
   mode_ = adhere_controller_common::FSMMode::NORMAL;
-  last_update_time_ = get_node()->now();
+
+  // Uniform integer-ratio multi-rate reset (CLAUDE.md Phase 3.1.1 Stage 2.1): tick 0 always
+  // re-aligns inner_due and outer_due simultaneously, and CtrlInterfaces::frequency_ documents
+  // the live inner-loop rate (cm_update_rate_/inner_decimation_) for any FSMState that wants to
+  // read it instead of assuming a hardcoded constant.
+  decimator_->reset();
+  ctrl_interfaces_.frequency_ = cm_update_rate_ / inner_decimation_;
 
   return CallbackReturn::SUCCESS;
 }
@@ -183,19 +202,32 @@ CallbackReturn AdhereKamrController::on_shutdown(const rclcpp_lifecycle::State &
 
 controller_interface::return_type AdhereKamrController::update()
 {
+  // ControllerManager calls update() on every 500Hz physics tick (CLAUDE.md Phase 3.1.1 Sec.3);
+  // the decimator reports which of the uniform inner/outer schedules are due on this tick.
+  const auto tick = decimator_->tick();
+
+  if (tick.outer_due) {
+    // Outer-loop hook (default 25Hz, CLAUDE.md Phase 3.1.1 Stage 2.1): the async CUDA MPPI
+    // rollout thread hand-off (qpos, qvel, F_x_extra_preload) <-> w_cmd via
+    // realtime_tools::RealtimeBuffer is a Phase 4/5 milestone -- intentionally a no-op placeholder
+    // here so the uniform timing contract itself is already wired and verifiable (see
+    // adhere_controller_common's test_multirate_decimator).
+  }
+
+  if (!tick.inner_due) {
+    // Intermediate 500Hz tick (CLAUDE.md Phase 3.1.1 Stage 2.1): leave
+    // thruster_command_interface_ untouched so AdhereMujocoHardware::write() holds the previous
+    // inner-loop command (exact ESC Zero-Order Hold).
+    return controller_interface::return_type::OK;
+  }
+
   if (!current_state_) {
     return controller_interface::return_type::OK;
   }
 
   const rclcpp::Time time = get_node()->now();
-  // Foxy's ControllerInterface::update() takes no time/period arguments (CLAUDE.md Sec.2):
-  // period is measured directly from consecutive update() calls' get_node()->now() instead of
-  // assuming a constant 1/frequency_ step, so it stays correct even under scheduling jitter.
-  const rclcpp::Duration period = time - last_update_time_;
-  last_update_time_ = time;
-
   if (mode_ == adhere_controller_common::FSMMode::NORMAL) {
-    current_state_->run(time, period);
+    current_state_->run(time, inner_period_);
     next_state_name_ = current_state_->checkChange();
     if (next_state_name_ != current_state_->state_name) {
       mode_ = adhere_controller_common::FSMMode::CHANGE;

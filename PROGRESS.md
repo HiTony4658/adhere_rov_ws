@@ -1143,3 +1143,151 @@ Kd_z=55` 在 6s 窗口内收敛至 25-30mm 残差，不满足 `<5mm` 契约，�
 `fsm_console_node` 手动交互测试（管道注入 `1`/`2`+深度值/`q`）确认菜单渲染、
 `Current Z` 实时刷新（ROS 2 发现延迟后的首次 `/rov/odom` 到达，数秒量级，
 符合预期）、`FsmCommand` 发布三条路径均正确工作。
+
+## Phase 3.1.1（2026-10-17）：均匀整数抽取多速率（500Hz→250Hz/25Hz）、`adhere_mujoco_hardware`/`adhere_kamr_controller` 严格包解耦
+
+### 动机
+
+Phase 3.1 为凑出精确 `200Hz`（从 `500Hz` 主时钟）使用了 `[3,3,3,3,3,2,2,2,2,2]`
+交替子步调度表（`3` 拍 `6ms` / `2` 拍 `4ms` 交替），给 Pad-Force DOB 等未来的
+离散积分器/微分器/低通滤波器引入 `±20%` 采样周期抖动。同时 `adhere_mujoco_node.cpp`
+硬编码了 `load_controller("adhere_kamr_controller", "adhere_kamr_controller/
+AdhereKamrController")` 与 `switch_controller({"adhere_kamr_controller"}, ...)`，
+`mujoco_sim.launch.py` 也硬编码了 `fsm_console_node` 的自动弹出逻辑，使
+`adhere_mujoco_hardware` 包在编译期之外的 launch/运行时层面仍然耦合了具体控制器
+与遥操作控制台包。本阶段按更新后的 `CLAUDE.md` 落地两项改动：用严格整数比例的
+`MultiRateDecimator` 取代交替调度表；把 `adhere_mujoco_hardware` 相对
+`adhere_kamr_controller`/`adhere_keyboard_input` 的耦合降到 0。
+
+### 包 1：`src/controllers/adhere_controller_common`
+
+新增 `include/adhere_controller_common/common/MultiRateDecimator.h`：纯逻辑类
+（零 `rclcpp`/`hardware_interface` 依赖），构造时传入
+`(cm_update_rate, inner_decimation, outer_decimation)`，`tick()` 对递增计数器做
+`tick_count % inner_decimation == 0`/`tick_count % outer_decimation == 0` 的纯
+取模判断并返回 `{inner_due, outer_due}`；`innerPeriodSeconds()`/
+`outerPeriodSeconds()` 返回恒定的 `decimation/cm_update_rate` 秒值；`reset()`
+令下次 `tick()` 的 `inner_due`/`outer_due` 同时为真。新增
+`test/test_multirate_decimator.cpp`（4 个 `gtest` 用例）验证：默认
+`inner_decimation=2`/`outer_decimation=20` 下 500 次 tick 精确触发 250 次内环/
+25 次外环（且每次 `outer_due` 必然伴随 `inner_due`）；`outer_decimation=25`
+的 `20Hz` 外环替代配置同样精确；`reset()` 后下次 tick 必为双触发。
+`CMakeLists.txt`/`package.xml` 新增 `ament_cmake_gtest` 测试目标与
+`test_depend`。
+
+### 包 2：`src/controllers/adhere_kamr_controller`
+
+- `adhere_kamr_controller.hpp`：移除按 `get_node()->now()` 差值实测 `period`
+  的 `last_update_time_` 字段，改为持有
+  `std::shared_ptr<adhere_controller_common::MultiRateDecimator> decimator_`、
+  恒定的 `rclcpp::Duration inner_period_`、以及
+  `cm_update_rate_`/`inner_decimation_`/`outer_decimation_` 三个整型成员。
+- `adhere_kamr_controller.cpp`：
+  - `on_configure()` 新增 `auto_declare<int>("cm_update_rate", 500)`/
+    `auto_declare<int>("inner_decimation", 2)`/
+    `auto_declare<int>("outer_decimation", 20)` 三个 ROS 参数读取，据此构造
+    `decimator_` 并计算恒定 `inner_period_ = inner_decimation_/cm_update_rate_`
+    秒。
+  - `on_activate()` 新增 `decimator_->reset()`（保证每次激活都从 tick 0
+    对齐重新开始）与 `ctrl_interfaces_.frequency_ = cm_update_rate_ /
+    inner_decimation_`（供未来 `FSMState` 读取实际内环频率而非假设硬编码
+    常量）。
+  - `update()` 重写为：先 `decimator_->tick()`；`outer_due` 时执行一个当前为
+    空操作的外环钩子占位（Phase 4/5 才接入真正的异步 CUDA MPPI 线程交换）；
+    非 `inner_due` 的 tick 直接 `return OK`（`thruster_command_interface_`
+    不触碰，天然 ZOH）；`inner_due` 的 tick 才用恒定 `inner_period_`（而非
+    实测差值）调用 `current_state_->run(time, inner_period_)`，再走
+    `checkChange()`/`enter()`/`exit()` 原有切换逻辑。
+- 新增 `launch/mujoco.launch.py`：闭环启动文件（职责从
+  `adhere_mujoco_hardware/launch/mujoco_sim.launch.py` 迁移并扩展）——启动
+  `robot_state_publisher` + 通用 `adhere_mujoco_node` 可执行文件（以
+  `simplified_v1_description/config/robot_control.yaml` 为 `--params-file`，
+  额外叠加 `autostart_controllers:=['adhere_kamr_controller']` 这一个 ROS
+  参数）+ RViz2 + 自动弹出 `fsm_console_node` 终端窗口（`spawn_fsm_console`
+  默认 `true`，逻辑原样从旧 `mujoco_sim.launch.py` 迁移）。
+- `package.xml` 新增 `exec_depend`：`adhere_mujoco_hardware`（供其
+  `adhere_mujoco_node` 可执行文件被本包的 launch 文件引用）、
+  `adhere_keyboard_input`（`fsm_console_node`）、`simplified_v1_description`
+  （xacro + `robot_control.yaml`）、`xacro`/`ament_index_python`/
+  `robot_state_publisher`/`rviz2`。均为单向 `exec_depend`（`adhere_mujoco_hardware`
+  已不再声明任何反向依赖，不构成 colcon 构建环）。
+
+### 包 3：`src/hardwares/adhere_mujoco_hardware`（纯化，非新增）
+
+- `adhere_mujoco_node.cpp`：移除硬编码的
+  `load_controller("adhere_kamr_controller", "adhere_kamr_controller/
+  AdhereKamrController")` 二参数重载调用，改为通用的 `autostart_controllers`
+  字符串数组 ROS 参数（默认空数组），对列表中每个名字循环调用单参数
+  `load_controller(name)`（插件类型从本进程 `controller_manager` 参数命名空间
+  解析）+ `configure_controller(name)`；末尾的 `switch_controller(...)`
+  同样从硬编码的 `{"adhere_kamr_controller"}` 改为 `autostart_controllers`，
+  且仅在非空时才调用。
+- `launch/mujoco_sim.launch.py`：移除 `spawn_fsm_console` 参数与整段
+  `fsm_console` `ExecuteProcess`（迁移至
+  `adhere_kamr_controller/launch/mujoco.launch.py`）；新增通用
+  `autostart_controllers`（默认 `"[]"`，经 `yaml.safe_load()` 解析，为空时
+  干脆不把该键放进传给 `adhere_mujoco_node` 的参数字典——`launch_ros` 的
+  `evaluate_parameter_dict()` 无法对空列表推断数组元素类型，必须整个省略
+  该键，C++ 侧 `declare_parameter` 的默认值 `{}` 效果等价）。
+- `package.xml` 移除 `adhere_kamr_controller`/`adhere_keyboard_input` 两条
+  `exec_depend`：`grep -rn "adhere_kamr_controller\|fsm_console_node"
+  src/hardwares/adhere_mujoco_hardware/` 现在对 `.cpp`/`.hpp`/`.py`/`.xml`/
+  `CMakeLists.txt` 返回 0 条匹配（仅 `README.md` 保留指向
+  `adhere_kamr_controller/README.md` 的文档交叉引用，非代码耦合）。
+
+### 包 4：`src/descriptions/simplified_v1_description`
+
+新增 `config/robot_control.yaml`：供 `adhere_kamr_controller/launch/
+mujoco.launch.py` 作为单一 `--params-file` 传给 `adhere_mujoco_node`。
+
+**关键发现（Foxy `ros2 launch` 的 `__node` 重映射陷阱）**：`launch_ros` 的
+`Node` 动作总会附加一条无作用域的 `-r __node:=<name>` 重映射规则（`<name>`
+即该 launch 动作赋予可执行文件的名字，此处是 `adhere_mujoco_node`）。这条
+规则对进程内**所有**使用默认 `NodeOptions` 构造的节点生效——不只是顶层
+`rclcpp::Node("adhere_mujoco_node")`，连 C++ 里显式命名为
+`"controller_manager"` 的内部 `ControllerManager` 节点、以及
+`AdhereKamrController` 自己的 `controller_interface` 节点，三者在 ROS 图里
+全部显示为同一个 `/adhere_mujoco_node`（用 `ros2 node list` 实测确认，
+WARNING 提示三个节点同名）。最初按直觉把 `controller_manager`/
+`adhere_kamr_controller` 的 `ros__parameters` 分别写成两个顶层键
+`controller_manager:`/`adhere_kamr_controller:`，导致
+`load_controller(name)` 报错 `"The 'type' param not defined for
+'adhere_kamr_controller'"`——用一个临时 `RCLCPP_INFO` 诊断日志打印
+`get_node()->get_name()`/`get_fully_qualified_name()` 并把
+`outer_decimation` 临时改成哨兵值（`7`、`11`）两轮经验验证后，确认
+`AdhereKamrController` 自己的节点也被重映射为 `/adhere_mujoco_node`，于是
+把两个顶层键合并为同一个 `adhere_mujoco_node:` 键（`controller_manager` 的
+`update_rate`/`<name>.type` 嵌套参数与 `AdhereKamrController` 自己的
+`cm_update_rate`/`inner_decimation`/`outer_decimation`/`kp_z`/`ki_z`/`kd_z`
+平铺参数共存于同一 `ros__parameters` 块）后，诊断日志确认哨兵值能正确传递，
+问题解决。验证完毕后移除诊断日志，`outer_decimation` 改回正式值 `20`。
+此发现已记录到 `adhere_kamr_controller/README.md`。
+
+### 验证结果
+
+`colcon build --symlink-install`（全部 6 个包）**零警告零错误**。
+`colcon test --packages-select adhere_controller_common adhere_mujoco_hardware`：
+新增的 `test_multirate_decimator`（4/4）与既有的
+`test_fossen_hydrodynamics_geometry`（26/26）、
+`test_rhombic_kern_and_thruster_model`（9/9）**全部通过**，对本阶段改动零
+回归（既有 `copyright`/`cpplint`/`flake8`/`pep257`/`uncrustify` style-lint
+失败是 Phase 2.14 起已记录的"全仓库缺版权头"预先存在问题，与本阶段无关，
+已用 `git stash` 对照确认新增文件未引入任何新的 lint 失败行）。
+
+`ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py headless:=true
+use_rviz:=false` 确认纯开环：`list_controllers` 服务返回空数组（0 个控制器），
+`/rov/odom` 正常以被动漂流发布。`ros2 launch adhere_kamr_controller
+mujoco.launch.py headless:=true use_rviz:=false spawn_fsm_console:=false`
+确认完整闭环（经 `ros2 topic pub /rov/fsm_command` 脚本化驱动，默认在系统上
+已有一个独立运行的 `fsm_console_node`，故测试时关闭自动弹出）：
+
+| 阶段 | 目标 | 终值 `z` | 残差 |
+|---|---|---|---|
+| `PASSIVE`（默认启动） | 自由漂流 | `1.0030m` | — |
+| `DEPTH_HOLD` | `z_des=0.40m` | `0.39998m` | `0.018mm` ✅ `<5mm` |
+| `DEPTH_HOLD`（运行时重定目标） | `z_des=0.75m` | `0.75061m` | `0.61mm` ✅ `<5mm` |
+| `PASSIVE`（切回） | 自由漂流 | `1.0030m`（恢复原平衡位置） | — |
+
+`list_controllers` 服务在闭环启动后返回 `adhere_kamr_controller`
+（`state='active'`，`type='adhere_kamr_controller/AdhereKamrController'`，
+claimed 全部 8 个 `thr_*/effort` 命令接口）。

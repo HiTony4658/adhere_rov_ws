@@ -1,0 +1,32 @@
+# Closed-loop parameter file for adhere_kamr_controller/launch/mujoco.launch.py (CLAUDE.md
+# Phase 3.1.1 Stage 2.2). This single file is passed to the adhere_mujoco_node executable's
+# --params-file.
+#
+# Single top-level key gotcha: ros2 launch's Node action always adds a blanket
+# "-r __node:=<name>" remap for the executable's assigned name ("adhere_mujoco_node" here).
+# That remap is unscoped, so it silently overrides the ROS-visible name of EVERY node
+# constructed in this one process with default NodeOptions -- not just the top-level
+# rclcpp::Node, but also the internal ControllerManager node (named "controller_manager" in
+# C++) AND AdhereKamrController's own controller_interface node (named "adhere_kamr_controller"
+# in C++). Empirically verified: `ros2 node list` shows THREE "/adhere_mujoco_node" entries
+# while this launch is active, and a controller-side parameter declared under a nested
+# "adhere_kamr_controller:" top-level key (as controller_manager.ros__parameters style YAML
+# would suggest) is silently never read -- auto_declare() falls back to its C++ default instead.
+# So every parameter below -- controller_manager's own update_rate/"<name>.type" entries AND
+# AdhereKamrController's own cm_update_rate/inner_decimation/outer_decimation/kp_z/ki_z/kd_z --
+# must live flat under this single "adhere_mujoco_node" key.
+adhere_mujoco_node:
+  ros__parameters:
+    update_rate: 500  # Hz (master hardware & sensor sampling rate, CLAUDE.md Sec.3)
+
+    adhere_kamr_controller:
+      type: adhere_kamr_controller/AdhereKamrController
+
+    cm_update_rate: 500
+    inner_decimation: 2    # 500 / 2 = 250 Hz uniform inner loop (dt = 4.0 ms)
+    outer_decimation: 20   # 500 / 20 = 25 Hz uniform outer loop (dt = 40.0 ms, 10 inner steps)
+    # Reserved for a future parameterized StateDepthHold PID (not yet consumed -- the live gains
+    # are still the Phase 3.1-tuned constants in StateDepthHold.cpp, kKpZ/kKiZ/kKdZ).
+    kp_z: 120.0
+    ki_z: 15.0
+    kd_z: 60.0

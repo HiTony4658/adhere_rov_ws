@@ -39,12 +39,11 @@
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>rviz2</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
-  <!-- adhere_mujoco_node load_controller()'s at runtime by plugin class name, discovered via
-       pluginlib's ament-index plugin manifest (no header/link dependency), so this is a
-       one-directional exec_depend (not a build-order cycle: adhere_kamr_controller declares no
-       dependency back on this package). -->
-  <exec_depend>adhere_kamr_controller</exec_depend>
-  <exec_depend>adhere_keyboard_input</exec_depend>
+  <!-- adhere_mujoco_node's optional autostart_controllers parameter load_controller()'s
+       whatever names a launch file passes it, discovered purely via pluginlib's ament-index
+       plugin manifest at runtime: no header/link dependency and no package.xml dependency of
+       any kind back on any specific controller or teleop package (CLAUDE.md Phase 3.1.1
+       Stage 2.2 package decoupling). -->
 
   <!-- MuJoCo (libmujoco) and GLFW3/OpenGL are located manually in CMakeLists.txt
        (no official find_package(mujoco) config is assumed); they are not declared here

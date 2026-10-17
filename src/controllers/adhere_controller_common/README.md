@@ -20,11 +20,15 @@ include/adhere_controller_common/
 └── common/
     ├── enumClass.h              # FSMStateName / FSMMode
     ├── mathTypes.h              # Eigen 类型别名（Vec3/Vec6/Vec8/Mat68/Mat86/RotMat）
-    └── mathTools.h              # quatToRotMat / rotMatToRPY / saturation
+    ├── mathTools.h              # quatToRotMat / rotMatToRPY / saturation
+    └── MultiRateDecimator.h     # 均匀整数抽取多速率调度（CLAUDE.md Phase 3.1.1）
 
 src/FSM/
 ├── StatePassive.cpp
 └── StateDepthHold.cpp
+
+test/
+└── test_multirate_decimator.cpp  # 纯逻辑 gtest，不依赖 rclcpp/hardware_interface
 ```
 
 ## `CtrlInterfaces`：零拷贝状态/命令包装
@@ -42,6 +46,11 @@ struct CtrlInterfaces {
   int frequency_ = 500;
 };
 ```
+
+`frequency_` 默认为 `500`（物理主时钟频率），`AdhereKamrController::on_activate()`
+会将其改写为实际内环频率 `cm_update_rate_ / inner_decimation_`（默认
+`500 / 2 = 250`），供任何想读取"自己当前被调用频率"而非假设硬编码常量的
+`FSMState` 使用。
 
 `AdhereMujocoHardware::export_state_interfaces()`/`export_command_interfaces()`
 导出的 `double*` 裸指针，经 `controller_manager` 装配后，以
@@ -68,10 +77,15 @@ protected:
 };
 ```
 
-> `run(time, period)` 的参数在 Foxy 下由 `AdhereKamrController::update()`
-> 内部通过 `get_node()->now()` 与上次调用时刻的差值计算得出并传入——`FSMState`
-> 本身不直接依赖 `controller_interface::ControllerInterface::update()` 的
-> Foxy 无参签名，保持可独立测试性。
+> `run(time, period)` 的参数在 Foxy 下由 `AdhereKamrController::update()` 内部
+> 传入——`time` 取自 `get_node()->now()`，`period` 则是 `MultiRateDecimator`
+> 根据 `inner_decimation_ / cm_update_rate_` 算出的**恒定**时长（默认
+> `2/500 = 0.004 s`），而非两次调用时刻的实测差值。这样一来 `period` 对任何
+> 离散积分器/微分器/低通滤波器（例如 `StateDepthHold` 的 PID 积分项）而言永远
+> 是精确值，不受调度抖动影响（CLAUDE.md Phase 3.1.1，见下方"均匀整数抽取
+> 多速率调度"小节）。`FSMState` 本身不直接依赖
+> `controller_interface::ControllerInterface::update()` 的 Foxy 无参签名，
+> 保持可独立测试性。
 
 ## 当前状态
 
@@ -92,6 +106,30 @@ protected:
 `6x8` 刚体力/力矩映射（行序 `[Fx,Fy,Fz,Tx,Ty,Tz]`，列序
 `thr_N1..N4, thr_T5..T8`），而非套用 `CLAUDE.md` §4.3 中为完整
 KAMR-MPPI 分配矩阵给出的示意性占位几何常数（二者描述的推力器安装偏移不同）。
+
+## `MultiRateDecimator`：均匀整数抽取多速率调度
+
+```cpp
+class MultiRateDecimator {
+public:
+  MultiRateDecimator(int cm_update_rate, int inner_decimation, int outer_decimation);
+  struct TickResult { bool inner_due; bool outer_due; };
+  TickResult tick();                     // 对 500Hz 主时钟做纯整数取模抽取
+  double innerPeriodSeconds() const;     // inner_decimation / cm_update_rate（恒定）
+  double outerPeriodSeconds() const;     // outer_decimation / cm_update_rate（恒定）
+  void reset();                          // 下次 tick() 令 inner_due/outer_due 同时为真
+};
+```
+
+`AdhereKamrController::update()` 每次被 `controller_manager`（500Hz）调用时都会先
+`tick()`，取代了此前为凑出精确 `200Hz` 而在 `3` 拍（`6ms`）/`2` 拍（`4ms`）之间
+交替的 `[3,3,3,3,3,2,2,2,2,2]` 子步调度表——那种交替会给离散积分器/微分器/低通
+滤波器（如 Pad-Force DOB）引入 `±20%` 采样周期抖动。改用纯取模（`tick % N == 0`）
+后，默认 `inner_decimation=2`、`outer_decimation=20` 使内环精确 `250Hz`
+（`dt=4.0ms` 恒定）、外环精确 `25Hz`（`dt=40.0ms` 恒定，每 10 个内环步一次），
+`outer_decimation` 也可配置为 `25` 得到 `20Hz` 外环。纯逻辑实现（零 `rclcpp`/
+`hardware_interface` 依赖），由 `test/test_multirate_decimator.cpp` 独立 gtest 验证
+`500` 次 tick 内精确触发 `250` 次内环 / `25` 次外环。
 
 ## 线程安全
 

@@ -3,7 +3,7 @@
 ## 设计理念
 
 本层对标 `quadruped_ros2_control/commands`（`keyboard_input`、`joystick_input`）的
-定位：提供**人机交互与实验基准触发**节点，它们不参与 500Hz/200Hz/20Hz 实时控制回路，
+定位：提供**人机交互与实验基准触发**节点，它们不参与 500Hz/250Hz/25Hz 实时控制回路，
 只通过标准 ROS 2 话题/服务（定义于 `interfaces/adhere_control_msgs`）与
 `AdhereKamrController` 异步通信——这类低频、非实时的交互路径天然适合走 DDS，
 无需追求 `CtrlInterfaces` 级别的零拷贝性能。
