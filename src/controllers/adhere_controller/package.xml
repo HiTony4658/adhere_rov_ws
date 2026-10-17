@@ -30,16 +30,12 @@
   <!-- TODO(Phase 2): add osqp/osqp-eigen and CUDA toolkit discovery in CMakeLists.txt
        once the 12D OSQP solve and the outer_mppi_cuda rollout kernels are implemented. -->
 
-  <!-- launch/mujoco.launch.py's closed-loop runtime dependencies (CLAUDE.md Phase 3.1.1 Stage
-       2.2): one-directional exec_depends only. adhere_mujoco_hardware has zero dependency back
-       on this package, so this does not reintroduce a colcon build-order cycle. -->
-  <exec_depend>adhere_mujoco_hardware</exec_depend>
-  <exec_depend>adhere_keyboard_input</exec_depend>
-  <exec_depend>simplified_v1_description</exec_depend>
-  <exec_depend>xacro</exec_depend>
-  <exec_depend>ament_index_python</exec_depend>
-  <exec_depend>robot_state_publisher</exec_depend>
-  <exec_depend>rviz2</exec_depend>
+  <!-- adhere_mujoco_hardware/adhere_keyboard_input/simplified_v1_description/xacro/rviz2/
+       robot_state_publisher were previously exec_depend here for this package's own closed-
+       loop launch file; that launch file now lives in simplified_v1_description (CLAUDE.md
+       Phase 3.4), which declares those deps itself. This package is discovered purely via
+       pluginlib's ament-index plugin manifest at runtime: zero package.xml dependency back on
+       it from any launch/teleop/description package (CLAUDE.md Phase 3.1.1 Stage 2.2). -->
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

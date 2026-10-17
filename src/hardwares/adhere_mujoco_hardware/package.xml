@@ -35,10 +35,9 @@
   <depend>visualization_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>std_msgs</depend>
-  <exec_depend>xacro</exec_depend>
-  <exec_depend>ament_index_python</exec_depend>
-  <exec_depend>rviz2</exec_depend>
-  <exec_depend>robot_state_publisher</exec_depend>
+  <!-- xacro/rviz2/robot_state_publisher/ament_index_python were previously exec_depend here
+       for this package's own launch file; that launch file now lives in
+       simplified_v1_description (CLAUDE.md Phase 3.4), which declares those deps itself. -->
   <!-- adhere_mujoco_node's optional autostart_controllers parameter load_controller()'s
        whatever names a launch file passes it, discovered purely via pluginlib's ament-index
        plugin manifest at runtime: no header/link dependency and no package.xml dependency of

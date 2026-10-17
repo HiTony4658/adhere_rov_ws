@@ -34,9 +34,6 @@ src/
 config/
 └── mujoco_sim.rviz                 # RViz2 显示配置（Odometry + EnvironmentMarkers，TF 坐标系缩放 0.12）
 
-launch/
-└── mujoco_sim.launch.py
-
 adhere_mujoco_hardware.xml           # pluginlib 插件描述文件（hardware_interface 导出）
 ```
 
@@ -525,9 +522,11 @@ GLFW 窗口创建，仅空转等待停止信号。
    （真正激活）则安排在物理线程**启动之后**才调用，且仅当 `autostart_controllers`
    非空时才调用——Foxy 的 `switch_controller()` 会阻塞等待下一次
    `ControllerManager::update()` 真正执行切换，在物理线程开始循环调用 `update()`
-   之前调用它会死锁。`mujoco_sim.launch.py` 保持 `autostart_controllers` 默认空，
-   始终以 0 个控制器（`u=0`）纯开环启动；闭环控制器有自己独立的启动文件（不在本包
-   内）。物理循环线程本身用 `std::chrono::steady_clock::sleep_until` 而非
+   之前调用它会死锁。`autostart_controllers` 参数默认空，即 0 个控制器
+   （`u=0`）纯开环启动；本包（CLAUDE.md Phase 3.4 起）不持有任何启动文件，
+   默认值与实际闭环启动行为完全由
+   `simplified_v1_description/launch/mujoco.launch.py`（不在本包内）决定。
+   物理循环线程本身用 `std::chrono::steady_clock::sleep_until` 而非
    `rclcpp::Rate`，并对每拍耗时做指数滑动平均写入
    `MujocoVisBridge::actual_physics_hz`，用于证明 `MujocoViewer`（60Hz GL）与
    RViz2（100Hz 话题）都不会拖慢物理循环；
@@ -541,15 +540,16 @@ GLFW 窗口创建，仅空转等待停止信号。
    后者与 `MujocoViewer` 自己画的箭头保持同一份数据来源），使 RViz2 与内嵌
    MuJoCo 窗口实时同步；
 4. `robot_state_publisher` 作为独立节点与 `adhere_mujoco_node` 一起由
-   `mujoco_sim.launch.py` 启动，发布 `/robot_description` 与完整静态 TF 树
-   （`base_link -> pad_*`/`thr_*`）。
+   `simplified_v1_description/launch/mujoco.launch.py` 启动，发布
+   `/robot_description` 与完整静态 TF 树（`base_link -> pad_*`/`thr_*`）。
 
 ### 纯 Xacro 解耦（Pure-Xacro Decoupling）
 
 `simplified_v1.urdf.xacro`/`ros2_control.xacro` 不再携带 `headless` 这个
 与"是否弹出仿真器窗口"相关的仿真参数——机器人描述文件必须 100% 与仿真器 GUI
 是否启动解耦。`headless` 现在是 `adhere_mujoco_node` 的标准 ROS 2 节点参数，由
-`mujoco_sim.launch.py` 传入，经 `AdhereMujocoHardware::setHeadless()` 在
+`simplified_v1_description/launch/mujoco.launch.py` 传入，经
+`AdhereMujocoHardware::setHeadless()` 在
 `configure()` 之后、`start()` 之前（也就是 `MujocoViewer` 真正被构造之前）
 到达硬件插件。
 
@@ -664,7 +664,7 @@ console_direct+` 即可同时跑完既有一致性回归测试、5-Tier V&V 套�
 重新编译**：
 
 ```bash
-ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py \
+ros2 launch simplified_v1_description mujoco.launch.py \
     pkg_description:=full_cad_description \
     mjcf_file:=mjcf/full_cad.xml \
     xacro_file:=urdf/full_cad.urdf.xacro
@@ -673,7 +673,8 @@ ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py \
 不传任何参数时三者分别默认为 `simplified_v1_description`/`mjcf/rov_wall.xml`/
 `urdf/simplified_v1.urdf.xacro`，与改动前完全一致。支撑这一点的 4 项机制：
 
-1. **启动时模型来源解析**：`mujoco_sim.launch.py` 把 `pkg_description`/
+1. **启动时模型来源解析**：`simplified_v1_description/launch/mujoco.launch.py`
+   把 `pkg_description`/
    `mjcf_file` 作为 `adhere_mujoco_node` 的 ROS 2 节点参数传入；该节点在构造
    `hardware_interface::ResourceManager`（其构造函数内部同步调用
    `AdhereMujocoHardware::configure()`）**之前**调用静态方法
@@ -739,18 +740,27 @@ ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py \
 
 ## 运行
 
+本包（CLAUDE.md Phase 3.4 起）不再持有任何启动文件——是一个对任何具体控制器或
+FSM 终端控制台零知晓的纯粹、通用硬件工具箱。实际启动入口在
+[`simplified_v1_description/launch/mujoco.launch.py`](../../descriptions/simplified_v1_description/README.md)：
+
 ```bash
 colcon build --packages-up-to adhere_mujoco_hardware --symlink-install
 source install/setup.bash
 
-# 默认：静水启动，带 MuJoCo 窗口 + RViz2；在 MuJoCo 窗口中按 1/2 切换造浪
-ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py
+# 默认：静水启动，带 MuJoCo 窗口 + RViz2 + adhere_controller 闭环 FSM；
+# 在 MuJoCo 窗口中按 1/2 切换造浪
+ros2 launch simplified_v1_description mujoco.launch.py
+
+# 纯开环硬件仿真：覆盖为 0 个控制器加载（u=0），不弹出遥操作
+ros2 launch simplified_v1_description mujoco.launch.py autostart_controllers:="[]" \
+    launch_teleop:=false
 
 # 无头模式（无 GLFW 窗口），不启动 RViz2
-ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py headless:=true use_rviz:=false
+ros2 launch simplified_v1_description mujoco.launch.py headless:=true use_rviz:=false
 
 # 切换到另一个模型描述包，零 C++ 重编译（见上方"跨模型零重编扩展指南"）
-ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py \
+ros2 launch simplified_v1_description mujoco.launch.py \
     pkg_description:=full_cad_description mjcf_file:=mjcf/full_cad.xml \
     xacro_file:=urdf/full_cad.urdf.xacro
 
@@ -759,9 +769,9 @@ ros2 topic pub /rov/wave_mode_cmd std_msgs/msg/Int32 "{data: 2}" --once   # 开�
 ros2 topic pub /rov/wave_mode_cmd std_msgs/msg/Int32 "{data: 1}" --once   # 切回静水
 ```
 
-本包的 `mujoco_sim.launch.py` 是**纯开环硬件仿真**（CLAUDE.md Phase 3.1.1）：对任何
-具体控制器或 FSM 终端控制台零知晓，`autostart_controllers` 默认空数组，始终以
-`u=0` 启动。需要 `AdhereController` 闭环 FSM（`PASSIVE`/`DEPTH_HOLD`/`OPEN_LOOP`/`PID_HOLD`
-切换、定深 PID 目标深度设定）与 FSM 终端控制台时，改用
-[`adhere_controller/README.md`](../../controllers/adhere_controller/README.md)
-中的 `ros2 launch adhere_controller mujoco.launch.py`。
+`autostart_controllers:="[]"` 时即此前 `mujoco_sim.launch.py` 的纯开环硬件仿真
+行为：对任何具体控制器或 FSM 终端控制台零知晓，始终以 `u=0` 启动。需要
+`AdhereController` 闭环 FSM（`PASSIVE`/`DEPTH_HOLD`/`OPEN_LOOP`/`PID_HOLD`
+切换、定深 PID 目标深度设定）与 FSM 终端控制台时，使用默认的
+`autostart_controllers:=['adhere_controller']`（见
+[`adhere_controller/README.md`](../../controllers/adhere_controller/README.md)）。

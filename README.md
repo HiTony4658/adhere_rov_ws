@@ -191,24 +191,28 @@ source install/setup.bash
 # 3a. 静态几何检视（RobotModel + TF，无物理仿真）
 ros2 launch simplified_v1_description visualize.launch.py
 
-# 3b. 纯开环硬件仿真：adhere_mujoco_hardware 对任何控制器/控制台零感知，
-# 默认 0 个控制器加载（u=0 被动漂移验证场景）
-ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py
+# 3b. 完整 FSM 闭环仿真（默认行为）：adhere_controller 自动加载/配置/激活（默认
+# PASSIVE 态，250Hz 均匀内环 / 25Hz 均匀外环），MuJoCo 窗口 + RViz2 双可视化同步，
+# 并自动弹出 Xbox 手柄遥操作 + FSM 终端控制台（PASSIVE/DEPTH_HOLD/OPEN_LOOP/PID_HOLD 四态）
+ros2 launch simplified_v1_description mujoco.launch.py
 
-# 3c. 完整 FSM 闭环仿真：AdhereKamrController 自动加载/配置/激活（默认 PASSIVE 态，
-# 250Hz 均匀内环 / 25Hz 均匀外环），MuJoCo 窗口 + RViz2 双可视化同步，并自动弹出
-# Xbox 手柄遥操作 + FSM 终端控制台（PASSIVE/DEPTH_HOLD/OPEN_LOOP/PID_HOLD 四态）
-ros2 launch adhere_kamr_controller mujoco.launch.py
+# 3c. 纯开环硬件仿真：覆盖为 0 个控制器加载（u=0 被动漂移验证场景），不弹出遥操作
+ros2 launch simplified_v1_description mujoco.launch.py autostart_controllers:="[]" \
+    launch_teleop:=false
 
 # 3d. 远程上位机（GCS 笔记本）独立遥操作：仅需 adhere_control_msgs +
 # adhere_keyboard_input，零 MuJoCo/CUDA/ros2_control 依赖，通过 DDS 远程控制
-# 3c 中已以 launch_teleop:=false 启动的仿真服务器（或未来 Jetson AGX Xavier 真机）
+# 3b 中已以 launch_teleop:=false 启动的仿真服务器（或未来 Jetson AGX Xavier 真机）
 ros2 launch adhere_keyboard_input teleop_gcs.launch.py
 ```
 
+本工作空间现在以**模型为中心**启动（CLAUDE.md Phase 3.4）：`simplified_v1_description`
+是唯一的 `mujoco.launch.py` 入口，`adhere_mujoco_hardware` 与 `adhere_controller`
+均不再持有任何启动文件，切换到新机型只需运行该机型自己描述包下的同名启动文件。
+
 各命令的完整参数说明见 [`src/descriptions/simplified_v1_description/README.md`](src/descriptions/simplified_v1_description/README.md)、
 [`src/hardwares/adhere_mujoco_hardware/README.md`](src/hardwares/adhere_mujoco_hardware/README.md)、
-[`src/controllers/adhere_kamr_controller/README.md`](src/controllers/adhere_kamr_controller/README.md)
+[`src/controllers/adhere_controller/README.md`](src/controllers/adhere_controller/README.md)
 与 [`src/commands/adhere_keyboard_input/README.md`](src/commands/adhere_keyboard_input/README.md)
 （FSM 终端控制台、Xbox 手柄遥操作、上位机/下位机分布式部署用法）。
 

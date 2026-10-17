@@ -1567,3 +1567,62 @@ launch_teleop:=false` 真实 MuJoCo 闭环，经 `rclpy` 脚本驱动 4 个 `/ro
 仿真步数的挂钟估算——首次用 `5s/8s` 窗口验证时 `DEPTH_HOLD`/`PID_HOLD` 均显示
 "仍在收敛但未到 `<5mm`"，加长到 `25s` 后确认二者均已早早饱和收敛，并非增益或
 几何改动引入的回归。）
+
+## Phase 3.4（2026-10-17）：启动文件迁移至 `simplified_v1_description`，实现真正的模型-描述耦合
+
+### 动机
+
+`mujoco_sim.launch.py`（纯开环，0 控制器）此前一直放在 `adhere_mujoco_hardware`
+包内，`mujoco.launch.py`（闭环，自动加载 `adhere_controller`）放在
+`adhere_controller` 包内——二者都是"工具包反向持有模型/场景启动逻辑"的架构
+违例：`CLAUDE.md` 的核心解耦原则要求 Plant/Model（`simplified_v1_description`）
+与 Tools/Controllers（`adhere_mujoco_hardware`/`adhere_controller`）严格分离，
+换一个新 ROV 模型应该只需要运行该模型自己描述包下的同名启动文件，而不是去改
+两个完全通用的工具包。
+
+### 迁移与合并
+
+把两个旧启动文件的全部能力合并进单一的
+`src/descriptions/simplified_v1_description/launch/mujoco.launch.py`：
+`headless`/`use_rviz`/`pkg_description`/`mjcf_file`/`xacro_file`（原
+`mujoco_sim.launch.py` 的跨模型零重编参数）+ `robot_control_yaml`/
+`autostart_controllers`（原 `adhere_controller/launch/mujoco.launch.py` 的
+"generic autostart_controllers in-process 加载机制"，默认改为
+`['adhere_controller']` 以匹配 README 里"完整闭环仿真"的默认用法描述）+
+`launch_teleop`（含 `adhere_keyboard_input/teleop_gcs.launch.py` 的 joy_node +
+xbox_teleop_node + fsm_console_node 整束）。原纯开环行为（0 控制器）通过
+`autostart_controllers:="[]" launch_teleop:=false` 覆盖参数即可还原，不是单独
+的启动文件。`git rm -rf` 删除 `adhere_mujoco_hardware/launch/` 与
+`adhere_controller/launch/` 两个目录（`CMakeLists.txt` 对应的
+`install(DIRECTORY launch ...)` 行一并移除），二者此后不再持有任何启动文件。
+
+`package.xml`：`adhere_mujoco_hardware`/`adhere_controller` 里原本只为自己的
+启动文件声明的 `exec_depend`（`xacro`/`ament_index_python`/`rviz2`/
+`robot_state_publisher`，`adhere_controller` 还额外有
+`adhere_mujoco_hardware`/`adhere_keyboard_input`/`simplified_v1_description`）
+全部移除；`simplified_v1_description/package.xml` 沿用 Phase 2.12 就已确立的
+"运行时按包名引用、不声明 `exec_depend`，避免 colcon 构建顺序环"约定（与对
+`adhere_mujoco_hardware` 的既有处理方式一致），不新增任何依赖声明。RViz 配置
+文件沿用 `adhere_mujoco_hardware/config/mujoco_sim.rviz`（不移动）。
+
+### 验证结果
+
+`rm -rf build/{adhere_mujoco_hardware,adhere_controller,simplified_v1_description}
+install/{adhere_mujoco_hardware,adhere_controller,simplified_v1_description} log`
+后 `colcon build --symlink-install`（全部 5 个包）**零警告零错误**；确认
+`install/` 下仅剩 `simplified_v1_description/share/simplified_v1_description/
+launch/mujoco.launch.py` 一份启动文件，`adhere_mujoco_hardware`/
+`adhere_controller` 的 `share/.../launch/` 均不存在。`colcon test
+--packages-select adhere_controller adhere_mujoco_hardware`：全部既有 gtest
+（`test_multirate_decimator`/`test_thruster_allocator`/`test_fsm_states`/
+`test_fossen_hydrodynamics_geometry`/`test_rhombic_kern_and_thruster_model`）
+零失败；仅剩 Phase 2.14 起已记录的"全仓库缺版权头"等预先存在的
+`copyright`/`cpplint`/`cppcheck`/`uncrustify` style-lint 失败，与本阶段无关。
+
+`ros2 launch simplified_v1_description mujoco.launch.py headless:=true
+use_rviz:=false launch_teleop:=false`（默认 `autostart_controllers`）真实
+启动：`robot_state_publisher` + `adhere_mujoco_node` 正常加载/配置/激活
+`adhere_controller`/`AdhereController`（`ros2 control list_controllers
+--controller-manager /adhere_mujoco_node` 显示 `active`），全部 4 个
+`/rov/*` 话题存在。追加 `autostart_controllers:="[]"` 覆盖后同一条命令同样
+无错误启动且 0 个控制器加载，确认两种历史行为都可从这一份启动文件复现。

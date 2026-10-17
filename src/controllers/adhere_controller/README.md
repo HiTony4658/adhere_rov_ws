@@ -133,8 +133,9 @@ public:
 ### `robot_control.yaml` 参数文件与节点重映射陷阱
 
 闭环参数由 `simplified_v1_description/config/robot_control.yaml` 提供，通过
-`launch/mujoco.launch.py` 作为 `--params-file` 传给 `adhere_mujoco_node`
-可执行文件。**关键陷阱**：`ros2 launch` 的 `Node` 动作总会附加一条无作用域的
+`simplified_v1_description/launch/mujoco.launch.py`（CLAUDE.md Phase 3.4：本包
+不再持有任何启动文件）作为 `--params-file` 传给 `adhere_mujoco_node` 可执行文件。
+**关键陷阱**：`ros2 launch` 的 `Node` 动作总会附加一条无作用域的
 `-r __node:=<name>` 重映射规则（此处 `<name>` 即该可执行文件被赋予的名字
 `adhere_mujoco_node`），对进程内所有使用默认 `NodeOptions` 构造的节点都生效
 ——不仅是顶层 `rclcpp::Node`，连内部 `ControllerManager` 节点、以及
@@ -151,17 +152,21 @@ public:
 
 ## 运行
 
+本包（CLAUDE.md Phase 3.4）不再持有任何启动文件——是一个纯粹的、通用的
+`controller_interface` 插件工具箱。实际启动入口在
+[`simplified_v1_description/launch/mujoco.launch.py`](../../descriptions/simplified_v1_description/README.md)：
+
 ```bash
 colcon build --packages-up-to adhere_controller --symlink-install
 source install/setup.bash
 
-ros2 launch adhere_controller mujoco.launch.py
-ros2 launch adhere_controller mujoco.launch.py headless:=true use_rviz:=false \
+ros2 launch simplified_v1_description mujoco.launch.py
+ros2 launch simplified_v1_description mujoco.launch.py headless:=true use_rviz:=false \
     launch_teleop:=false
 ```
 
-与 `adhere_mujoco_hardware/launch/mujoco_sim.launch.py`（纯开环，0 个控制器）
-不同，本启动文件会把 `autostart_controllers:=['adhere_controller']` 与
+默认行为即把 `autostart_controllers:=['adhere_controller']` 与
 `simplified_v1_description/config/robot_control.yaml` 一并传给同一个通用
-`adhere_mujoco_node` 可执行文件。`launch_teleop:=false` 时的上位机/下位机分布式
+`adhere_mujoco_node` 可执行文件；传入 `autostart_controllers:="[]"` 可还原为纯
+开环、0 个控制器加载的行为。`launch_teleop:=false` 时的上位机/下位机分布式
 部署方式见 [`adhere_keyboard_input/README.md`](../../commands/adhere_keyboard_input/README.md)。

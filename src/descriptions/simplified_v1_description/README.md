@@ -34,7 +34,10 @@ config/
   └── robot_control.yaml            # 模型解耦参数：推力器/接触垫几何、Fossen 水动力参数、
                                      # 工作空间安全边界、各 FSM 状态增益（CLAUDE.md §3.3）
 launch/
-  └── visualize.launch.py           # 一行命令启动 robot_state_publisher + RViz2
+  ├── visualize.launch.py           # 一行命令启动 robot_state_publisher + RViz2（纯几何检视，无物理仿真）
+  └── mujoco.launch.py              # 模型中心化主入口（CLAUDE.md Phase 3.4）：robot_state_publisher +
+                                     # adhere_mujoco_hardware 的 adhere_mujoco_node + RViz2 +
+                                     # 可选 adhere_controller 自动加载 + 可选 GCS 遥操作/FSM 控制台
 ```
 
 ## 导出接口契约（与 `CLAUDE.md` §3 严格一致）
@@ -76,9 +79,11 @@ launch/
 工作空间安全边界（`workspace_z_min`/`workspace_z_max`/`workspace_x_min`）以及
 各 FSM 状态增益（`depth_hold.*`/`open_loop.*`/`pid_hold.*`）。切换到几何/质量
 不同的新机型只需改这一份 YAML，`adhere_controller` 零 C++ 改动、零重新编译。
-本文件通过 `adhere_controller/launch/mujoco.launch.py` 作为 `--params-file`
-传给 `adhere_mujoco_node` 可执行文件；由于 `ros2 launch` 的节点重映射机制，
-文件内所有参数必须平铺在同一个顶层键 `adhere_mujoco_node:` 下（详见
+本文件通过本包自己的 `launch/mujoco.launch.py`（CLAUDE.md Phase 3.4：模型/
+描述包拥有自己的启动文件，`adhere_mujoco_hardware`/`adhere_controller` 均为
+零启动文件的纯工具箱）作为 `--params-file` 传给 `adhere_mujoco_node`
+可执行文件；由于 `ros2 launch` 的节点重映射机制，文件内所有参数必须平铺在
+同一个顶层键 `adhere_mujoco_node:` 下（详见
 [`adhere_controller/README.md`](../../controllers/adhere_controller/README.md)）。
 
 模型没有任何可动的 URDF 关节——唯一的真实自由度（浮动基座）由
@@ -89,13 +94,24 @@ RViz 检视视图无需 `joint_state_publisher`（更不需要其 GUI 变体）�
 
 ## 运行
 
-```bash
-colcon build --packages-select simplified_v1_description
-source install/setup.bash
-ros2 launch simplified_v1_description visualize.launch.py
-```
+本包是模型中心化启动的唯一入口（CLAUDE.md Phase 3.4）：`adhere_mujoco_hardware`
+与 `adhere_controller` 均不再持有任何启动文件，切换到新机型只需在该机型自己的
+描述包下复制/适配同名启动文件。
 
-该命令仅做静态几何检视（`robot_state_publisher` + `rviz2`，Fixed Frame 设为
-`base_link`），不包含任何物理仿真，也不渲染壁面（壁面不属于机器人 URDF）；若需
-查看带 Fossen 水动力学、壁面与可运行时切换的造浪扰动的被动随波漂流效果，请使用
-`adhere_mujoco_hardware` 包的 `mujoco_sim.launch.py`。
+```bash
+colcon build --symlink-install
+source install/setup.bash
+
+# 静态几何检视：仅 robot_state_publisher + rviz2（Fixed Frame = base_link），
+# 不含任何物理仿真，也不渲染壁面（壁面不属于机器人 URDF）
+ros2 launch simplified_v1_description visualize.launch.py
+
+# 完整闭环仿真（默认行为）：adhere_mujoco_hardware 的 500Hz 物理后端 + Fossen
+# 水动力学 + 可运行时切换造浪 + RViz2 + adhere_controller 自动加载/配置/激活
+# （默认 PASSIVE 态）+ Xbox 手柄遥操作 + FSM 终端控制台
+ros2 launch simplified_v1_description mujoco.launch.py
+
+# 纯开环硬件仿真：覆盖为 0 个控制器加载（u=0 被动漂移验证场景），不弹出遥操作
+ros2 launch simplified_v1_description mujoco.launch.py autostart_controllers:="[]" \
+    launch_teleop:=false
+```
