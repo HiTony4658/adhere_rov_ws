@@ -195,9 +195,10 @@ hardware_interface::return_type write() override;  // 无参数！Foxy 特有
   阻尼（`f_drag_body`）、Venturi 吸附（`f_venturi_body`）、挤膜阻尼
   （`f_squeeze_body`）、非定常 Froude-Krylov+附加质量（`f_fk_am_body`）、
   浮力（`f_buoy_world`）、Munk 力矩（`t_munk_body`）六项分量（外加一个
-  耗散性旋转阻尼分量 `t_drag_body`，供 Tier 4 被动性校验与实时
-  `Hydro Breakdown (N)` 示波器使用），`AdhereMujocoHardware::
-  applyHydrodynamics()` 每拍 500Hz 调用一次并写入
+  耗散性旋转阻尼分量 `t_drag_body`、壁面耦合分量 `f_coupling_body`/
+  `t_coupling_body`、辐射记忆分量 `f_radiation_memory_body`，见下文三项
+  精度增强，供 Tier 4 被动性校验与实时 `Hydro Breakdown (N)` 示波器使用），
+  `AdhereMujocoHardware::applyHydrodynamics()` 每拍 500Hz 调用一次并写入
   `MujocoVisBridge::hydro_f_*` 原子量供 `MujocoViewer` 的
   `Live Scope → Hydro Breakdown (N)` 选项实时绘制（见下方"`MujocoVisBridge`
   与 `MujocoViewer`"一节的控件表）。
@@ -208,6 +209,47 @@ hardware_interface::return_type write() override;  // 无参数！Foxy 特有
   Lamb 椭球积分只在 `configure()` 时跑一次（实测约 `1.7ms`），500Hz 热路径
   只剩 `≤256` 个微元的定长循环（无堆分配）：实测单次 `compute()` 调用约
   `4.2us`（66 个微元），远低于 `2000us`/拍（500Hz）预算。
+
+### 水动力学精度增强三项（Findings D / B / A）
+
+在 5-Tier V&V 基础之上，水动力学精度审计针对 `kStonefishGeometryDriven`
+补充了三项精度增强，全部不触碰 `kParametricLumped` 的字节级 parity-lock：
+
+- **Finding D（雷诺数相关 `Cd_normal`/`Cf_tangent`）**：`Cf_tangent` 用
+  Schlichting 湍流平板公式 `Cf(Re)=0.075/(log10(Re)-2)^2` 做**乘性**修正
+  （相对固定参考 `Re=2e5` 锚定，保证 `Cf_tangent=0` 仍完全关闭蒙皮摩擦项，
+  `Re=2e5` 时精确还原 `Cf_tangent` 本身的配置值）；`Cd_normal` 的"阻力危机"
+  （Re 跨越临界值时 Cd 骤降）**只对光滑曲面**（`SurfacePatch::is_curved`
+  由 `buildFromMjModel()` 按几何类型打标：球/圆柱/胶囊/椭球为 `true`，箱体
+  /网格为 `false`）生效——尖锐棱边的分离点被几何锁死，与 Re 无关，这是
+  物理上正确的行为而非遗漏。当前 `rov_wall.xml` 是纯箱体，因此这项修正
+  在现有模型上不产生可见效果，机制是为未来带曲面整流罩的 CAD 模型预留的。
+  新增 `HydroParams::nu_water`/`Cd_normal_supercritical`/`Re_crit_low`/
+  `Re_crit_high`。
+- **Finding B（壁面旋转附加惯量修正 + 平动-转动耦合）**：旋转附加惯量
+  `added_mass_angular` 按同一套 `amp_normal`/`amp_tangent` 壁面镜像放大
+  系数修正——横滚（绕壁面法向轴，纯壁面切向运动）用较弱的 `amp_tangent`，
+  俯仰/偏航（诱导壁面法向局部运动，与挤膜力矩同机制）用较强的
+  `amp_normal`，这是对已有运动学论证（`ω×r_p`）的直接复用。另外新增一个
+  **平动-转动交叉耦合项**（`HydroParams::k_coupling_wall`，默认 `0.1`）
+  ——**明确标注为未验证的工程占位公式**：无界流体中此交叉项严格为零（对称性
+  保证），壁面镜像法原则上会引入非零耦合，但未检索到可引用的无粘势流壁面
+  多极展开闭式解；因此只有"远离壁面趋零、贴壁有界、量纲一致"的**结构**是
+  有把握的，具体系数待 CFD/水池实验标定，与 `C_venturi`/`C_squeeze`/
+  `Cd_normal` 同等地位。回填进 `HydroWrenchBreakdown::f_coupling_body`/
+  `t_coupling_body`，与 `t_munk_body` 同样**排除在 Tier4 耗散功率检验
+  之外**（不保证逐点无功）。
+- **Finding A（频率相关辐射阻尼 / Cummins 记忆效应）**：完整卷积
+  `∫K(t-τ)v(τ)dτ` 需要本项目没有的面元法/CFD 频域数据，改用结构正确、
+  **稳态零贡献**（不与已调好的 `D_lin`/`D_quad` 准静态阻尼重复计数）的一阶
+  washout（高通）滤波器近似：`d(x_r)/dt=(v-x_r)/τ_r`，
+  `F_memory=-K_r⊙(v-x_r)`。新增持久状态 `RadiationMemoryState`（`compute()`
+  新增两个**尾部默认参数** `memory*`/`dt`，默认 `nullptr`/`0.0` 完全跳过，
+  对每个既有调用点零改动），由 `AdhereMujocoHardware` 持有并在 `write()`
+  的 `did_reset` 分支清零。默认增益 `K_radiation_memory=(0,0,0)`
+  （零回归）。新增 `HydroParams::K_radiation_memory`/
+  `tau_radiation_memory`，回填进 `HydroWrenchBreakdown::
+  f_radiation_memory_body`，同样排除在 Tier4 耗散功率检验之外。
 
 两种模式的开关、当前激活的微元数（`hydro_patch_count`）与 Rhombic Kern 遥测
 都会实时显示在 `MujocoViewer` 的左上角浮层中。
@@ -584,10 +626,24 @@ GLFW 窗口创建，仅空转等待停止信号。
 不依赖 `mjModel`/`ResourceManager`，由独立的
 `test/test_rhombic_kern_and_thruster_model.cpp`（9 个用例）直接覆盖。
 
+水动力学精度增强三项（见上文"水动力学精度增强三项（Findings D / B / A）"）
+各自配有专门的 V&V 用例：Finding D 的 `CfTangentFollowsSchlichtingCorrelation`/
+`CdNormalConstantForSharpEdgedBoxHull`/`HydroVV_Finding_D.
+CdNormalDragCrisisAppliesToCurvedGeomOnly`（3 个，外加更新后的
+`HydroVV_Tier2_PatchToLumpedExactEquivalence`）；Finding B 的
+`WallProximityRotationalAddedInertiaAmplifiesNearWall`/
+`TranslationRotationCouplingVanishesGrowsAndBoundsNearWall`/
+`CouplingTermExcludedFromDissipativePowerLaw`（3 个）；Finding A 的
+`RadiationMemoryZeroGainReproducesExistingBehaviorExactly`/
+`RadiationMemoryWashoutVanishesAtSteadyState`/
+`RadiationMemoryRespondsToStepChangeInVelocity`/
+`RadiationMemoryBoundedAndFinite`（4 个）。
+
 执行 `colcon test --packages-select adhere_mujoco_hardware --event-handlers
 console_direct+` 即可同时跑完既有一致性回归测试、5-Tier V&V 套件、上述
-2 组针对性回归测试，以及 `test_rhombic_kern_and_thruster_model` 的 9 个
-500Hz 逻辑单元测试（合计 25/25 全部通过）。
+2 组针对性回归测试、Findings D/B/A 的 10 个新增用例，以及
+`test_rhombic_kern_and_thruster_model` 的 9 个 500Hz 逻辑单元测试
+（合计 35/35 全部通过）。
 
 ## 跨模型零重编扩展指南（如何无缝切换新的 ROV 模型包）
 
@@ -653,11 +709,20 @@ ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py \
    8 个滑条量程均读取这对数组，而不是硬编码的 `"-40 40"`。同时
    `HydroParams::applyMjModelOverrides(m, params)` 会扫描 MJCF 的
    `<custom><numeric name="hydro_..." data="..."/>` 条目（支持
-   `hydro_vehicle_mass`/`hydro_augmented_mass`/`hydro_displaced_volume`/
-   `hydro_cob_offset_body`/`hydro_z_surface`/`hydro_D_lin`/`hydro_D_quad`/
-   `hydro_D_ang_lin`/`hydro_D_ang_quad`/`hydro_C_venturi`/
-   `hydro_h_gap_nominal`/`hydro_A_plate`/`hydro_C_squeeze`/`hydro_Cd_normal`/
-   `hydro_Cf_tangent` 共 14 个名字），MJCF 未声明的名字保持 `HydroParams`
+   `hydro_rho_water`/`hydro_gravity`/`hydro_vehicle_mass`/`hydro_augmented_mass`/
+   `hydro_displaced_volume`/`hydro_cob_offset_body`/`hydro_z_surface`/
+   `hydro_z_transition`/`hydro_D_lin`/`hydro_D_quad`/`hydro_D_ang_lin`/
+   `hydro_D_ang_quad`/`hydro_C_venturi`/`hydro_h_gap_nominal`/`hydro_A_plate`/
+   `hydro_h0_decay`/`hydro_wall_x_offset`/`hydro_C_squeeze`/`hydro_Cd_normal`/
+   `hydro_Cf_tangent`/`hydro_nu_water`/`hydro_Cd_normal_supercritical`/
+   `hydro_Re_crit_low`/`hydro_Re_crit_high`/`hydro_k_coupling_wall`/
+   `hydro_K_radiation_memory`/`hydro_tau_radiation_memory` 共 26 个名字，
+   水动力学精度审计 finding 1.4 补齐了此前缺失的
+   `rho_water`/`gravity`/`z_transition`/`wall_x_offset`/`h0_decay` 5 项——此前只能
+   靠改这个包的 C++ 头文件默认值才能切换盐水密度/不同壁面偏移等场景，与本节"零
+   重编"的设计目标不符；Findings D/B/A（见上文"水动力学精度增强三项"）又各自
+   补充了自己的新增字段，同一套覆盖机制零改动地自然延伸到它们身上），
+   MJCF 未声明的名字保持 `HydroParams`
    默认值不变（`rov_wall.xml` 目前一个都未声明，因此零回归）；未来模型可以
    直接在自己的 MJCF 里覆盖任意子集的水动力参数，完全不需要改动这个包的
    头文件默认值。

@@ -16,7 +16,6 @@ find_package(hardware_interface REQUIRED)
 find_package(controller_manager REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(realtime_tools REQUIRED)
-find_package(adhere_controller_common REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
@@ -85,7 +84,6 @@ ament_target_dependencies(${PROJECT_NAME}
   controller_manager
   pluginlib
   realtime_tools
-  adhere_controller_common
 )
 pluginlib_export_plugin_description_file(hardware_interface adhere_mujoco_hardware.xml)
 

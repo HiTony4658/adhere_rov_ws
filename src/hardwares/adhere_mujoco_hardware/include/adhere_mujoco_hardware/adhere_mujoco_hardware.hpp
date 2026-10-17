@@ -152,6 +152,13 @@ private:
   HydroGeometryModel hydro_geometry_model_;
   std::atomic<HydroModelMode> hydro_mode_{HydroModelMode::kParametricLumped};
 
+  // Persistent radiation-damping/memory-effect filter state (hydrodynamic-accuracy audit,
+  // Finding A): owned here for the lifetime of this instance, passed by pointer into every
+  // applyHydrodynamics() -> FossenHydrodynamics::compute() call, cleared alongside the rest of
+  // write()'s did_reset physics-reset branch. Off by default (HydroParams::K_radiation_memory
+  // == Vector3d::Zero()), so this is a zero-cost/zero-effect no-op unless explicitly configured.
+  RadiationMemoryState radiation_memory_state_;
+
   bool headless_ = false;
 
   double sim_time_ = 0.0;

@@ -352,12 +352,18 @@ void AdhereMujocoHardware::setWaveMode(int mode)
     RCLCPP_WARN(logger(), "Ignoring invalid wave mode %d (expected 1=calm or 2=gust)", mode);
     return;
   }
-  const int previous = wave_mode_.exchange(mode);
+  // Hydrodynamic-accuracy audit (thread-safety finding 1.1): wave_trigger_time_ must be
+  // latched BEFORE wave_mode_ becomes externally visible as 2, not after. applyHydrodynamics()
+  // (500Hz physics thread) and this call (ROS executor thread or the GUI's write()-internal
+  // path) race against each other; with the old mode-then-trigger ordering, a tick landing in
+  // the gap between the two stores could observe the new mode (2) paired with the still-stale
+  // trigger time, corrupting that one tick's tau = t_sim - t_trigger computation. Storing the
+  // trigger first closes that window: by the time wave_mode_ flips to 2, wave_trigger_time_ is
+  // already correct.
   if (mode == 2) {
-    // Whenever mode 2 is (re-)selected, latch t_trigger to the current sim time so the gust
-    // profile always replays from its own tau=0, no matter when the user pressed "2".
     wave_trigger_time_.store(sim_time_atomic_.load());
   }
+  const int previous = wave_mode_.exchange(mode);
   if (previous != mode) {
     RCLCPP_INFO(
       logger(), "Wave mode switched: %s -> %s", previous == 2 ? "gust" : "calm",
@@ -389,8 +395,12 @@ void AdhereMujocoHardware::applyHydrodynamics(const mjModel * m, mjData * d)
   const double t_eval = gust_active ? std::max(0.0, d->time - wave_trigger_time_.load()) : d->time;
 
   HydroWrenchBreakdown breakdown;
+  // Finding A: m->opt.timestep is this 500Hz physics thread's own fixed tick period (2.0ms),
+  // the correct dt to integrate radiation_memory_state_'s washout filter forward by exactly one
+  // step per mjcb_passive invocation.
   const Wrench wrench = FossenHydrodynamics::compute(
-    state, t_eval, params, hydro_mode_.load(), &hydro_geometry_model_, &breakdown);
+    state, t_eval, params, hydro_mode_.load(), &hydro_geometry_model_, &breakdown,
+    &radiation_memory_state_, m->opt.timestep);
 
   // Live Hydro Breakdown telemetry (Phase 2.13 Section 2): plain atomic stores, same
   // lock-free pattern as kern_val/m_kern in write() below -- safe from this 500Hz physics-
@@ -526,6 +536,9 @@ hardware_interface::return_type AdhereMujocoHardware::write()
     // lagged thrust from before the reset leaks into the first post-reset step whenever
     // enable_thruster_lag is active.
     applied_thrust_.fill(0.0);
+    // Finding A: clear the radiation-memory washout filter state for the same reason -- stale
+    // lagged_vel_body from before the reset must not leak into the first post-reset step.
+    radiation_memory_state_ = RadiationMemoryState{};
   }
 
   // GUI "Reset Stats" request (Phase 2.11 Section 2), independent of the full physics reset

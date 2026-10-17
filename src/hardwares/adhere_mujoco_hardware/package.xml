@@ -23,7 +23,6 @@
   <depend>controller_manager</depend>
   <depend>pluginlib</depend>
   <depend>realtime_tools</depend>
-  <depend>adhere_controller_common</depend>
   <!-- simplified_v1_description is read at runtime (ament_index_cpp::get_package_share_
        directory, for mjcf/rov_wall.xml) and in turn references this package by name as its
        ros2_control plugin: a mutual runtime coupling left undeclared on both sides to

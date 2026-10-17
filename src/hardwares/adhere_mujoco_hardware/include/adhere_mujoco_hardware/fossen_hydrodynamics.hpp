@@ -79,9 +79,45 @@ struct HydroParams
   // HydroModelMode::kStonefishGeometryDriven (Section B4); the parametric-lumped model never
   // reads these, so they have zero cost/effect in the default mode. Placeholder values per
   // the Phase 2.10 task spec, pending future tuning against real tow-tank or CFD data.
-  double Cd_normal = 1.2;    // per-patch normal pressure-drag coefficient
-  double Cf_tangent = 0.02;  // per-patch tangential skin-friction coefficient
+  double Cd_normal = 1.2;    // per-patch normal pressure-drag coefficient (subcritical baseline)
+  double Cf_tangent = 0.02;  // per-patch tangential skin-friction coefficient (nominal baseline)
   double C_squeeze = 64.0;   // near-wall squeeze-film lubrication coefficient
+
+  // Reynolds-number-dependent drag/friction enhancement (hydrodynamic-accuracy audit, Finding
+  // D): this ROV's working speed range (0.1-1 m/s over a ~0.2-0.6m hull) spans Re ~ 9e4-6e5 in
+  // water, straddling the subcritical/critical drag-crisis transition for SMOOTH curved bluff
+  // bodies (sphere/cylinder). Cf_tangent is corrected via the classical Schlichting turbulent
+  // flat-plate correlation (valid for any surface, curved or sharp-edged). Cd_normal's
+  // Re-dependent "drag crisis" (Cd dropping from Cd_normal to Cd_normal_supercritical) is
+  // PHYSICALLY ONLY APPLICABLE to smooth curved surfaces, where the separation point itself
+  // migrates with the laminar-to-turbulent boundary-layer transition -- a sharp-edged surface
+  // (this hull's box chassis, or any future mesh with hard edges) has its separation point
+  // fixed by the geometry regardless of Re, so Cd_normal stays exactly constant there by
+  // design (see SurfacePatch::is_curved below), not as an unmodeled simplification.
+  double nu_water = 1.0e-6;             // m^2/s, kinematic viscosity (fresh water ~20C)
+  double Cd_normal_supercritical = 0.3; // post-drag-crisis plateau Cd, curved surfaces only
+  double Re_crit_low = 1.5e5;           // drag-crisis transition band start (log10(Re) blend)
+  double Re_crit_high = 3.5e5;          // drag-crisis transition band end
+
+  // Wall-proximity translation-rotation added-mass coupling (hydrodynamic-accuracy audit,
+  // Finding B): UNVALIDATED ENGINEERING PLACEHOLDER, same epistemic status as C_venturi/
+  // C_squeeze/Cd_normal above. In unbounded fluid, translation-rotation cross terms in the
+  // added-mass kinetic-energy quadratic form vanish exactly by symmetry (no cited closed-form
+  // inviscid potential-flow wall-image multipole solution for this cross term was found in the
+  // literature during this audit); the wall breaks that symmetry and must in principle induce a
+  // nonzero coupling, but only the STRUCTURAL form below (vanishes far from the wall, bounded
+  // near it, dimensionally consistent) is defensible -- this scalar gain is a free parameter
+  // pending CFD/tow-tank calibration, not a derived coefficient.
+  double k_coupling_wall = 0.1;  // dimensionless
+
+  // Frequency-dependent radiation damping / Cummins-equation memory effect (hydrodynamic-
+  // accuracy audit, Finding A): a first-order washout (high-pass) filter approximation -- see
+  // RadiationMemoryState's doc comment for the full derivation. K_radiation_memory defaults to
+  // Vector3d::Zero() (feature OFF / zero-regression default): this term is pending calibration
+  // against real frequency-response (panel-method/CFD or tow-tank) data that this project does
+  // not have, same epistemic status as the other placeholder coefficients in this file.
+  Eigen::Vector3d K_radiation_memory = Eigen::Vector3d::Zero();  // N*s/m, per linear-velocity axis
+  double tau_radiation_memory = 0.3;  // s, washout time constant (order of the gust pulse width)
 
   // Ambient current velocity in the world frame at time t: steady crossflow + superposed
   // wave-gust pulses.
@@ -150,6 +186,14 @@ struct SurfacePatch
   Eigen::Vector3d centroid_body = Eigen::Vector3d::Zero();
   Eigen::Vector3d normal_body = Eigen::Vector3d::Zero();  // outward unit normal
   double area = 0.0;                                      // m^2
+
+  // Reynolds-number-dependent Cd_normal "drag crisis" eligibility (Finding D): true for
+  // patches tessellated from a smooth curved geom (sphere/ellipsoid/cylinder/capsule), whose
+  // flow-separation point migrates with the boundary layer's laminar-to-turbulent transition;
+  // false for sharp-edged geoms (box/mesh), whose separation point is geometrically fixed at
+  // the edge and is therefore Re-independent by physical law, not by omission. Set once per
+  // geom in HydroGeometryModel::buildFromMjModel(), never mutated afterwards.
+  bool is_curved = false;
 };
 
 // Cached once-per-model geometric hydrodynamic description, built directly from the
@@ -163,6 +207,12 @@ struct HydroGeometryModel
   Eigen::Vector3d bbox_half_extents = Eigen::Vector3d::Zero();    // body-local AABB half-extents
   Eigen::Matrix3d added_mass_linear = Eigen::Matrix3d::Zero();    // M_A (3x3), Lamb-ellipsoid est.
   Eigen::Matrix3d added_mass_angular = Eigen::Matrix3d::Zero();   // I_A (3x3), Lamb-ellipsoid est.
+
+  // Characteristic diameter of the first smooth curved geom encountered during tessellation
+  // (Finding D), used as the Cd_normal Reynolds-number length scale for is_curved patches.
+  // Stays 0.0 (unused -- no is_curved patch ever reads it) when the hull has no curved geoms,
+  // true for rov_wall.xml's pure-box chassis today.
+  double cd_diameter = 0.0;
 
   // Tessellates every geom belonging to root_body_id's rigid hull subtree into surface patches
   // (box: 6 faces x 4x4 grid; sphere/capsule/cylinder/ellipsoid: latitude/longitude grids;
@@ -192,6 +242,29 @@ struct HydroGeometryModel
     const mjModel * m, int root_body_id, double rho_water = 1000.0);
 };
 
+// Persistent cross-tick state for the frequency-dependent radiation-damping/memory-effect
+// approximation (hydrodynamic-accuracy audit, Finding A). A full Cummins-equation convolution
+// force = -Integral_0^t K(t-tau) v(tau) dtau needs a real retardation kernel K(t) that this
+// project has no panel-method/CFD data to calibrate; instead this implements a first-order
+// washout (high-pass) filter -- the simplest structurally-correct approximation that produces
+// EXTRA damping only for velocity components changing faster than tau_radiation_memory allows
+// lagged_vel_body to track, and contributes EXACTLY ZERO at true steady state (so it never
+// double-counts with the already-tuned quasi-steady D_lin/D_quad terms):
+//   d(lagged_vel_body)/dt = (v_rel_body - lagged_vel_body) / tau_radiation_memory
+//   F_memory_body = -K_radiation_memory .* (v_rel_body - lagged_vel_body)
+// Like t_munk_body/the Finding B coupling terms, this is NOT guaranteed pointwise-dissipative
+// (a washout filter can transiently return energy, same as added-mass terms in general) -- it is
+// bucketed into its own HydroWrenchBreakdown field, excluded from the Tier4 passivity check.
+// Owned by the CALLER (AdhereMujocoHardware holds one instance for the lifetime of its mjData,
+// reset alongside it) and passed by pointer into compute(); default nullptr means "feature off",
+// reproducing pre-Finding-A behavior exactly regardless of HydroParams::K_radiation_memory.
+struct RadiationMemoryState
+{
+  Eigen::Vector3d lagged_vel_body = Eigen::Vector3d::Zero();
+  bool initialized = false;  // first call seeds lagged_vel_body from the current v_rel_body,
+                              // avoiding a spurious startup transient spike
+};
+
 // Per-term decomposition of the wrench FossenHydrodynamics::compute() returns (Phase 2.13),
 // for live inspection (MujocoViewer's "Hydro Breakdown (N)" scope) and for the Tier 4
 // thermodynamic-passivity V&V test. All vectors are in the *_body/_world frame their name says;
@@ -211,12 +284,26 @@ struct HydroWrenchBreakdown
   Eigen::Vector3d f_buoy_world = Eigen::Vector3d::Zero();    // net buoyancy + added-mass bias
   Eigen::Vector3d t_munk_body = Eigen::Vector3d::Zero();     // Munk overturning moment (workless)
   Eigen::Vector3d t_drag_body = Eigen::Vector3d::Zero();     // dissipative drag/skin/squeeze torque
+
+  // Wall-proximity translation-rotation coupling (Finding B, UNVALIDATED placeholder -- see
+  // HydroParams::k_coupling_wall). Unlike t_munk_body's two self-coupling terms (v.(vxMv)==0 and
+  // w.(wxI_Aw)==0 by the triple-product identity for ANY tensor), this cross term is NOT
+  // guaranteed workless at every instant -- it is deliberately excluded from the Tier4
+  // dissipative-power check for that reason, same bucket as t_munk_body.
+  Eigen::Vector3d f_coupling_body = Eigen::Vector3d::Zero();
+  Eigen::Vector3d t_coupling_body = Eigen::Vector3d::Zero();
+
+  // Frequency-dependent radiation-damping/memory-effect contribution (Finding A). Zero whenever
+  // RadiationMemoryState* is nullptr or HydroParams::K_radiation_memory is zero (the default).
+  Eigen::Vector3d f_radiation_memory_body = Eigen::Vector3d::Zero();
 };
 
-// Exact C++ port of mujoco_mppi_ws/src/env/hydrodynamics.py::setup_hydrodynamics_callback's
-// per-tick passive_callback body. Stateless/pure: all per-step quantities are passed in, so
-// the same implementation can be shared by AdhereMujocoHardware (at 500 Hz) and any future
-// rollout/controller code without duplicating the physics.
+// Port of mujoco_mppi_ws/src/env/hydrodynamics.py::setup_hydrodynamics_callback's per-tick
+// passive_callback body. Stateless/pure WITH RESPECT TO ITS ARGUMENTS: every per-step quantity
+// (including, since Finding A, the radiation-memory filter state) is passed in by the caller
+// rather than held internally, so the same implementation can be shared by AdhereMujocoHardware
+// (at 500 Hz) and any future rollout/controller code -- possibly at a different, non-constant
+// dt -- without duplicating the physics or silently diverging on timestep assumptions.
 class FossenHydrodynamics
 {
 public:
@@ -227,15 +314,25 @@ public:
   // kStonefishGeometryDriven and ignored otherwise. When mode == kParametricLumped (the
   // default) or geo == nullptr, this executes exactly the original point-CoM model,
   // byte-identical to the Phase 2 Python-reference-matched implementation -- a hard parity
-  // requirement that must never regress.
+  // requirement that must never regress. The radiation-memory term (memory/dt below) is ONLY
+  // ever evaluated in the kStonefishGeometryDriven branch -- kParametricLumped never reads
+  // memory or dt, preserving that parity lock absolutely.
   //
   // breakdown is an optional output (Phase 2.13): when non-null, it is overwritten with this
   // call's per-term decomposition (see HydroWrenchBreakdown). Defaults to nullptr so every
   // existing caller needs zero changes.
+  //
+  // memory/dt (Finding A): memory is the caller-owned persistent washout-filter state (see
+  // RadiationMemoryState); dt is the physical time elapsed since the caller's PREVIOUS call to
+  // compute() (needed to integrate memory's internal ODE one explicit-Euler step forward). The
+  // radiation-memory term is entirely skipped -- contributing exactly zero, byte-identical to
+  // every pre-Finding-A call site -- whenever memory == nullptr or dt <= 0.0, which is the
+  // default for every existing caller that does not pass these two trailing arguments.
   static Wrench compute(
     const RigidBodyState & state, double t, const HydroParams & params,
     HydroModelMode mode = HydroModelMode::kParametricLumped,
-    const HydroGeometryModel * geo = nullptr, HydroWrenchBreakdown * breakdown = nullptr);
+    const HydroGeometryModel * geo = nullptr, HydroWrenchBreakdown * breakdown = nullptr,
+    RadiationMemoryState * memory = nullptr, double dt = 0.0);
 };
 
 }  // namespace adhere_mujoco_hardware

@@ -28,6 +28,59 @@ namespace
 // documented constants instead of one.
 constexpr double kWallGapFloorComRef = 0.001;    // m, CoM-referenced
 constexpr double kWallGapFloorPatchRef = 0.005;  // m, patch-surface-referenced
+
+// Reynolds-number floor (Finding D): below this, Schlichting's turbulent correlation's
+// log10(Re)-2 denominator approaches its Re=100 singularity. Not a physical regime boundary --
+// F_skin_t/F_drag_n already scale as v^2 and vanish at low speed regardless of Cf/Cd's exact
+// value there, so clamping Re keeps the formula finite without affecting the physical result.
+constexpr double kReFloor = 1.0e4;
+
+// Representative mid-envelope operating Reynolds number (based on the station-keeping crossflow
+// speed ~0.3 m/s and this hull's own ~0.6m length scale, Re ~ 0.3*0.6/1e-6 ~ 1.8e5, rounded to a
+// clean reference value) at which params.Cf_tangent's literal calibrated value is anchored.
+// Finding D's Re-dependence is expressed as a MULTIPLICATIVE correction relative to this anchor
+// -- NOT an outright replacement of Cf_tangent by the Schlichting formula's own absolute
+// magnitude (which is a different, uncalibrated unit scale from this file's existing Cf_tangent
+// default of 0.02) -- so that (a) Cf_tangent == 0.0 still fully disables skin friction (preserving
+// every existing "isolate a term by zeroing its coefficient" V&V test in this file) and (b) Re ==
+// kReReferenceCf exactly reproduces params.Cf_tangent's own configured value.
+constexpr double kReReferenceCf = 2.0e5;
+
+double schlichtingShape(double Re)
+{
+  const double denom = std::log10(std::max(Re, kReFloor)) - 2.0;
+  return 0.075 / (denom * denom);
+}
+
+// Reynolds-scaled Cf_tangent (Finding D): valid for ANY surface (curved or sharp-edged), since
+// skin friction only depends on the local boundary-layer state, not on where/whether the flow
+// separates. See kReReferenceCf above for why this is a multiplicative correction, not a
+// replacement.
+double reynoldsScaledCf(double v_t_norm, double char_length, const HydroParams & params)
+{
+  static const double kShapeAtReference = schlichtingShape(kReReferenceCf);
+  const double Re = v_t_norm * char_length / params.nu_water;
+  return params.Cf_tangent * schlichtingShape(Re) / kShapeAtReference;
+}
+
+// Reynolds-dependent "drag crisis" Cd for a SMOOTH CURVED surface only (SurfacePatch::is_curved
+// == true): blends linearly in log10(Re) from the subcritical baseline Cd_normal to the
+// post-critical plateau Cd_normal_supercritical across [Re_crit_low, Re_crit_high], clamped flat
+// outside that band. Sharp-edged surfaces (is_curved == false) must NOT call this -- their
+// separation point is geometrically fixed, so Cd_normal stays exactly constant for them
+// (physically correct, not an unmodeled simplification -- see SurfacePatch::is_curved).
+double dragCrisisCd(double v_n, double diameter, const HydroParams & params)
+{
+  if (diameter <= 0.0) {
+    return params.Cd_normal;  // defensive: no curved geom was ever tessellated into this model
+  }
+  const double Re = std::max(std::abs(v_n) * diameter / params.nu_water, kReFloor);
+  const double log_re = std::log10(Re);
+  const double log_lo = std::log10(std::max(params.Re_crit_low, kReFloor));
+  const double log_hi = std::log10(std::max(params.Re_crit_high, params.Re_crit_low + 1.0));
+  const double frac = std::clamp((log_re - log_lo) / (log_hi - log_lo), 0.0, 1.0);
+  return params.Cd_normal + frac * (params.Cd_normal_supercritical - params.Cd_normal);
+}
 }  // namespace
 
 void HydroParams::applyMjModelOverrides(const mjModel * m, HydroParams & params)
@@ -54,11 +107,19 @@ void HydroParams::applyMjModelOverrides(const mjModel * m, HydroParams & params)
     }
   };
 
+  // hydrodynamic-accuracy audit finding 1.4: rho_water/gravity/z_transition/wall_x_offset/
+  // h0_decay were the only HydroParams fields with no <custom><numeric> override hook, forcing
+  // a C++ header edit for e.g. a saltwater (1025 kg/m^3) deployment or a differently-offset
+  // wall -- both otherwise purely MJCF-driven per this package's "zero-recompile" model-
+  // switching contract (see the class README "跨模型零重编扩展指南" section).
+  scalarOverride("hydro_rho_water", params.rho_water);
+  scalarOverride("hydro_gravity", params.gravity);
   scalarOverride("hydro_vehicle_mass", params.vehicle_mass);
   scalarOverride("hydro_augmented_mass", params.augmented_mass);
   scalarOverride("hydro_displaced_volume", params.displaced_volume);
   vec3Override("hydro_cob_offset_body", params.cob_offset_body);
   scalarOverride("hydro_z_surface", params.z_surface);
+  scalarOverride("hydro_z_transition", params.z_transition);
   vec3Override("hydro_D_lin", params.D_lin);
   vec3Override("hydro_D_quad", params.D_quad);
   vec3Override("hydro_D_ang_lin", params.D_ang_lin);
@@ -66,14 +127,27 @@ void HydroParams::applyMjModelOverrides(const mjModel * m, HydroParams & params)
   scalarOverride("hydro_C_venturi", params.C_venturi);
   scalarOverride("hydro_h_gap_nominal", params.h_gap_nominal);
   scalarOverride("hydro_A_plate", params.A_plate);
+  scalarOverride("hydro_h0_decay", params.h0_decay);
+  scalarOverride("hydro_wall_x_offset", params.wall_x_offset);
   scalarOverride("hydro_C_squeeze", params.C_squeeze);
   scalarOverride("hydro_Cd_normal", params.Cd_normal);
   scalarOverride("hydro_Cf_tangent", params.Cf_tangent);
+
+  // Reynolds-number-dependent drag/friction enhancement (Finding D).
+  scalarOverride("hydro_nu_water", params.nu_water);
+  scalarOverride("hydro_Cd_normal_supercritical", params.Cd_normal_supercritical);
+  scalarOverride("hydro_Re_crit_low", params.Re_crit_low);
+  scalarOverride("hydro_Re_crit_high", params.Re_crit_high);
+  scalarOverride("hydro_k_coupling_wall", params.k_coupling_wall);
+
+  vec3Override("hydro_K_radiation_memory", params.K_radiation_memory);
+  scalarOverride("hydro_tau_radiation_memory", params.tau_radiation_memory);
 }
 
 Wrench FossenHydrodynamics::compute(
   const RigidBodyState & state, double t, const HydroParams & params, HydroModelMode mode,
-  const HydroGeometryModel * geo, HydroWrenchBreakdown * breakdown)
+  const HydroGeometryModel * geo, HydroWrenchBreakdown * breakdown, RadiationMemoryState * memory,
+  double dt)
 {
   if (breakdown) {
     *breakdown = HydroWrenchBreakdown{};
@@ -165,6 +239,13 @@ Wrench FossenHydrodynamics::compute(
   Eigen::Vector3d acc_f_squeeze = Eigen::Vector3d::Zero();
   Eigen::Vector3d acc_t_drag = Eigen::Vector3d::Zero();     // torque from the 3 terms above
 
+  // Reynolds-number-dependent Cf_tangent/Cd_normal (Finding D): L_plate is the single
+  // flow-direction length scale shared by every patch's Cf_tangent correlation (the hull's own
+  // largest extent, a reasonable "distance from leading edge" for a hull-wide flat-plate skin-
+  // friction estimate); geo->cd_diameter (set only if a curved geom exists) is the separate
+  // cross-flow diameter scale used by dragCrisisCd() for is_curved patches only.
+  const double L_plate = 2.0 * geo->bbox_half_extents.maxCoeff();
+
   for (const SurfacePatch & p : geo->patches) {
     const Eigen::Vector3d & r_p = p.centroid_body;
     // Rigid-body kinematics: velocity at this patch relative to the ambient flow, assuming
@@ -178,13 +259,21 @@ Wrench FossenHydrodynamics::compute(
     // Cd_normal is defined on single-sided frontal projected area (already encompassing
     // windward stagnation + leeward wake suction), so applying it on both sides double-counts
     // the pressure drag. Leeward patches (v_n <= 0) contribute zero normal pressure drag here.
+    // Re-dependent "drag crisis" (Finding D) applies ONLY to is_curved patches -- sharp-edged
+    // patches (box/mesh) keep the constant subcritical params.Cd_normal, which is the physically
+    // correct behavior for a geometrically-fixed separation point, not a missing correction.
     Eigen::Vector3d F_drag_n = Eigen::Vector3d::Zero();
     if (v_n > 0.0) {
-      F_drag_n = -0.5 * params.rho_water * params.Cd_normal * p.area * v_n * v_n * p.normal_body;
+      const double Cd_eff =
+        p.is_curved ? dragCrisisCd(v_n, geo->cd_diameter, params) : params.Cd_normal;
+      F_drag_n = -0.5 * params.rho_water * Cd_eff * p.area * v_n * v_n * p.normal_body;
     }
-    // Skin friction (tangential direction), both directions.
-    const Eigen::Vector3d F_skin_t =
-      -0.5 * params.rho_water * params.Cf_tangent * p.area * v_t_norm * v_t;
+    // Skin friction (tangential direction), both directions. Cf_eff follows the Schlichting
+    // turbulent flat-plate correlation for every patch regardless of is_curved (skin friction's
+    // Re-dependence is a boundary-layer property, not a separation-point property); Cf_tangent
+    // == 0.0 still fully disables this term (see kReReferenceCf above).
+    const double Cf_eff = reynoldsScaledCf(v_t_norm, L_plate, params);
+    const Eigen::Vector3d F_skin_t = -0.5 * params.rho_water * Cf_eff * p.area * v_t_norm * v_t;
 
     Eigen::Vector3d F_suction_n = Eigen::Vector3d::Zero();
     Eigen::Vector3d F_squeeze_n = Eigen::Vector3d::Zero();
@@ -249,13 +338,9 @@ Wrench FossenHydrodynamics::compute(
   // Lamb-ellipsoid characteristic semi-axes (geo->bbox_half_extents) in place of a true sphere's
   // single radius -- an engineering approximation consistent with the rest of this file's
   // ellipsoid treatment, NOT an exact solution for a non-spherical box hull; pending validation
-  // against CFD/tow-tank data for this specific geometry. Only the translational tensor is
-  // corrected here: a consistent rotational (added-inertia) wall correction requires a
-  // higher-order multipole image analysis beyond this leading-order linear treatment and is left
-  // as a documented future enhancement, not fabricated here. Clamped at
-  // kMaxWallAmplification since the inviscid image series itself diverges as h -> 0; the
-  // physical near-contact regime is already separately captured by the per-patch squeeze-film
-  // term F_squeeze_n above.
+  // against CFD/tow-tank data for this specific geometry. Clamped at kMaxWallAmplification since
+  // the inviscid image series itself diverges as h -> 0; the physical near-contact regime is
+  // already separately captured by the per-patch squeeze-film term F_squeeze_n above.
   constexpr double kMaxWallAmplification = 6.0;
   const double h_gap_wall =
     std::max(state.com_pos_world.x() - params.wall_x_offset, kWallGapFloorComRef);
@@ -271,6 +356,67 @@ Wrench FossenHydrodynamics::compute(
   added_mass_linear_wall(1, 1) *= amp_tangent;
   added_mass_linear_wall(2, 2) *= amp_tangent;
 
+  // Wall-proximity ROTATIONAL added-inertia correction (hydrodynamic-accuracy audit, Finding B):
+  // body X is the wall-normal axis. For a wall-facing patch at r_p ~= (-h, y_p, z_p), omega x r_p
+  // kinematics give: pure roll (omega_x) -> local patch velocity's X-component is IDENTICALLY
+  // ZERO (motion stays entirely in the wall-tangent Y-Z plane, the same kinematic regime as pure
+  // tangential translation) -> reuse amp_tangent; pure pitch (omega_y) -> local X-velocity ~
+  // omega_y*z_p (nonzero, the same differential wall-normal motion already driving the per-patch
+  // squeeze-film torque above) -> reuse amp_normal; pure yaw (omega_z) -> local X-velocity ~
+  // -omega_z*y_p, same mechanism -> reuse amp_normal. This is a direct reuse of an already-
+  // present kinematic argument (not a new formula), unlike the coupling term below.
+  Eigen::Matrix3d added_mass_angular_wall = geo->added_mass_angular;
+  added_mass_angular_wall(0, 0) *= amp_tangent;  // roll
+  added_mass_angular_wall(1, 1) *= amp_normal;   // pitch
+  added_mass_angular_wall(2, 2) *= amp_normal;   // yaw
+
+  // Wall-proximity translation-rotation added-mass COUPLING (Finding B): UNVALIDATED ENGINEERING
+  // PLACEHOLDER -- see HydroParams::k_coupling_wall's doc comment. In unbounded fluid this cross
+  // term is EXACTLY zero by symmetry (neither T_munk_body term above couples v and w), so the
+  // coupling here is built from the UNBOUNDED (not wall-amplified) tensors geo->added_mass_linear/
+  // angular -- giving it a fixed, finite, hull-characteristic magnitude -- multiplied by an
+  // explicit dimensionless small-parameter shape (a_normal/h_gap_wall)^3, the SAME leading image-
+  // method order already used for amp_normal/amp_tangent above, which is what actually drives this
+  // term to zero far from the wall and grow (clamped bounded) near it. Couples wall-normal
+  // translation v_x with pitch/yaw (omega_y, omega_z) -- the same two rotation axes whose patches
+  // induce wall-normal local motion per the kinematic argument just above; signs follow that same
+  // omega x r_p convention (+z_p for pitch, -y_p for yaw) for internal consistency only, not an
+  // independently verified physical sign.
+  const double coupling_shape =
+    std::min(std::pow(a_normal / h_gap_wall, 3), kMaxWallAmplification - 1.0);
+  const double C_coupling_y = params.k_coupling_wall *
+    std::sqrt(geo->added_mass_linear(0, 0) * geo->added_mass_angular(1, 1)) * coupling_shape;
+  const double C_coupling_z = params.k_coupling_wall *
+    std::sqrt(geo->added_mass_linear(0, 0) * geo->added_mass_angular(2, 2)) * coupling_shape;
+  Eigen::Vector3d F_coupling_body = Eigen::Vector3d::Zero();
+  F_coupling_body.x() = C_coupling_y * w_body.y() - C_coupling_z * w_body.z();
+  Eigen::Vector3d T_coupling_body = Eigen::Vector3d::Zero();
+  T_coupling_body.y() = C_coupling_y * v_cog_body.x();
+  T_coupling_body.z() = -C_coupling_z * v_cog_body.x();
+  F_total_body += F_coupling_body;
+  T_total_body += T_coupling_body;
+
+  // Frequency-dependent radiation damping / Cummins-equation memory effect (hydrodynamic-
+  // accuracy audit, Finding A): first-order washout filter, see RadiationMemoryState's doc
+  // comment in fossen_hydrodynamics.hpp for the full derivation. Entirely skipped (contributing
+  // exactly zero) whenever memory == nullptr or dt <= 0.0 -- the default for every pre-Finding-A
+  // call site, preserving byte-identical behavior.
+  Eigen::Vector3d F_memory_body = Eigen::Vector3d::Zero();
+  if (memory != nullptr && dt > 0.0) {
+    if (!memory->initialized) {
+      memory->lagged_vel_body = v_cog_body;
+      memory->initialized = true;
+    }
+    // Exact discrete-time solution of dx/dt = (v-x)/tau for constant v over [0,dt] -- the same
+    // exact-exponential discretization convention already used by applyThrusterLagStep() in
+    // rhombic_kern.hpp, preferred over a raw forward-Euler step for numerical robustness.
+    const double alpha_r = 1.0 - std::exp(-dt / std::max(params.tau_radiation_memory, 1e-6));
+    memory->lagged_vel_body += alpha_r * (v_cog_body - memory->lagged_vel_body);
+    F_memory_body =
+      -params.K_radiation_memory.cwiseProduct(v_cog_body - memory->lagged_vel_body);
+    F_total_body += F_memory_body;
+  }
+
   // Unsteady Froude-Krylov (displaced-fluid inertia) + added-mass reaction force: fluid
   // accelerating around the body (gusts) exerts a reaction force proportional to both the
   // displaced volume and the added-mass tensor. This is distinct from the body's own-
@@ -285,9 +431,11 @@ Wrench FossenHydrodynamics::compute(
   F_total_body += F_fk_am_body;
 
   // Munk moment: classical rigid-body-in-ideal-fluid moment from added-mass anisotropy
-  // coupling relative linear/angular velocity into a destabilizing moment.
+  // coupling relative linear/angular velocity into a destabilizing moment. Uses
+  // added_mass_angular_wall (Finding B) instead of the unbounded geo->added_mass_angular, so the
+  // wall-proximity rotational correction above actually reaches this term.
   const Eigen::Vector3d T_munk_body = -v_cog_body.cross(added_mass_linear_wall * v_cog_body) -
-    w_body.cross(geo->added_mass_angular * w_body);
+    w_body.cross(added_mass_angular_wall * w_body);
   T_total_body += T_munk_body;
 
   // Buoyancy/gravity-bias and the free-surface taper are whole-body effects independent of
@@ -316,6 +464,9 @@ Wrench FossenHydrodynamics::compute(
     breakdown->f_buoy_world = F_buoy_world;
     breakdown->t_munk_body = T_munk_body * submerged_ratio;
     breakdown->t_drag_body = acc_t_drag * submerged_ratio;
+    breakdown->f_coupling_body = F_coupling_body * submerged_ratio;
+    breakdown->t_coupling_body = T_coupling_body * submerged_ratio;
+    breakdown->f_radiation_memory_body = F_memory_body * submerged_ratio;
   }
   return wrench;
 }
@@ -516,9 +667,14 @@ std::vector<SurfacePatch> decimatePatches(const std::vector<SurfacePatch> & raw)
     aabb_max = aabb_max.cwiseMax(p.centroid_body);
   }
   const Eigen::Vector3d extent = (aabb_max - aabb_min).cwiseMax(1e-6);
-  // 3^3 spatial cells x 6 normal-direction buckets = 162 <= kMaxPatches, leaving headroom
-  // versus the 256 budget while keeping every bucket's occupants normal-direction-consistent.
-  constexpr int kGridN = 3;
+  // 2^3 spatial cells x 6 normal-direction buckets x 2 is_curved buckets = 96 <= kMaxPatches.
+  // Finding D: is_curved is folded into the key for the same reason normal direction already
+  // is -- merging a sharp-edged (box/mesh) patch with a smooth curved one would silently average
+  // away the Re-dependent Cd_normal "drag crisis" eligibility that per-patch physics now depends
+  // on. kGridN was reduced from 3 to 2 (3^3*6=162 would exceed 256 once doubled by the new
+  // is_curved bit) -- rov_wall.xml's 96 box-only patches never reach this decimation path at all
+  // (96 <= 256 already), so this change has zero effect on any existing model.
+  constexpr int kGridN = 2;
   const Eigen::Vector3d cell_size = extent / static_cast<double>(kGridN);
 
   struct Bucket
@@ -528,6 +684,7 @@ std::vector<SurfacePatch> decimatePatches(const std::vector<SurfacePatch> & raw)
     Eigen::Vector3d normal_weighted_sum = Eigen::Vector3d::Zero();
     double largest_area = 0.0;
     Eigen::Vector3d largest_normal = Eigen::Vector3d::Zero();
+    bool is_curved = false;
   };
   std::unordered_map<int64_t, Bucket> buckets;
   buckets.reserve(static_cast<size_t>(kGridN) * kGridN * kGridN);
@@ -539,11 +696,13 @@ std::vector<SurfacePatch> decimatePatches(const std::vector<SurfacePatch> & raw)
     const int iz = std::clamp(static_cast<int>(rel.z() / cell_size.z()), 0, kGridN - 1);
     const int ndir = normalDirIndex(p.normal_body);
     const int64_t key =
-      ((static_cast<int64_t>(ix) * kGridN + iy) * kGridN + iz) * 6 + ndir;
+      (((static_cast<int64_t>(ix) * kGridN + iy) * kGridN + iz) * 6 + ndir) * 2 +
+      (p.is_curved ? 1 : 0);
     Bucket & b = buckets[key];
     b.area_sum += p.area;
     b.centroid_weighted_sum += p.area * p.centroid_body;
     b.normal_weighted_sum += p.area * p.normal_body;
+    b.is_curved = p.is_curved;  // every patch in this bucket shares the same value (key-derived)
     if (p.area > b.largest_area) {
       b.largest_area = p.area;
       b.largest_normal = p.normal_body;
@@ -560,6 +719,7 @@ std::vector<SurfacePatch> decimatePatches(const std::vector<SurfacePatch> & raw)
     const double normal_mag = b.normal_weighted_sum.norm();
     merged.normal_body =
       normal_mag > 1e-6 ? (b.normal_weighted_sum / normal_mag) : b.largest_normal.normalized();
+    merged.is_curved = b.is_curved;
     decimated.push_back(merged);
   }
   return decimated;
@@ -709,6 +869,11 @@ HydroGeometryModel HydroGeometryModel::buildFromMjModel(
     aabb_min = aabb_min.cwiseMin(center - half_extent_body);
     aabb_max = aabb_max.cwiseMax(center + half_extent_body);
 
+    // Finding D: patch_start marks where this geom's own patches begin in `raw`, so the
+    // is_curved tag (and, for curved geoms, cd_diameter) can be applied to exactly the patches
+    // just appended below without threading a new parameter through every tessellateX() helper.
+    const size_t patch_start = raw.size();
+    bool geom_is_curved = false;
     switch (m->geom_type[g]) {
       case mjGEOM_BOX: {
         const double half[3] = {size[0], size[1], size[2]};
@@ -719,12 +884,20 @@ HydroGeometryModel HydroGeometryModel::buildFromMjModel(
         const double r = size[0];
         tessellateSphereLike(
           raw, geom_pos, geom_quat, Eigen::Vector3d::Zero(), r, r, r, 6, 8, 0.0, M_PI);
+        geom_is_curved = true;
+        if (geo.cd_diameter <= 0.0) {
+          geo.cd_diameter = 2.0 * r;
+        }
         break;
       }
       case mjGEOM_ELLIPSOID: {
         tessellateSphereLike(
           raw, geom_pos, geom_quat, Eigen::Vector3d::Zero(), size[0], size[1], size[2], 6, 8,
           0.0, M_PI);
+        geom_is_curved = true;
+        if (geo.cd_diameter <= 0.0) {
+          geo.cd_diameter = 2.0 * std::cbrt(size[0] * size[1] * size[2]);
+        }
         break;
       }
       case mjGEOM_CYLINDER: {
@@ -733,6 +906,10 @@ HydroGeometryModel HydroGeometryModel::buildFromMjModel(
         tessellateCylinderLateral(raw, geom_pos, geom_quat, r, hh, 4, 8);
         tessellateDisk(raw, geom_pos, geom_quat, r, hh, 1.0, 4);
         tessellateDisk(raw, geom_pos, geom_quat, r, -hh, -1.0, 4);
+        geom_is_curved = true;
+        if (geo.cd_diameter <= 0.0) {
+          geo.cd_diameter = 2.0 * r;
+        }
         break;
       }
       case mjGEOM_CAPSULE: {
@@ -745,6 +922,10 @@ HydroGeometryModel HydroGeometryModel::buildFromMjModel(
           raw, geom_pos, geom_quat, Eigen::Vector3d(0, 0, hh), r, r, r, 3, 8, 0.0, M_PI / 2.0);
         tessellateSphereLike(
           raw, geom_pos, geom_quat, Eigen::Vector3d(0, 0, -hh), r, r, r, 3, 8, M_PI / 2.0, M_PI);
+        geom_is_curved = true;
+        if (geo.cd_diameter <= 0.0) {
+          geo.cd_diameter = 2.0 * r;
+        }
         break;
       }
       case mjGEOM_MESH: {
@@ -755,6 +936,11 @@ HydroGeometryModel HydroGeometryModel::buildFromMjModel(
         // Other geom types (plane, hfield, etc) do not contribute hydrodynamic surface area
         // for this robot's hull -- silently skipped.
         break;
+    }
+    if (geom_is_curved) {
+      for (size_t i = patch_start; i < raw.size(); ++i) {
+        raw[i].is_curved = true;
+      }
     }
   }
 
