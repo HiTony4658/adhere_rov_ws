@@ -12,7 +12,7 @@ Architect"职责要求的**严格 Sim-to-Real 一致性**的工程落地方式�
 当前阶段（Phase 1-6）只实现仿真后端 `adhere_mujoco_hardware`；根据 `CLAUDE.md`
 第 6 节注记，未来 Jetson AGX Xavier 真实硬件接入阶段会新增 `adhere_real_hardware`
 包，与 `adhere_mujoco_hardware` 导出**完全相同的** 8 个 `command_interface` 与
-36 个 `state_interface` 命名契约，使 `AdhereKamrController` 无需任何代码改动即可
+36 个 `state_interface` 命名契约，使 `AdhereController` 无需任何代码改动即可
 切换仿真/实物。
 
 ## 核心机制：500Hz 自治循环

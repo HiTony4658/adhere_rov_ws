@@ -1,7 +1,7 @@
 # Mode-2 (美国手) continuous joystick teleop command (CLAUDE.md Phase 3.2 Stage 2.1), published
 # at 50Hz by xbox_teleop_node on /rov/teleop_cmd. Normalized inputs in [-1.0, 1.0]; consumed by
 # StateOpenLoop/StatePidHold/StateDepthHold, with a 0.25s staleness watchdog enforced centrally
-# by AdhereKamrController.
+# by AdhereController.
 std_msgs/Header header
 
 float64 surge_x        # Right stick up/down: +1.0 = forward toward wall (-X body), -1.0 = backward (+X body)

@@ -58,7 +58,7 @@ struct HydroParams
 
   Eigen::Vector3d cob_offset_body = Eigen::Vector3d(0.0, 0.0, 0.05);
 
-  double z_surface = 1.0;      // m
+  double z_surface = 0.0;      // m, CLAUDE.md Phase 3.3 tank geometry: surface at world Z=0.0
   double z_transition = 0.4;   // m
 
   Eigen::Vector3d D_lin = Eigen::Vector3d(30.0, 20.0, 25.0);

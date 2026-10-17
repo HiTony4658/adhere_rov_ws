@@ -6,6 +6,9 @@
     body axes coincide with world axes. Global gravity remains 0 0 -9.81 (world -Z).
     rov_base origin = vehicle CoM, starts at X = 0.125 (very close to the wall) and settles
     under gravity + normal-thruster pressing force (-X) onto the 4 contact pads.
+    Water tank (CLAUDE.md Phase 3.3): surface at world Z=0.0m, floor at world Z=-10.0m (10m
+    water depth), wall spans Y in [-10,10]m x Z in [-10,0]m. All submerged positions have
+    Z <= 0.0m (depth below surface d = -Z).
   -->
   <compiler angle="radian" autolimits="true"/>
 
@@ -42,22 +45,28 @@
     <!-- Default viewer camera: angled view of the vertical wall and the ROV -->
     <camera name="wall_view" pos="2.5 2.0 1.5" xyaxes="-0.6441 0.7649 0 -0.2345 -0.1975 0.9519"/>
 
-    <!-- Visual reference floor: large horizontal grid plane at Z = -2.0 (ground reference only, not a physics constraint on the wall) -->
-    <geom name="floor_geom" type="plane" pos="0 0 -2.0" size="5 5 0.1" material="floor_mat" contype="1" conaffinity="0"/>
+    <!-- Tank floor: 10m water depth, Z = -10.0 (CLAUDE.md Phase 3.3 tank geometry), 20m x 20m
+         horizontal extent (ground reference only, not a physics constraint on the wall) -->
+    <geom name="floor_geom" type="plane" pos="0 0 -10.0" size="10.0 10.0 0.05" material="floor_mat" contype="1" conaffinity="0"/>
 
-    <!-- Water surface reference plane at Z = 1.0, matching HydroParams.z_surface. Visual only
-         (no collision), semi-transparent so the submerged/above-water region reads clearly. -->
-    <geom name="water_surface" type="plane" pos="0 0 1.0" size="3 3 0.01" rgba="0.2 0.6 0.9 0.25" contype="0" conaffinity="0"/>
+    <!-- Water surface reference plane at Z = 0.0, matching HydroParams.z_surface (CLAUDE.md
+         Phase 3.3: surface at world Z=0, all submerged positions Z<=0). Visual only (no
+         collision), semi-transparent so the submerged/above-water region reads clearly. -->
+    <geom name="water_surface" type="plane" pos="0 0 0" size="10.0 10.0 0.01" rgba="0.2 0.6 0.9 0.25" contype="0" conaffinity="0"/>
 
-    <!-- Wall: static vertical plane at X=0, outward normal +X. Rendered as a thin box. -->
-    <body name="wall" pos="-0.01 0 0">
-      <geom name="wall_geom" type="box" size="0.01 2.0 2.0" material="wall_mat" friction="0.005 0.002 0.0001"/>
-      <!-- Water-boundary warning buoy: small sphere on the wall face marking Z = 1.0 -->
-      <geom name="water_boundary_marker" type="sphere" size="0.04" pos="0.02 0 1.0" rgba="1.0 0.6 0.0 0.9" contype="0" conaffinity="0"/>
+    <!-- Wall: static vertical plane at X=0, outward normal +X, spanning Y in [-10,10]m and
+         Z in [-10,0]m (CLAUDE.md Phase 3.3: 20m x 10m, 5x the original 4m x 4m extent).
+         Rendered as a thin box centered at Z=-5.0. -->
+    <body name="wall" pos="-0.01 0 -5.0">
+      <geom name="wall_geom" type="box" size="0.01 10.0 5.0" material="wall_mat" friction="0.005 0.002 0.0001"/>
+      <!-- Water-boundary warning buoy: small sphere on the wall face marking world Z = 0.0
+           (local Z = 5.0, since this body is now centered at world Z = -5.0) -->
+      <geom name="water_boundary_marker" type="sphere" size="0.04" pos="0.02 0 5.0" rgba="1.0 0.6 0.0 0.9" contype="0" conaffinity="0"/>
     </body>
 
     <!-- ROV chassis: flat box, thin along X (wall-normal), L x W x H = 0.2 x 0.6 x 0.4 m (wide Y, narrow Z), mass ~20 kg -->
-    <body name="rov_base" pos="0.125 0 0.5">
+    <!-- Spawns 2.0m below the water surface (CLAUDE.md Phase 3.3: Z=-2.0, surface at Z=0) -->
+    <body name="rov_base" pos="0.125 0 -2.0">
       <freejoint name="rov_free"/>
       <!-- Augmented inertial mass (20 kg dry + hydrodynamic added mass ~6 kg mean) and
            diaginertia augmented with hydrodynamic added rotational inertia, per CLAUDE.md

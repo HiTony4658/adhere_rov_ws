@@ -1,0 +1,11 @@
+<library path="adhere_controller">
+  <class name="adhere_controller/AdhereController"
+         type="adhere_controller::AdhereController"
+         base_class_type="controller_interface::ControllerInterface">
+    <description>
+      KAMR-MPPI multirate controller: FSM manager (Phase 3.1: PASSIVE, DEPTH_HOLD) + future
+      200Hz inner loop (Impedance PD + Pad-Force DOB + 12D Elastic Rhombic-Kern OSQP) + future
+      20Hz async CUDA MPPI outer loop.
+    </description>
+  </class>
+</library>

@@ -1,5 +1,5 @@
 # Live controller feedback for terminals (CLAUDE.md Phase 3.2 Stage 2.1), published at the
-# outer-loop rate by AdhereKamrController on /rov/fsm_state. fsm_console_node and
+# outer-loop rate by AdhereController on /rov/fsm_state. fsm_console_node and
 # state_cmd_console_node both subscribe to this (never to raw hardware/odom topics) so they work
 # identically whether the state was switched via keyboard or via Xbox gamepad buttons.
 std_msgs/Header header

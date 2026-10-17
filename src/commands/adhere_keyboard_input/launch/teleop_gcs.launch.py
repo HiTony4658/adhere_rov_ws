@@ -1,6 +1,6 @@
 """Standalone Upper-Computer (Ground Control Station) teleop launch (CLAUDE.md Phase 3.2 Stage
 2.5): joy_node (official ROS 2 joy package) + xbox_teleop_node + fsm_console_node. Zero
-dependency on adhere_mujoco_hardware/adhere_kamr_controller/MuJoCo/CUDA/ros2_control -- runs
+dependency on adhere_mujoco_hardware/adhere_controller/MuJoCo/CUDA/ros2_control -- runs
 standalone on a lightweight remote laptop, controlling either the Dell Precision 7920 simulation
 server or the Jetson AGX Xavier over ROS 2 DDS.
 
@@ -54,7 +54,7 @@ def generate_launch_description():
     )
 
     # gnome-terminal (fallback xterm) running fsm_console_node in its own window (same idiom as
-    # adhere_kamr_controller/launch/mujoco.launch.py's fsm_console block): a plain launch_ros
+    # adhere_controller/launch/mujoco.launch.py's fsm_console block): a plain launch_ros
     # Node action does not reliably forward this launch process's stdin for interactive
     # std::cin-based terminals, so fsm_console_node needs its own real terminal.
     fsm_console = ExecuteProcess(

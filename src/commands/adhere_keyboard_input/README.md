@@ -4,7 +4,7 @@
 
 人机交互终端 + Xbox 手柄遥操作桥接层（CLAUDE.md Phase 3.2）。通过
 `adhere_control_msgs` 定义的 4 话题，以标准 ROS 2 话题（非实时路径）与
-`AdhereKamrController` 异步通信，三个可执行文件各自职责正交：
+`AdhereController` 异步通信，三个可执行文件各自职责正交：
 
 - `fsm_console_node`：主控 FSM 状态切换终端，**仅**发布 `/rov/fsm_command`；
 - `state_cmd_console_node`：`DEPTH_HOLD`/`PID_HOLD` 专属数值设定终端，**仅**发布
@@ -14,7 +14,7 @@
   `/rov/fsm_command`（瞬时状态切换）。
 
 本包**零依赖** MuJoCo/CUDA/`ros2_control`/`adhere_mujoco_hardware`/
-`adhere_kamr_controller`，可独立部署到一台不安装仿真/控制栈的轻量级远程
+`adhere_controller`，可独立部署到一台不安装仿真/控制栈的轻量级远程
 笔记本（上位机/GCS）上，通过 ROS 2 DDS 控制运行仿真的 Dell Precision 7920
 服务器或未来的 Jetson AGX Xavier 真机。
 
@@ -72,10 +72,14 @@ ROS 参数 `mode`（`int`，`2` 或 `4`）决定界面；订阅 `/rov/fsm_state`
 Actual/Target，**仅**发布 `/rov/setpoint_cmd`：
 
 ```text
-# mode:=2
-[DEPTH_HOLD] Enter target depth Z in meters (float, e.g. 0.50), or 'h' to hold current Z:
+# mode:=2（水面 Z=0.0m，水深输入既可为正也可为负，二者等价：2.50 与 -2.50
+# 都代表水面以下 2.50m，内部统一归一化为 target_z = -|input|，钳制在
+# [-9.80, -0.15]m）
+Current Depth: 2.000 m (Z = -2.000 m)   |   Target Depth: 2.500 m (Z = -2.500 m)
+[DEPTH_HOLD] Enter target depth in meters, positive or negative (float, e.g.
+2.50 or -2.50 -- both mean 2.50m below the surface), or 'h' to hold current depth:
 
-# mode:=4
+# mode:=4（`z <val>` 同样接受正负水深输入，归一化方式与 mode:=2 一致）
 [PID_HOLD] Enter 'z <val>' (depth), 'y <val>' (lateral), 'x <val>' (wall dist),
 'yaw <deg>', 'all <x> <y> <z> <yaw_deg>', or 'h' (lock current pose):
 ```
@@ -130,7 +134,7 @@ ros2 launch adhere_keyboard_input teleop_gcs.launch.py dev:=/dev/input/js1
 不要求两台机器安装相同的软件栈（下位机需要 MuJoCo/CUDA/`ros2_control`，上位机
 不需要）。
 
-在单工作站便捷模式下，`adhere_kamr_controller/launch/mujoco.launch.py` 的
+在单工作站便捷模式下，`adhere_controller/launch/mujoco.launch.py` 的
 `launch_teleop`（默认 `true`）参数会自动 `include` 本文件；分布式部署时在
 下位机侧传 `launch_teleop:=false`，避免同一个手柄被两份 `joy_node` 争抢。
 

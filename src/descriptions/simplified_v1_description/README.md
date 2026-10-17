@@ -30,7 +30,9 @@ xacro/
 mjcf/
   └── rov_wall.xml                  # MuJoCo 物理描述（与原型仓库数值对齐，只读复制）
 config/
-  └── visualize.rviz                # RViz2 几何检视配置（RobotModel + TF + Grid）
+  ├── visualize.rviz                # RViz2 几何检视配置（RobotModel + TF + Grid）
+  └── robot_control.yaml            # 模型解耦参数：推力器/接触垫几何、Fossen 水动力参数、
+                                     # 工作空间安全边界、各 FSM 状态增益（CLAUDE.md §3.3）
 launch/
   └── visualize.launch.py           # 一行命令启动 robot_state_publisher + RViz2
 ```
@@ -58,8 +60,26 @@ launch/
 - 4 个被动接触垫（球体，半径 0.035 m）：`r_i = (-0.10, ±0.25, ±0.15) m`
 - 8 个推力器安装位：`X = 0.0 m`，与接触垫共用 Y/Z 角点坐标
 - 壁面：世界坐标 `X = 0` 平面（MJCF 中渲染为 `X = -0.01` 的薄壁；不在 URDF 中，
-  仅存在于 `mjcf/rov_wall.xml` 与 RViz2 的 `/rov/environment_markers` Marker 中）
+  仅存在于 `mjcf/rov_wall.xml` 与 RViz2 的 `/rov/environment_markers` Marker 中），
+  `Y ∈ [-10.0, +10.0] m × Z ∈ [-10.0, 0.0] m`（20m × 10m，CLAUDE.md §4）
+- 水箱：水面在世界 `Z = 0.0 m`，箱底在 `Z = -10.0 m`（10m 水深），水平范围
+  `20.0 m × 20.0 m`；ROV 默认水下出生点 `pos = "0.125 0 -2.0"`（水面以下 2.0m）
 - 机体：质量 20.0 kg（MJCF 中为含附加质量的 26.0 kg），对角惯量 `[1.35, 0.55, 1.10] kg·m²`
+
+## `config/robot_control.yaml`：模型解耦参数文件
+
+`src/controllers/adhere_controller` 的 C++ 代码里不包含任何机器人专属几何或
+物理常数——`ModelParams::loadFromNode()` 在 `AdhereController::on_configure()`
+中从本文件读取推力器几何（`thruster_pos_xyz`/`thruster_dir_xyz`/`thruster_min`/
+`thruster_max`）、接触垫几何（`pad_pos_xyz`）、Fossen 水动力前馈参数
+（`rho_water`/`gravity`/`vehicle_mass`/`displaced_volume`/`D_lin`/`D_quad`/...）、
+工作空间安全边界（`workspace_z_min`/`workspace_z_max`/`workspace_x_min`）以及
+各 FSM 状态增益（`depth_hold.*`/`open_loop.*`/`pid_hold.*`）。切换到几何/质量
+不同的新机型只需改这一份 YAML，`adhere_controller` 零 C++ 改动、零重新编译。
+本文件通过 `adhere_controller/launch/mujoco.launch.py` 作为 `--params-file`
+传给 `adhere_mujoco_node` 可执行文件；由于 `ros2 launch` 的节点重映射机制，
+文件内所有参数必须平铺在同一个顶层键 `adhere_mujoco_node:` 下（详见
+[`adhere_controller/README.md`](../../controllers/adhere_controller/README.md)）。
 
 模型没有任何可动的 URDF 关节——唯一的真实自由度（浮动基座）由
 `AdhereMujocoHardware` 的 MuJoCo `freejoint` 驱动，而非 URDF 关节；因此本包的

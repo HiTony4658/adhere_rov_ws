@@ -32,7 +32,7 @@ constexpr double kTol = 1e-9;
 TEST(FossenHydrodynamicsParity, AtRestSubmerged)
 {
   RigidBodyState state;
-  state.com_pos_world = Eigen::Vector3d(0.2, 0.0, 0.5);
+  state.com_pos_world = Eigen::Vector3d(0.2, 0.0, -2.0);
   state.orientation = Eigen::Quaterniond::Identity();
   state.ang_vel_world = Eigen::Vector3d::Zero();
   state.lin_vel_world = Eigen::Vector3d::Zero();
@@ -40,7 +40,8 @@ TEST(FossenHydrodynamicsParity, AtRestSubmerged)
   HydroParams params;  // calm-water defaults
   const Wrench w = FossenHydrodynamics::compute(state, 0.0, params);
 
-  // submerged_ratio = clamp((1.0+0.4-0.5)/0.4, 0, 1) = 1.0 (fully submerged)
+  // submerged_ratio = clamp((0.0+0.4-(-2.0))/0.4, 0, 1) = 1.0 (fully submerged, CLAUDE.md
+  // Phase 3.3: surface at Z=0.0)
   // F_buoy = rho*V*g + (m_aug-m)*g = 1000*0.0202*9.81 + 6*9.81 = 198.162 + 58.86 = 257.022
   EXPECT_NEAR(w.force_world.x(), 0.0, kTol);
   EXPECT_NEAR(w.force_world.y(), 0.0, kTol);
@@ -53,7 +54,7 @@ TEST(FossenHydrodynamicsParity, AtRestSubmerged)
 TEST(FossenHydrodynamicsParity, CrossflowDragAndSuction)
 {
   RigidBodyState state;
-  state.com_pos_world = Eigen::Vector3d(0.15, 0.0, 0.5);
+  state.com_pos_world = Eigen::Vector3d(0.15, 0.0, -2.0);
   state.orientation = Eigen::Quaterniond::Identity();
   state.ang_vel_world = Eigen::Vector3d::Zero();
   state.lin_vel_world = Eigen::Vector3d(0.0, 0.2, 0.0);
@@ -79,7 +80,7 @@ TEST(FossenHydrodynamicsParity, CrossflowDragAndSuction)
 TEST(FossenHydrodynamicsParity, StonefishWithNullGeoFallsBackToLumped)
 {
   RigidBodyState state;
-  state.com_pos_world = Eigen::Vector3d(0.2, 0.0, 0.5);
+  state.com_pos_world = Eigen::Vector3d(0.2, 0.0, -2.0);
   state.orientation = Eigen::Quaterniond::Identity();
   state.ang_vel_world = Eigen::Vector3d::Zero();
   state.lin_vel_world = Eigen::Vector3d::Zero();
@@ -159,7 +160,7 @@ TEST_F(HydroGeometryModelFixture, StonefishModeSmokeTest)
   const HydroGeometryModel geo = HydroGeometryModel::buildFromMjModel(model_, body_id_);
 
   RigidBodyState state;
-  state.com_pos_world = Eigen::Vector3d(0.2, 0.0, 0.5);
+  state.com_pos_world = Eigen::Vector3d(0.2, 0.0, -2.0);
   state.orientation = Eigen::Quaterniond::Identity();
   state.ang_vel_world = Eigen::Vector3d::Zero();
   state.lin_vel_world = Eigen::Vector3d::Zero();
@@ -206,7 +207,7 @@ TEST_F(HydroGeometryModelFixture, StonefishVenturiAndSqueezePhysicalSigns)
   HydroParams params;
 
   RigidBodyState state_crossflow;
-  state_crossflow.com_pos_world = Eigen::Vector3d(0.125, 0.0, 0.5);
+  state_crossflow.com_pos_world = Eigen::Vector3d(0.125, 0.0, -2.0);
   state_crossflow.orientation = Eigen::Quaterniond::Identity();
   state_crossflow.lin_vel_world = Eigen::Vector3d(0.0, 0.3, 0.0);
   const Wrench w = FossenHydrodynamics::compute(
@@ -214,7 +215,7 @@ TEST_F(HydroGeometryModelFixture, StonefishVenturiAndSqueezePhysicalSigns)
   EXPECT_LT(w.force_world.x(), -1.0);
 
   RigidBodyState state_rest;
-  state_rest.com_pos_world = Eigen::Vector3d(0.125, 0.0, 0.5);
+  state_rest.com_pos_world = Eigen::Vector3d(0.125, 0.0, -2.0);
   state_rest.orientation = Eigen::Quaterniond::Identity();
   state_rest.lin_vel_world = Eigen::Vector3d::Zero();
   const Wrench w_rest = FossenHydrodynamics::compute(
@@ -428,7 +429,7 @@ TEST_F(HydroGeometryModelFixture, HydroVV_Tier2_PatchToLumpedExactEquivalence)
   // Part A: Venturi suction, zero rotation. h_gap = 0.15 - 0.10 = 0.05 m > h_gap_nominal, so
   // neither model's decay term is clamped and the two formulations must agree exactly.
   RigidBodyState state_venturi;
-  state_venturi.com_pos_world = Eigen::Vector3d(0.15, 0.0, 0.5);
+  state_venturi.com_pos_world = Eigen::Vector3d(0.15, 0.0, -2.0);
   state_venturi.orientation = Eigen::Quaterniond::Identity();
   state_venturi.ang_vel_world = Eigen::Vector3d::Zero();
   state_venturi.lin_vel_world = Eigen::Vector3d(0.0, 0.2, 0.0);
@@ -452,7 +453,7 @@ TEST_F(HydroGeometryModelFixture, HydroVV_Tier2_PatchToLumpedExactEquivalence)
   // sees pure normal flow, contributing windward pressure drag only -- the -Y face is leeward
   // and contributes nothing, matching kStonefishGeometryDriven's windward-only convention).
   RigidBodyState state_axial;
-  state_axial.com_pos_world = Eigen::Vector3d(0.5, 0.0, 0.5);  // far from the wall: no suction
+  state_axial.com_pos_world = Eigen::Vector3d(0.5, 0.0, -2.0);  // far from the wall: no suction
   state_axial.orientation = Eigen::Quaterniond::Identity();
   state_axial.ang_vel_world = Eigen::Vector3d::Zero();
   const double v_y = 0.4;
@@ -519,7 +520,7 @@ TEST_F(HydroGeometryModelFixture, HydroVV_Tier3_AnalyticalPitchSqueezeAndVenturi
   params.D_ang_quad = Eigen::Vector3d::Zero();
 
   RigidBodyState state_pitch_rate;
-  state_pitch_rate.com_pos_world = Eigen::Vector3d(0.125, 0.0, 0.5);  // h_gap = 0.125-0.10 = h_nom
+  state_pitch_rate.com_pos_world = Eigen::Vector3d(0.125, 0.0, -2.0);  // h_gap = 0.125-0.10 = h_nom
   state_pitch_rate.orientation = Eigen::Quaterniond::Identity();
   const double omega_y = 0.5;
   state_pitch_rate.ang_vel_world = Eigen::Vector3d(0.0, omega_y, 0.0);
@@ -564,7 +565,7 @@ TEST_F(HydroGeometryModelFixture, HydroVV_Tier3_AnalyticalPitchSqueezeAndVenturi
                                                          // zero, not just "small"
   const double theta = 0.05;
   RigidBodyState state_tilt;
-  state_tilt.com_pos_world = Eigen::Vector3d(0.125, 0.0, 0.5);
+  state_tilt.com_pos_world = Eigen::Vector3d(0.125, 0.0, -2.0);
   state_tilt.orientation = Eigen::Quaterniond(Eigen::AngleAxisd(theta, Eigen::Vector3d::UnitY()));
   state_tilt.ang_vel_world = Eigen::Vector3d::Zero();
   state_tilt.lin_vel_world = Eigen::Vector3d(0.0, 0.5, 0.0);
@@ -617,7 +618,7 @@ TEST_F(HydroGeometryModelFixture, HydroVV_Tier4_ThermodynamicPassivityAndWorkles
 
   for (int sample = 0; sample < 200; ++sample) {
     RigidBodyState state;
-    state.com_pos_world = Eigen::Vector3d(dist_x(rng), 0.0, 0.5);
+    state.com_pos_world = Eigen::Vector3d(dist_x(rng), 0.0, -2.0);
     state.orientation = Eigen::Quaterniond::Identity();
     const Eigen::Vector3d v(dist_v(rng), dist_v(rng), dist_v(rng));
     const Eigen::Vector3d w(dist_w(rng), dist_w(rng), dist_w(rng));
@@ -691,7 +692,7 @@ TEST_F(HydroGeometryModelFixture, HydroVV_Tier5_ClosedLoopTerminalVelocityAndRol
     mj_resetData(model_, d);
     d->qpos[0] = 1.0;
     d->qpos[1] = 0.0;
-    d->qpos[2] = 0.5;
+    d->qpos[2] = -2.0;
     d->qpos[3] = 1.0;  // identity quaternion [w,x,y,z]
     d->qpos[4] = 0.0;
     d->qpos[5] = 0.0;
@@ -727,7 +728,7 @@ TEST_F(HydroGeometryModelFixture, HydroVV_Tier5_ClosedLoopTerminalVelocityAndRol
     const Eigen::Quaterniond q0(Eigen::AngleAxisd(roll0, Eigen::Vector3d::UnitX()));
     d->qpos[0] = 1.0;
     d->qpos[1] = 0.0;
-    d->qpos[2] = 0.5;
+    d->qpos[2] = -2.0;
     d->qpos[3] = q0.w();
     d->qpos[4] = q0.x();
     d->qpos[5] = q0.y();
@@ -792,15 +793,15 @@ TEST_F(HydroGeometryModelFixture, WallProximityAddedMassAmplifiesNearWallAndIsBo
   params.gust_events = {adhere_mujoco_hardware::GustEvent{0.0, 1.0, 0.0, 1.0}};
 
   RigidBodyState state_far;
-  state_far.com_pos_world = Eigen::Vector3d(1.0, 0.0, 0.5);  // h_gap ~0.9m: negligible wall effect
+  state_far.com_pos_world = Eigen::Vector3d(1.0, 0.0, -2.0);  // h_gap ~0.9m: negligible wall effect
   state_far.orientation = Eigen::Quaterniond::Identity();
 
   RigidBodyState state_near;
-  state_near.com_pos_world = Eigen::Vector3d(0.15, 0.0, 0.5);  // h_gap = 0.05m: strong wall effect
+  state_near.com_pos_world = Eigen::Vector3d(0.15, 0.0, -2.0);  // h_gap = 0.05m: strong wall effect
   state_near.orientation = Eigen::Quaterniond::Identity();
 
   RigidBodyState state_contact;
-  state_contact.com_pos_world = Eigen::Vector3d(0.1005, 0.0, 0.5);  // h_gap clamped to the floor
+  state_contact.com_pos_world = Eigen::Vector3d(0.1005, 0.0, -2.0);  // h_gap clamped to the floor
   state_contact.orientation = Eigen::Quaterniond::Identity();
 
   HydroWrenchBreakdown b_far, b_near, b_contact;
@@ -856,7 +857,7 @@ TEST_F(HydroGeometryModelFixture, CfTangentFollowsSchlichtingCorrelation)
 
   auto skinFrictionForceY = [&](double v_y) {
     RigidBodyState state;
-    state.com_pos_world = Eigen::Vector3d(0.5, 0.0, 0.5);  // far from the wall
+    state.com_pos_world = Eigen::Vector3d(0.5, 0.0, -2.0);  // far from the wall
     state.orientation = Eigen::Quaterniond::Identity();
     state.lin_vel_world = Eigen::Vector3d(0.0, v_y, 0.0);
     const Wrench w = FossenHydrodynamics::compute(
@@ -901,7 +902,7 @@ TEST_F(HydroGeometryModelFixture, CdNormalConstantForSharpEdgedBoxHull)
 
   auto normalDragForceY = [&](double v_y) {
     RigidBodyState state;
-    state.com_pos_world = Eigen::Vector3d(0.5, 0.0, 0.5);
+    state.com_pos_world = Eigen::Vector3d(0.5, 0.0, -2.0);
     state.orientation = Eigen::Quaterniond::Identity();
     state.lin_vel_world = Eigen::Vector3d(0.0, v_y, 0.0);
     const Wrench w = FossenHydrodynamics::compute(
@@ -963,7 +964,7 @@ TEST(HydroVV_Finding_D, CdNormalDragCrisisAppliesToCurvedGeomOnly)
 
   auto frontalDragForceY = [&](double v_y) {
     RigidBodyState state;
-    state.com_pos_world = Eigen::Vector3d(1.0, 0.0, 0.5);
+    state.com_pos_world = Eigen::Vector3d(1.0, 0.0, -2.0);
     state.orientation = Eigen::Quaterniond::Identity();
     state.lin_vel_world = Eigen::Vector3d(0.0, v_y, 0.0);
     const Wrench w = FossenHydrodynamics::compute(
@@ -1037,7 +1038,7 @@ TEST_F(HydroGeometryModelFixture, WallProximityRotationalAddedInertiaAmplifiesNe
 
   auto munkZFor = [&](double h_gap) {
     RigidBodyState state;
-    state.com_pos_world = Eigen::Vector3d(params.wall_x_offset + h_gap, 0.0, 0.5);
+    state.com_pos_world = Eigen::Vector3d(params.wall_x_offset + h_gap, 0.0, -2.0);
     state.orientation = Eigen::Quaterniond::Identity();
     state.ang_vel_world = Eigen::Vector3d(1.0, 1.0, 0.0);  // combined roll + pitch
     state.lin_vel_world = Eigen::Vector3d::Zero();
@@ -1065,7 +1066,7 @@ TEST_F(HydroGeometryModelFixture, TranslationRotationCouplingVanishesGrowsAndBou
 
   auto couplingFxForPurePitch = [&](double h_gap) {
     RigidBodyState state;
-    state.com_pos_world = Eigen::Vector3d(params.wall_x_offset + h_gap, 0.0, 0.5);
+    state.com_pos_world = Eigen::Vector3d(params.wall_x_offset + h_gap, 0.0, -2.0);
     state.orientation = Eigen::Quaterniond::Identity();
     state.ang_vel_world = Eigen::Vector3d(0.0, 1.0, 0.0);  // pure pitch
     state.lin_vel_world = Eigen::Vector3d::Zero();
@@ -1094,7 +1095,7 @@ TEST_F(HydroGeometryModelFixture, TranslationRotationCouplingVanishesGrowsAndBou
   // wall distance must produce the reciprocal torque T_coupling_body.y() with identical
   // magnitude, since both are built from the one shared coefficient C_coupling_y.
   RigidBodyState state_v;
-  state_v.com_pos_world = Eigen::Vector3d(params.wall_x_offset + 0.02, 0.0, 0.5);
+  state_v.com_pos_world = Eigen::Vector3d(params.wall_x_offset + 0.02, 0.0, -2.0);
   state_v.orientation = Eigen::Quaterniond::Identity();
   state_v.lin_vel_world = Eigen::Vector3d(1.0, 0.0, 0.0);
   state_v.ang_vel_world = Eigen::Vector3d::Zero();
@@ -1122,7 +1123,7 @@ TEST_F(HydroGeometryModelFixture, CouplingTermExcludedFromDissipativePowerLaw)
   bool saw_nonzero_coupling = false;
   for (int sample = 0; sample < 200; ++sample) {
     RigidBodyState state;
-    state.com_pos_world = Eigen::Vector3d(dist_x(rng), 0.0, 0.5);
+    state.com_pos_world = Eigen::Vector3d(dist_x(rng), 0.0, -2.0);
     state.orientation = Eigen::Quaterniond::Identity();
     const Eigen::Vector3d v(dist_v(rng), dist_v(rng), dist_v(rng));
     const Eigen::Vector3d w(dist_w(rng), dist_w(rng), dist_w(rng));
@@ -1158,7 +1159,7 @@ TEST_F(HydroGeometryModelFixture, RadiationMemoryZeroGainReproducesExistingBehav
   const HydroParams params;  // default K_radiation_memory == Zero()
 
   RigidBodyState state;
-  state.com_pos_world = Eigen::Vector3d(0.5, 0.0, 0.5);
+  state.com_pos_world = Eigen::Vector3d(0.5, 0.0, -2.0);
   state.orientation = Eigen::Quaterniond::Identity();
   state.lin_vel_world = Eigen::Vector3d(0.1, 0.4, -0.05);
   state.ang_vel_world = Eigen::Vector3d(0.2, -0.3, 0.1);
@@ -1189,7 +1190,7 @@ TEST_F(HydroGeometryModelFixture, RadiationMemoryWashoutVanishesAtSteadyState)
   params.tau_radiation_memory = 0.3;
 
   RigidBodyState state;
-  state.com_pos_world = Eigen::Vector3d(0.5, 0.0, 0.5);
+  state.com_pos_world = Eigen::Vector3d(0.5, 0.0, -2.0);
   state.orientation = Eigen::Quaterniond::Identity();
   state.lin_vel_world = Eigen::Vector3d(0.0, 0.3, 0.0);  // constant, held fixed below
   state.ang_vel_world = Eigen::Vector3d::Zero();
@@ -1226,7 +1227,7 @@ TEST_F(HydroGeometryModelFixture, RadiationMemoryRespondsToStepChangeInVelocity)
   params.tau_radiation_memory = 0.3;
 
   RigidBodyState state;
-  state.com_pos_world = Eigen::Vector3d(0.5, 0.0, 0.5);
+  state.com_pos_world = Eigen::Vector3d(0.5, 0.0, -2.0);
   state.orientation = Eigen::Quaterniond::Identity();
   state.ang_vel_world = Eigen::Vector3d::Zero();
 
@@ -1275,7 +1276,7 @@ TEST_F(HydroGeometryModelFixture, RadiationMemoryBoundedAndFinite)
   params.tau_radiation_memory = 1e-6;  // adversarially tiny
 
   RigidBodyState state;
-  state.com_pos_world = Eigen::Vector3d(0.5, 0.0, 0.5);
+  state.com_pos_world = Eigen::Vector3d(0.5, 0.0, -2.0);
   state.orientation = Eigen::Quaterniond::Identity();
   state.lin_vel_world = Eigen::Vector3d(1e3, -1e3, 1e3);
   state.ang_vel_world = Eigen::Vector3d::Zero();

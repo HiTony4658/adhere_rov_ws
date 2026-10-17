@@ -1,5 +1,5 @@
 # FSM state-switch request ONLY (CLAUDE.md Phase 3.2 Stage 2.1): published by fsm_console_node
-# or xbox_teleop_node's gamepad buttons, consumed by AdhereKamrController's /rov/fsm_command
+# or xbox_teleop_node's gamepad buttons, consumed by AdhereController's /rov/fsm_command
 # subscription. Intra-state setpoints/teleop now live on SetpointCommand/TeleopCommand instead.
 std_msgs/Header header
 

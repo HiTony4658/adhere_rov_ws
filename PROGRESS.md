@@ -1426,3 +1426,144 @@ headless:=true use_rviz:=false launch_teleop:=false`，经 `rclpy` 脚本驱动 
 死区`0.08`+三次方曲线对 `axis=0.5`/`-0.9` 的变换结果与手算一致；`buttons[2]`
 （X 键）按住两帧只触发一次 `FsmCommand{command=DEPTH_HOLD}`，确认上升沿去抖
 生效。
+
+## Phase 3.3（2026-10-17）：`adhere_controller` 包合并、模型参数完全解耦、水箱坐标系重定义（水面 `Z=0`）
+
+### 动机
+
+Phase 3.1~3.2 把控制器拆成 `adhere_controller_common`（基础设施）与
+`adhere_kamr_controller`（算法主体+`pluginlib` 插件）两个包，但二者从未独立
+编译/部署过，纯粹的包拆分只带来跨包链接与维护开销；同时推力器几何、贴垫坐标、
+Fossen 水动力参数、各 FSM 状态 PID 增益仍是 `StateDepthHold.cpp`/
+`StateOpenLoop.cpp`/`StatePidHold.cpp`/`ThrusterAllocator.h` 里的 `constexpr`
+常量，换模型需要改 C++ 并重新编译；水箱坐标系仍是旧的水面 `Z=+1.0m`/
+`4m x 4m` 壁面约定，与 `CLAUDE.md` 最新改写版本（水面 `Z=0.0m`、箱底
+`Z=-10.0m`、`20m x 10m` 壁面）不符。本阶段落地三项改动并把结果同步进
+`CLAUDE.md` 新增的第 9 节"当前代码库快照"。
+
+### 包合并：`src/controllers/adhere_controller`
+
+`git mv adhere_controller_common adhere_controller`，把 `adhere_kamr_controller`
+的 `adhere_kamr_controller.cpp/.hpp`、`adhere_kamr_controller.xml`、
+`launch/mujoco.launch.py`、`config/controllers.yaml` 迁入同一个包，命名空间
+`adhere_controller_common`/`adhere_kamr_controller` 全局改写为单一
+`adhere_controller`，类 `AdhereKamrController` 改名 `AdhereController`，插件
+字符串改为 `adhere_controller/AdhereController`；`git rm -rf` 旧
+`adhere_kamr_controller` 目录。合并后的 `CMakeLists.txt`/`package.xml` 把
+`pluginlib`/`controller_interface` 导出与 3 个既有 gtest 目标
+（`test_multirate_decimator`/`test_thruster_allocator`/`test_fsm_states`）
+全部搬进单一包，不再有包间 `depend`。`adhere_mujoco_hardware` 对旧包名的
+依赖此前已为 0（Phase 3.1.1 解耦的遗留验证），本阶段仅确认无需改动。
+
+### 模型解耦：`ModelParams` + 动态 `ThrusterAllocator`
+
+新增 `include/adhere_controller/common/ModelParams.h`：纯数据结构体，持有
+推力器几何（`thruster_pos`/`thruster_dir`/`thruster_min`/`thruster_max`，
+`std::array<Vec3,8>`/`std::array<double,8>`，默认值即 `rov_wall.xml` 的真实
+几何）、贴垫几何（`pad_pos`，供未来 WBC）、Fossen 水动力前馈参数
+（`rho_water/gravity/vehicle_mass/augmented_mass/displaced_volume/
+cob_offset_body/z_surface/z_transition/D_lin/D_quad/D_ang_lin/D_ang_quad`）、
+工作空间安全边界（`workspace_z_min/max/x_min`）与三个状态增益子结构体
+（`DepthHoldGains`/`OpenLoopGains`/`PidHoldGains`）。静态方法
+`loadFromNode(rclcpp::Node::SharedPtr)` 把每个字段声明为 ROS 参数并读回，
+在 `AdhereController::on_configure()` 中调用一次，构造出的 `model_params_`
+以 `const ModelParams&` 传给全部 4 个 `FSMState` 构造函数。`ThrusterAllocator.h`
+的 `buildThrusterAllocationMatrix()` 从硬编码的角点/`zaxis` 几何改写为通用的
+叉乘公式 `b_i = [dir_i; pos_i x dir_i]`，接受 `ModelParams` 提供的任意几何
+数组，对当前 `rov_wall.xml` 几何代数等价（`test_thruster_allocator.cpp` 的
+`B*B^+ ~= I_6` 断言保持不变地验证了这一点）。`StateDepthHold`/`StateOpenLoop`/
+`StatePidHold` 内部全部 `constexpr`/`const Vec3` 增益与边界常量替换为
+`model_params_.*` 字段读取；`StatePidHold` 的 buoyancy/drag 前馈改用
+`model_params_` 里的水动力参数而非本地硬编码副本（数值与之前完全一致，仅来源
+变为运行时参数）。`PidHoldGains` 采用 `CLAUDE.md` 第 2 节 Stage 2.4 给出的
+全新增益（`kp_pos=[120,120,120]`、`kp_att=[40,40,25]` 等，比 Phase 3.2
+的调试值更硬），闭环验证（见下）确认收敛性不受影响。
+
+`simplified_v1_description/config/robot_control.yaml` 按 `CLAUDE.md` 第 2 节
+Stage 2 populate 全部新键，沿用既有的单顶层键 `adhere_mujoco_node:` 约定
+（`controller_manager`/`AdhereController` 自身节点均被 `ros2 launch` 的
+`-r __node:=` 重映射到同一个节点名，已在 Phase 3.1.1 记录）。`thruster_pos_xyz`/
+`thruster_dir_xyz` 沿用 Phase 3.2 已确认的偏离决定——编码 `rov_wall.xml` 的
+真实几何（8 个推力器站点全部在 body `X=0.0`，与质心同一 `X` 坐标，零杠杆臂），
+而非 `CLAUDE.md` 第 4.3 节的示意性 `X=-0.10m` 占位几何。
+
+**关键发现（`automatically_declare_parameters_from_overrides` 与
+`ParameterAlreadyDeclaredException`）**：`ModelParams::loadFromNode()` 最初
+直接调用 `node->declare_parameter<T>(name, default)`，在真实 `ros2 launch`
+闭环下 `adhere_mujoco_node-2` 进程在 `on_configure()` 内对 `thruster_pos_xyz`
+抛出 `rclcpp::exceptions::ParameterAlreadyDeclaredException` 并 `terminate`。
+原因：`controller_interface::ControllerInterfaceBase::auto_declare<T>()`
+（既有 `cm_update_rate`/`inner_decimation`/`outer_decimation` 三个参数读取
+用的就是这个模板方法）内部先 `has_parameter()` 判空才决定
+`declare_parameter()` 还是 `get_parameter()`——因为 `controller_manager`
+构造控制器自己的节点时启用了 `automatically_declare_parameters_from_overrides`，
+`robot_control.yaml` 里出现的每一个键在 `on_configure()` 运行之前就已经被
+自动声明好了。`ModelParams::loadFromNode()` 补上同样的 `has_parameter()`
+判空封装（`autoDeclareVec`/`autoDeclareDouble` 两个本地 lambda）后问题解决。
+此发现补充进 `ModelParams.h` 的行内注释。
+
+### 水箱坐标系重定义（水面 `Z=0.0m`，箱底 `Z=-10.0m`，壁面 `20m x 10m`）
+
+`simplified_v1_description/mjcf/rov_wall.xml`：`water_surface` 平面
+`pos="0 0 0"` `size="10.0 10.0 0.01"`；`floor_geom`（箱底）`pos="0 0 -10.0"`
+`size="10.0 10.0 0.05"`；`wall` 刚体 `pos="-0.01 0 -5.0"`，`wall_geom`
+`size="0.01 10.0 5.0"`，`water_boundary_marker` 局部 `pos="0.02 0 5.0"`
+（刚体整体下移后仍标记世界 `Z=0`）；`rov_base` 出生点改为
+`pos="0.125 0 -2.0"`。贴垫/推力器/惯量等体坐标系下的几何量（相对质心的偏移）
+无需改动。`adhere_mujoco_hardware/fossen_hydrodynamics.hpp` 的
+`HydroParams::z_surface` 默认值 `1.0 -> 0.0`；`mujoco_viewer.cpp` 的 4 个相机
+预设（`resetCameraView`/`setCameraWallYZ`/`setCameraTopXY`/`setCameraSideXZ`）
+的 `cam_.lookat[2]` 全部改为 `-2.0`；`adhere_mujoco_node.cpp` 的
+`/rov/environment_markers` 壁面 Marker 改为 `position={-0.01,0,-5.0}`、
+`scale={0.02,20.0,10.0}`，新增水面 Marker（`Z=0`，`scale=[20,20,0.01]`，青色
+半透明）与箱底 Marker（`Z=-10`，`scale=[20,20,0.05]`）。
+
+`test_fossen_hydrodynamics_geometry.cpp`：全文件 25 处依赖"默认 `z_surface`
+下处于完全浸没态"语义的 `com_pos_world`/`qpos[2]` 测值从旧约定下的 `0.5`
+统一替换为新约定下的 `-2.0`（`submerged_ratio` 公式
+`clamp((z_surface+z_transition-z)/z_transition,0,1)` 在两种取值下都恰好
+饱和于 `1.0`，故除注释外全部既有数值断言逐位不变）；`sphere_body`/
+`spheroid_body` 两个纯几何/附加质量测试（与 `z_surface` 无关）按计划保持
+`pos="0 0 0.5"` 不变。
+
+`adhere_keyboard_input/state_cmd_console_node.cpp`：新增
+`depthInputToTargetZ()`，`mode==2`（及 `mode==4` 的 `z <val>`/`all` 分支）
+统一把输入值归一化为 `target_z = -|input|`，钳制到
+`[workspace_z_min, workspace_z_max] = [-9.80, -0.15]`——用户输入 `2.5` 或
+`-2.5` 得到同一个 `target_z=-2.5`；终端提示改为同时显示
+`Current/Target Depth` 与对应的原始 `Z` 值。
+
+### 验证结果
+
+`rm -rf build/{adhere_controller_common,adhere_kamr_controller}
+install/{adhere_controller_common,adhere_kamr_controller}` 后
+`colcon build --symlink-install`（全部 5 个包：`adhere_control_msgs`、
+`simplified_v1_description`、`adhere_mujoco_hardware`、`adhere_controller`、
+`adhere_keyboard_input`）**零警告零错误**。`colcon test --packages-select
+adhere_controller adhere_mujoco_hardware`：`adhere_controller` 的
+`test_multirate_decimator`（4/4）、`test_thruster_allocator`（3/3，已改为从
+`ModelParams` 默认几何构造）、`test_fsm_states`（3/3，已改为
+`ModelParams`-based 构造函数，`DEPTH_HOLD`/`PID_HOLD` 测值改到新 `Z<0` 约定
+且保持 `<5mm` 契约）与 `adhere_mujoco_hardware` 的
+`test_fossen_hydrodynamics_geometry`（26/26）、
+`test_rhombic_kern_and_thruster_model`（9/9）**全部通过**（既有
+`copyright`/`cpplint`/`flake8`/`pep257`/`uncrustify` style-lint 失败是
+Phase 2.14 起已记录的"全仓库缺版权头"预先存在问题，与本阶段无关）。
+
+`ros2 launch adhere_controller mujoco.launch.py headless:=true use_rviz:=false
+launch_teleop:=false` 真实 MuJoCo 闭环，经 `rclpy` 脚本驱动 4 个 `/rov/*` 话题
+（`list_controllers` 确认 `adhere_controller`/`AdhereController` 正确加载/
+激活，claimed 全部 8 个 `thr_*/effort` 命令接口）：
+
+| 阶段 | 驱动 | 结果 |
+|---|---|---|
+| `DEPTH_HOLD` | `SetpointCommand{target_z=-3.5}` | `z=-3.50000`，残差 `<0.001mm` ✅ |
+| `DEPTH_HOLD`（运行时重定目标） | `SetpointCommand{target_z=-1.2}` | `z=-1.20000`，残差 `<0.001mm` ✅ |
+| `PID_HOLD`（驱动中） | `TeleopCommand{surge_x=-1.0}` 持续 5s | `target_pose.x` 从 `0.125` 前移至 `2.135` |
+| `PID_HOLD`（释放后） | 摇杆回中，settle 25s | `actual_x` 收敛到释放瞬间 `target_x`，残差 `0.056mm`；`y`/`z` 残差同样 `<0.001mm` ✅ 均远优于 `<5mm` 契约 |
+
+（注：headless 模式下物理步进速率明显快于/慢于挂钟实时，脚本化验证统一预留
+`≥25s` 挂钟settle 窗口，而非直接照搬 Phase 3.2 单元测试里 `4ms*4000=16s`
+仿真步数的挂钟估算——首次用 `5s/8s` 窗口验证时 `DEPTH_HOLD`/`PID_HOLD` 均显示
+"仍在收敛但未到 `<5mm`"，加长到 `25s` 后确认二者均已早早饱和收敛，并非增益或
+几何改动引入的回归。）

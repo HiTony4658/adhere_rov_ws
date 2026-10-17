@@ -1,0 +1,56 @@
+#include "adhere_controller/FSM/StateOpenLoop.h"
+
+#include "adhere_controller/common/mathTools.h"
+#include "adhere_controller/common/ThrusterAllocator.h"
+
+namespace adhere_controller
+{
+
+StateOpenLoop::StateOpenLoop(CtrlInterfaces & ctrl_interfaces, const ModelParams & model_params)
+: FSMState(FSMStateName::OPEN_LOOP, "state_open_loop", ctrl_interfaces, model_params)
+{
+  b_pinv_ = buildThrusterAllocationPseudoInverse(
+    buildThrusterAllocationMatrix(model_params_.thruster_pos, model_params_.thruster_dir));
+}
+
+void StateOpenLoop::enter()
+{
+  for (auto & cmd : ctrl_interfaces_.thruster_command_interface_) {
+    cmd.get().set_value(0.0);
+  }
+}
+
+void StateOpenLoop::run(const rclcpp::Time & /*time*/, const rclcpp::Duration & /*period*/)
+{
+  const auto & ci = ctrl_interfaces_.control_inputs_;
+
+  // surge_x > 0 => move toward the wall along body -X (CLAUDE.md Phase 3.2 Stage 2.2.3).
+  const auto & max_wrench = model_params_.open_loop.max_wrench;
+  const double f_x = -max_wrench[0] * ci.teleop_surge_x.load();
+  const double f_y = -max_wrench[1] * ci.teleop_sway_y.load();
+  const double f_z = max_wrench[2] * ci.teleop_heave_z.load();
+  const double t_z = max_wrench[5] * ci.teleop_yaw_rate.load();
+
+  Vec6 wrench_des;
+  wrench_des << f_x, f_y, f_z, 0.0, 0.0, t_z;
+
+  const Vec8 u = b_pinv_ * wrench_des;
+  for (int i = 0; i < 8; ++i) {
+    ctrl_interfaces_.thruster_command_interface_[i].get().set_value(
+      saturation(u(i), model_params_.thruster_min[i], model_params_.thruster_max[i]));
+  }
+}
+
+void StateOpenLoop::exit()
+{
+  for (auto & cmd : ctrl_interfaces_.thruster_command_interface_) {
+    cmd.get().set_value(0.0);
+  }
+}
+
+FSMStateName StateOpenLoop::checkChange()
+{
+  return checkFsmCommandChange();
+}
+
+}  // namespace adhere_controller

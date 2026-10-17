@@ -6,12 +6,12 @@
 跨节点传递的 ROS 2 消息/服务类型**只允许在本层定义**，严禁在 `hardwares/`、
 `controllers/`、`commands/` 任意包内私自定义跨包共享的消息类型。这样可以保证：
 
-1. **单一事实来源**：`AdhereMujocoHardware`、`AdhereKamrController`、
+1. **单一事实来源**：`AdhereMujocoHardware`、`AdhereController`、
    `adhere_keyboard_input` 三者若需要通过标准 ROS 2 话题/服务（而非进程内指针）交换
    数据（例如遥测、FSM 切换请求），统一依赖本层生成的类型，避免类型定义漂移。
 2. **编译依赖方向清晰**：`interfaces` 不依赖任何其他本工作空间内的包，是依赖图的叶子
    节点，所有其他 5 个包都可以单向依赖它。
-3. **与进程内指针通道解耦**：请注意，`AdhereMujocoHardware` ↔ `AdhereKamrController`
+3. **与进程内指针通道解耦**：请注意，`AdhereMujocoHardware` ↔ `AdhereController`
    之间的**主数据通路**（`hw_states_[36]`、`hw_commands_[8]`）是通过 `ros2_control`
    的 `CtrlInterfaces`（`LoanedStateInterface`/`LoanedCommandInterface` 原始指针）
    实现的零拷贝通道，**不经过**本层消息类型；本层消息类型仅用于标量频率较低的

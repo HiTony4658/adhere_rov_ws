@@ -253,6 +253,8 @@ int main(int argc, char ** argv)
 
       visualization_msgs::msg::MarkerArray markers;
 
+      // Wall marker (CLAUDE.md Phase 3.3 tank geometry: 20m x 10m, centered at Z=-5.0,
+      // spanning Y in [-10,10]m x Z in [-10,0]m).
       visualization_msgs::msg::Marker wall;
       wall.header.stamp = now;
       wall.header.frame_id = "world";
@@ -261,14 +263,53 @@ int main(int argc, char ** argv)
       wall.type = visualization_msgs::msg::Marker::CUBE;
       wall.action = visualization_msgs::msg::Marker::ADD;
       wall.pose.position.x = -0.01;
+      wall.pose.position.y = 0.0;
+      wall.pose.position.z = -5.0;
       wall.scale.x = 0.02;
-      wall.scale.y = 4.0;
-      wall.scale.z = 4.0;
+      wall.scale.y = 20.0;
+      wall.scale.z = 10.0;
       wall.color.r = 0.25f;
       wall.color.g = 0.25f;
       wall.color.b = 0.3f;
       wall.color.a = 0.6f;
       markers.markers.push_back(wall);
+
+      // Water surface marker at world Z=0.0 (CLAUDE.md Phase 3.3), 20m x 20m, semi-transparent
+      // cyan.
+      visualization_msgs::msg::Marker water_surface;
+      water_surface.header.stamp = now;
+      water_surface.header.frame_id = "world";
+      water_surface.ns = "environment";
+      water_surface.id = 1;
+      water_surface.type = visualization_msgs::msg::Marker::CUBE;
+      water_surface.action = visualization_msgs::msg::Marker::ADD;
+      water_surface.pose.position.z = 0.0;
+      water_surface.scale.x = 20.0;
+      water_surface.scale.y = 20.0;
+      water_surface.scale.z = 0.01;
+      water_surface.color.r = 0.2f;
+      water_surface.color.g = 0.8f;
+      water_surface.color.b = 1.0f;
+      water_surface.color.a = 0.25f;
+      markers.markers.push_back(water_surface);
+
+      // Tank floor marker at world Z=-10.0 (CLAUDE.md Phase 3.3), 20m x 20m.
+      visualization_msgs::msg::Marker floor;
+      floor.header.stamp = now;
+      floor.header.frame_id = "world";
+      floor.ns = "environment";
+      floor.id = 2;
+      floor.type = visualization_msgs::msg::Marker::CUBE;
+      floor.action = visualization_msgs::msg::Marker::ADD;
+      floor.pose.position.z = -10.0;
+      floor.scale.x = 20.0;
+      floor.scale.y = 20.0;
+      floor.scale.z = 0.05;
+      floor.color.r = 0.4f;
+      floor.color.g = 0.4f;
+      floor.color.b = 0.4f;
+      floor.color.a = 0.8f;
+      markers.markers.push_back(floor);
 
       for (size_t i = 0; i < snap.pad_force.size(); ++i) {
         visualization_msgs::msg::Marker bar;

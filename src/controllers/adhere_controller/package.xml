@@ -1,0 +1,52 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>adhere_controller</name>
+  <version>0.1.0</version>
+  <description>
+    AdhereController: the single unified controller_interface::ControllerInterface (ROS 2 Foxy)
+    pluginlib plugin implementing the full FSM (PASSIVE, DEPTH_HOLD, OPEN_LOOP, PID_HOLD, and
+    future KAMR-MPPI states), CtrlInterfaces (zero-copy LoanedStateInterface/
+    LoanedCommandInterface wrapper), ModelParams (runtime-loaded, model-decoupled physical/gain
+    parameters) and ThrusterAllocator (dynamic thruster allocation matrix), the uniform
+    500Hz->250Hz/25Hz MultiRateDecimator, and mathTypes/mathTools. Merges the former
+    adhere_controller_common + adhere_kamr_controller packages, which always built and deployed
+    together with zero independent use.
+  </description>
+  <maintainer email="chesnuttbattiste@gmail.com">HiTony4658</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>hardware_interface</depend>
+  <depend>controller_interface</depend>
+  <depend>pluginlib</depend>
+  <depend>realtime_tools</depend>
+  <depend>eigen</depend>
+  <depend>adhere_control_msgs</depend>
+
+  <!-- TODO(Phase 2): add osqp/osqp-eigen and CUDA toolkit discovery in CMakeLists.txt
+       once the 12D OSQP solve and the outer_mppi_cuda rollout kernels are implemented. -->
+
+  <!-- launch/mujoco.launch.py's closed-loop runtime dependencies (CLAUDE.md Phase 3.1.1 Stage
+       2.2): one-directional exec_depends only. adhere_mujoco_hardware has zero dependency back
+       on this package, so this does not reintroduce a colcon build-order cycle. -->
+  <exec_depend>adhere_mujoco_hardware</exec_depend>
+  <exec_depend>adhere_keyboard_input</exec_depend>
+  <exec_depend>simplified_v1_description</exec_depend>
+  <exec_depend>xacro</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+    <controller_interface plugin="${prefix}/adhere_controller.xml" />
+  </export>
+</package>

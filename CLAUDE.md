@@ -1,13 +1,22 @@
-# CLAUDE.md — Architectural & Mathematical Constitution for `adhere_rov_ws`
+# CLAUDE.md — Architectural & Mathematical Constitution for `adhere_robot_ws`
 
-## 0. Project Overview & Read-Only Reference Paths
-This workspace implements the multirate anti-overturning control framework (`Baseline MPPI` and `KAMR-MPPI`) for a thrust-adhered hull-inspection underwater ROV using **Ubuntu 20.04 + ROS2 Foxy + ros2_control + MuJoCo C++ + CUDA**, targeting publication in Elsevier *Ocean Engineering* and real-world deployment on an NVIDIA Jetson AGX Xavier.
+## 0. Project Overview, Read-Only References & Mandatory `/clear` Startup Protocol
+This workspace implements the multirate anti-overturning control framework (`Baseline MPPI` and `KAMR-MPPI`) for a thrust-adhered hull-inspection underwater ROV using **Ubuntu 20.04 + ROS 2 Foxy + ros2_control + MuJoCo C++ + CUDA**, targeting publication in Elsevier *Ocean Engineering* and real-world deployment on an NVIDIA Jetson AGX Xavier.
 
+### MANDATORY SESSION STARTUP PROTOCOL (READ AFTER EVERY `/clear`)
+Before modifying or creating any file in a new session:
+1. **Read the last 2 sections of `PROGRESS.md`** in the workspace root to understand the exact state of completed phases, active files, and verified tests.
+2. **Environment Rule for `colcon build` on this Workstation**: The system default `python3` points to miniconda (which lacks `pkg_resources`). Always run builds with `/usr/bin` prepended to `PATH`:
+   ```bash
+   export PATH=/usr/bin:$PATH && source /opt/ros/foxy/setup.bash && colcon build --symlink-install
+   ```
+
+### Reference Repositories (STRICTLY READ-ONLY)
 - **Active Workspace**: `~/Research/adhere_robot_ws`
 - **Legacy Python/JAX Physics & Algorithm Reference Repo (READ-ONLY)**: `~/Research/mujoco_mppi_ws`
   - *CRITICAL*: Never modify any file in this directory! Only read files such as `assets/rov_wall.xml`, `src/env/hydrodynamics.py`, and `src/controller/` parameters for mathematical and numerical alignment.
 - **Quadruped `ros2_control` C++ Architecture Reference Repo (READ-ONLY)**: `~/Research/quadruped_ros2_control`
-  - Borrow its engineering design patterns from `libraries/controller_common`, `CtrlInterfaces.h`, `FSM`, `descriptions`, and `commands`. Note: that repo targets Jazzy/Humble (`on_init()`, `update(time, period)`, `controller_interface::CallbackReturn`, `get_optional().value()`) — adapt to Foxy's actual signatures (`init(controller_name)`, `update()` with no args, `rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn`, plain `get_value()`/`set_value()`), per the pre-check rule below.
+  - Borrow its engineering design patterns from `libraries/controller_common`, `CtrlInterfaces.h`, `FSM`, `descriptions`, `controllers`, and `commands`. Adapt Jazzy/Humble APIs to ROS 2 Foxy's actual signatures below.
 
 ---
 
@@ -15,155 +24,181 @@ This workspace implements the multirate anti-overturning control framework (`Bas
 You are the Chief Robotics Control Scientist and Defensive Systems Architect for the **Overactuated Thrust-Adhered Hull-Inspection ROV (`KAMR-MPPI`)** project targeting *Elsevier Ocean Engineering*.
 Every architectural design, C++ class, and documentation file must anchor at the intersection of:
 1. **Critical Peer Reviewer**: Reject heuristic hand-waving; maintain a strict physical mechanics causal loop.
-2. **First-Principles Control Scientist**: Anchor designs in hyperstatic compliant contact mechanics (Kelvin-Voigt relaxation tau_c <= 5 ms), multi-rate aliasing prevention, and measure concentration on the Rhombic Kern.
-3. **Defensive Systems Architect**: Enforce **strict Sim-to-Real consistency** where the MuJoCo `hardware_interface` (`AdhereMujocoHardware`) autonomously manages its `500Hz` command reading, hydrodynamic analysis, physics stepping, and state updating—completely agnostic to whether the upper ROS 2 controller updates at `200Hz` or `20Hz`.
+2. **First-Principles Control Scientist**: Anchor designs in hyperstatic compliant contact mechanics (Kelvin-Voigt relaxation $\tau_c \le 5\text{ ms}$), multi-rate aliasing prevention, and measure concentration on the Rhombic Kern.
+3. **Defensive Systems Architect**: Enforce **strict Sim-to-Real consistency** where the MuJoCo `hardware_interface` (`AdhereMujocoHardware`) autonomously manages its `500Hz` command reading, hydrodynamic analysis, physics stepping, and state updating—completely decoupled from upper-layer ROS 2 controllers (`250Hz` inner loop + `25Hz`/`20Hz` outer loop).
 
 ---
 
 ## 2. Target Hardware & Software Stack Constraints (CRITICAL)
 - **Operating System**: Ubuntu 20.04 LTS (Focal Fossa)
-- **ROS 2 Distribution**: **ROS 2 Foxy Fitzroy** (`ros2_control`, `controller_interface`, `hardware_interface`, `pluginlib`, `realtime_tools`, `rclcpp`, `rclcpp_lifecycle`)
+- **ROS 2 Distribution**: **ROS 2 Foxy Fitzroy** (`ros2_control`, `controller_interface`, `hardware_interface`, `controller_manager`, `pluginlib`, `realtime_tools`, `rclcpp`, `rclcpp_lifecycle`, `joy`)
 - **Language & Build System**: C++17 (`std::c++17`), CUDA 11.x/12.x (`nvcc`), `ament_cmake`, `colcon`
 - **Physics & Math Libraries**: MuJoCo C/C++ API (`libmujoco`, GLFW3, OpenGL), Eigen3, OSQP / `osqp-eigen`
 - **Simulation Workstation**: Dell Precision 7920 + **NVIDIA Quadro RTX 5000** (Turing Architecture, CUDA Compute Capability `sm_75`)
 - **Edge Deployment Target (Sim-to-Real)**: **NVIDIA Jetson AGX Xavier** (Volta Architecture, CUDA Compute Capability `sm_72`, ARM64 `aarch64`, Ubuntu 20.04 / JetPack 5.x)
-  - *CMake Rule*: Configure `CMAKE_CUDA_ARCHITECTURES "72;75"` so the codebase compiles natively on both the RTX 5000 workstation and the Jetson AGX Xavier without modification.
+  - *CMake Rule*: Configure `CMAKE_CUDA_ARCHITECTURES "72;75"` so CUDA packages compile natively on both the RTX 5000 workstation and the Jetson AGX Xavier without modification.
 
 ### ROS 2 Foxy API Compatibility Rules (DO NOT VIOLATE)
-Unlike Humble/Jazzy, **ROS 2 Foxy** enforces specific `ros2_control` C++ signatures:
 1. **Hardware Interface (`hardware_interface::SystemInterface`)**:
    - Inherit via: `class AdhereMujocoHardware : public hardware_interface::BaseInterface<hardware_interface::SystemInterface>`
-   - Lifecycle methods:
-     - `hardware_interface::return_type configure(const hardware_interface::HardwareInfo & info) override;`
-     - `std::vector<hardware_interface::StateInterface> export_state_interfaces() override;`
-     - `std::vector<hardware_interface::CommandInterface> export_command_interfaces() override;`
-     - `hardware_interface::return_type start() override;`
-     - `hardware_interface::return_type stop() override;`
-     - `hardware_interface::return_type read() override;` *(No time/period args in Foxy!)*
-     - `hardware_interface::return_type write() override;` *(No time/period args in Foxy!)*
+   - Lifecycle methods: `configure(info)`, `export_state_interfaces()`, `export_command_interfaces()`, `start()`, `stop()`, `read()` *(no args)*, `write()` *(no args)*.
 2. **Controller Interface (`controller_interface::ControllerInterface`)**:
-   - Lifecycle methods in Foxy:
-     - `controller_interface::return_type init(const std::string & controller_name) override;`
-     - `rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn on_configure(const rclcpp_lifecycle::State & previous_state) override;`
-     - `rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn on_activate(const rclcpp_lifecycle::State & previous_state) override;`
-     - `rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn on_deactivate(const rclcpp_lifecycle::State & previous_state) override;`
-     - `controller_interface::return_type update() override;` *(Compute `time` and `period` internally via `get_node()->now()` and pass to `FSMState::run(time, period)`).*
+   - Lifecycle methods in Foxy: `init(controller_name)`, `state_interface_configuration()`, `command_interface_configuration()`, `on_configure(previous_state)`, `on_activate(previous_state)`, `on_deactivate(previous_state)`, `update()` *(no args)*.
+   - In Foxy, `LoanedStateInterface::get_value()` and `LoanedCommandInterface::set_value(val)` are used directly (never use `get_optional().value()`).
 
 ---
 
-## 3. Core Architecture: How `AdhereMujocoHardware`, `AdhereKamrController`, and `MujocoViewer` Interact
-Modeled after `ros-controls/mujoco_ros2_control` and `quadruped_ros2_control`, the entire simulation runs inside a single host process (`adhere_mujoco_node`) to guarantee **100% in-process pointer copy (zero DDS serialization overhead)**:
+## 3. Core System Architecture & Decoupling Rules
 
-1. **`AdhereMujocoHardware` (MuJoCo's `hardware_interface::SystemInterface` @ `500Hz`, dt = 2.0 ms)**:
-   - Acts identically to the real physical ROV + underwater environment. It owns the master `mjModel* m_`, `mjData* d_`, `FossenHydrodynamics`, raw state buffer `hw_states_[36]`, and raw command buffer `hw_commands_[8]`.
-   - Driven at a strict **`500Hz`** by `controller_manager` (`update_rate: 500`):
-     - **`read()` (@ 500Hz)**: Extracts 500Hz sensor measurements from `d_` (IMU orientation/gyro/accel, 6-DOF pose/body velocity, and 4 corner pad normal contact forces `F_N,i` + separation velocities `v_sep,i`) and writes them into `hw_states_[36]`. Also logs 500Hz ground-truth liftoff and Rhombic Kern margin (`M_kern = 1 - K_val`) metrics.
-     - **`write()` (@ 500Hz)**: Reads the 8 thruster commands `hw_commands_[0..7]` currently residing in memory (completely agnostic to whether the controller updated them at `200Hz`, `20Hz`, or left them unchanged on this 2ms tick—naturally emulating hardware ESC Zero-Order Hold!), applies optional thruster lag `tau_T` and deadzone, computes 6-DOF Fossen hydrodynamics + wave gusts into `d_->xfrc_applied`, and calls `mj_step(m_, d_)` to advance MuJoCo by `2.0 ms`.
-2. **Zero-Copy Pointer Link between `AdhereMujocoHardware` and `AdhereKamrController` (`CtrlInterfaces`)**:
-   - `AdhereMujocoHardware::export_state_interfaces()` and `export_command_interfaces()` export raw `double*` pointers to `hw_states_` and `hw_commands_`.
-   - `AdhereKamrController` binds `LoanedStateInterface` and `LoanedCommandInterface` references in `CtrlInterfaces`. Reading sensors and writing thruster commands is a direct C++ pointer dereference (`< 0.1 us`, zero DDS).
-   - **Rate Decoupling inside `AdhereKamrController`**:
-     - Although `controller_manager` ticks `update()` at `500Hz`, `AdhereKamrController` is rate-decoupled:
-     - **Inner Loop (`>=200Hz`)**: Executing `FSMState::run()` -> Planar Impedance PD + Pad-Force DOB (`tau_dob = 0.02 s`) + 12D Elastic Rhombic-Kern OSQP, updating `hw_commands_[0..7]`. On intermediate 500Hz ticks, `hw_commands_[0..7]` remains untouched and `AdhereMujocoHardware` simply reads the latched values at `500Hz`.
-     - **Outer Loop (`>=20Hz`)**: Every 25 steps (`50 ms`), exchanges `(qpos, qvel, F_x_extra_preload)` and nominal wrench `w_cmd = [F_x, F_y, F_z, T_x]^T` with an **Asynchronous CUDA MPPI Rollout Thread** (`< 30 ms` solve latency) via `realtime_tools::RealtimeBuffer`.
-3. **Pointer Link between `AdhereMujocoHardware` and `MujocoViewer` (`60Hz` Async GUI Frontend)**:
-   - `AdhereMujocoHardware` (500Hz backend) and `MujocoViewer` (60Hz GLFW/OpenGL frontend) are linked via a shared in-process `MujocoVisBridge` pointer struct:
-     - **Initialization**: `AdhereMujocoHardware` passes `const mjModel* m_` to `MujocoViewer`, which allocates its own secondary visual data structure `mjData* d_vis_ = mj_makeData(m_)` and runs its OpenGL loop on a dedicated `60Hz` rendering thread.
-     - **500Hz -> 60Hz Visual Sync**: Every 8 steps (`~60Hz`) at the end of `AdhereMujocoHardware::write()`, `AdhereMujocoHardware` uses `std::mutex::try_lock()` (`< 10 us`) to copy `d_->qpos`, `d_->qvel`, `d_->ctrl`, 4 pad forces `F_N,i`, and Rhombic Kern CoP into `MujocoVisBridge`. `MujocoViewer` copies this snapshot into `d_vis_`, runs `mj_forward(m_, d_vis_)`, and renders the 3D scene and contact force bars without OpenGL VSync ever stalling the `500Hz` hardware interface.
-     - **60Hz -> 500Hz Interactive Perturbation**: Mouse perturbations (`mjvPerturb`) applied by the user in `MujocoViewer` are written into `MujocoVisBridge::xfrc_perturb` and added to `d_->xfrc_applied` by `AdhereMujocoHardware::write()` on the next 500Hz tick.
+### 1. `AdhereMujocoHardware` (Model-Agnostic `SystemInterface` @ `500Hz`, $\Delta t_{\text{sim}} = 2.0\text{ ms}$)
+- Owns the master `mjModel* model_`, `mjData* data_`, dual-mode `FossenHydrodynamics` (`kParametricLumped` & `kStonefishGeometryDriven`), runtime-switchable `FlowEnvironmentPlugin` (`CalmWaterPlugin` mode `1` & `StationKeepingGustPlugin` mode `2` with relative clock $\tau = \max(0, t_{\text{sim}} - t_{\text{trigger}})$), `hw_states_[36]`, and `hw_commands_[8]`.
+- **Zero-Recompile Model Switching**: Resolves `pkg_description` and `mjcf_file` at launch, resolves root body via `"rov_base"` $\to$ `"base_link"` $\to$ first `mjJNT_FREE` body, recursively tessellates welded child bodies in `HydroGeometryModel::buildFromMjModel()`, reads per-thruster bounds from `model_->actuator_ctrlrange`, and applies optional `<custom><numeric name="hydro_..."/>` overrides.
+- **Zero-Delay Two-Stage MuJoCo Stepping (`500Hz`)**:
+  - `start()` runs `mj_resetData` + `mj_step1`.
+  - `read()` (@ `500Hz`): Reads zero-delay `xipos`, `xquat`, `cvel`, and `sensordata` (`touch_pad_*`) into `hw_states_[36]`, latching finite-difference IMU linear acceleration when paused.
+  - `write()` (@ `500Hz`): Reads `hw_commands_[0..7]` + `manual_ctrl[0..7]`, clamps to `thruster_ctrl_min/max`, applies optional first-order lag ($\tau_T = 0.015\text{ s}$), and steps physics via `mj_step2(model_, data_)` followed immediately by `mj_step1(model_, data_)` (which invokes `mjcb_passive` to inject Fossen hydrodynamics + `xfrc_perturb` into `qfrc_passive`). Accumulates `500Hz` aliasing-free Rhombic Kern ($K_{\text{val}}, M_{\text{kern}}$), cumulative liftoff ratio, corner-trap ratio, and discrete liftoff events on every physics step.
+
+### 2. Uniform Integer-Ratio Multi-Rate Division (`500Hz` Hardware $\to$ `250Hz` Inner / `25Hz` Outer Controller)
+- **Hardware & Sensor Master Clock (`controller_manager` @ `500Hz`, $\Delta t = 2.0\text{ ms}$)**: Runs at the maximum system frequency so sensors and physics step every `2.0 ms`.
+- **Unified Controller Package (`adhere_controller`)**: All FSM states and control algorithms reside in the single unified package `src/controllers/adhere_controller` (plugin `adhere_controller/AdhereController`).
+- **Jitter-Free Integer Decimation inside `AdhereController::update()`**:
+  - `inner_decimation = 2` (default): Triggers every `2` physics ticks (`tick % 2 == 0`), running the **Inner Loop (FSM states / PID / WBC PD+DOB+OSQP) at a strictly uniform `250Hz` ($\Delta t_{\text{inner}} = 4.0\text{ ms}$, `CtrlInterfaces::frequency_ = 250`)**. On odd ticks (`tick % 2 != 0`), `update()` returns immediately and `AdhereMujocoHardware` holds the latched command (exact hardware ESC Zero-Order Hold).
+  - `outer_decimation = 20` (default, or `25` for `20Hz`): Triggers every `20` physics ticks (`tick % 20 == 0`), running the **Outer Loop (Async CUDA MPPI) at a uniform `25Hz` ($\Delta t_{\text{outer}} = 40.0\text{ ms}$, exactly 10 inner steps per outer step)**.
+
+### 3. Model-Controller Parameter Decoupling Rule (ZERO Hardcoded Geometry in C++)
+- **NEVER hardcode robot-specific geometry, thruster coordinates, allocation matrix $B$, contact pad positions, mass/buoyancy/CoB, Fossen drag coefficients, or PID gains inside `adhere_controller` C++ code!**
+- All model-coupled parameters MUST live in `<pkg_description>/config/robot_control.yaml` (e.g. `simplified_v1_description/config/robot_control.yaml`) and be loaded dynamically at `on_configure()` by `ModelParams` and `ThrusterAllocator` (which constructs $B \in \mathbb{R}^{6 \times 8}$ and $B^\dagger = B^T(B B^T + \lambda_{\text{reg}} I_6)^{-1}$ from `thruster_pos_xyz` and `thruster_dir_xyz` at runtime).
+
+### 4. Orthogonal 4-Topic Teleop & Upper-Computer (GCS) Portability Rule
+- State switching, discrete setpoints, continuous joystick teleop, and controller feedback are strictly decoupled across 4 topics in `adhere_control_msgs`:
+  1. `/rov/fsm_command` (`FsmCommand.msg`): **ONLY** for switching FSM states (`1 = PASSIVE`, `2 = DEPTH_HOLD`, `3 = OPEN_LOOP`, `4 = PID_HOLD`, etc.).
+  2. `/rov/setpoint_cmd` (`SetpointCommand.msg`): **ONLY** for discrete numeric targets (e.g. target depth in `DEPTH_HOLD`, target pose `[x, y, z, yaw]` or `lock_current_pose` in `PID_HOLD`).
+  3. `/rov/teleop_cmd` (`TeleopCommand.msg`): **ONLY** for `50Hz` continuous Xbox Mode-2 (美国手) normalized stick commands (`surge_x, sway_y, heave_z, yaw_rate` $\in [-1, 1]$).
+  4. `/rov/fsm_state` (`FsmState.msg`): `20Hz/25Hz` live feedback from `AdhereController` (`current_state, state_name, target_pose, actual_pose`).
+- **Multi-Terminal Decoupling (`adhere_keyboard_input`)**:
+  - `fsm_console_node` is the Master FSM Switcher (only switches states `1/2/3/4` and monitors `/rov/fsm_state` to automatically spawn/close the state-specific child terminal `state_cmd_console_node` for `DEPTH_HOLD` or `PID_HOLD`).
+  - `adhere_control_msgs` and `adhere_keyboard_input` must have **ZERO dependencies** on MuJoCo, CUDA, or `ros2_control` so they can be compiled and launched standalone (`ros2 launch adhere_keyboard_input teleop_gcs.launch.py`) on a remote Upper-Computer (GCS) laptop!
 
 ---
 
-## 4. Physical Plant, Hydrodynamics & Contact Constitutive Model
-1. **Task**: Planar station-keeping and trajectory tracking (`Y, Z, psi`) on a vertical wall (`X = 0` in world frame) under unsteady near-wall cross-flow and wave gusts, while maintaining all 4 passive contact pads strictly in compression (`min_{i in {1..4}} F_{N,i}(t) > 0`, zero liftoff).
+## 4. Physical Plant, Water Tank Coordinates & Contact Constitutive Model
+1. **Water Tank & Wall Coordinate System (`rov_wall.xml`) — CRITICAL**:
+   - **Water Surface**: Strictly at World **$Z = 0.0\text{ m}$** (`z_surface = 0.0`). All submerged underwater positions have **$Z \le 0.0\text{ m}$** (depth below surface $d = -Z \in [0, 10.0]\text{ m}$).
+   - **Tank Floor**: At World **$Z = -10.0\text{ m}$** ($10.0\text{ m}$ total water depth), tank horizontal extent $20.0\text{ m} \times 20.0\text{ m}$.
+   - **Vertical Wall (`wall`)**: Located at World $X = 0.0\text{ m}$, spanning **$20.0\text{ m}$ horizontally** ($Y \in [-10.0, +10.0]\text{ m}$) and **$10.0\text{ m}$ vertically** ($Z \in [-10.0, 0.0]\text{ m}$, centered at $Z = -5.0\text{ m}$).
+   - **ROV Default Underwater Spawn**: `pos = "0.125 0 -2.0"` ($2.0\text{ m}$ depth below the water surface).
 2. **Contact Geometry & Kelvin-Voigt Model**:
-   - ROV presses along body `-X` against the wall at `X = 0` (normal reaction force along `+X`).
-   - 4 coplanar contact pads (`pad_TL, pad_TR, pad_BL, pad_BR`) at body coordinates `r_i = (-0.10, +/-a, +/-b) m`, with `a = 0.15 m` (`Y` half-width) and `b = 0.25 m` (`Z` half-height).
-   - Unilateral tensionless Kelvin-Voigt model: `lambda_i = max(0, k_c * d_i + b_c * d_dot_i)` with relaxation time constant `tau_c = b_c / k_c <= 5 ms` (`f_c approx 31.8 Hz`, `zeta approx 0.2`).
-   - Corner separation velocity kinematics: `v_sep,i = v_x,b + omega_y * z_i - omega_z * y_i`.
-3. **8-Thruster Configuration & Wrench Allocation Matrix `B` (6x8)**:
-   - `NU = 8` thrusters, rail limit `+/-40.0 N` (saturation threshold `|u_i| >= 39.0 N`).
-   - `thr_N1..4` (indices `0:4`): 4 corner normal thrusters co-located with the 4 pads, generating `-X` pressing force and moments `T_y, T_z`. Bounds: `u_{0:4} in [-40.0, 40.0] N`.
-   - `thr_T5..8` (indices `4:8`): 4 tangential thrusters generating `F_y, F_z, T_x`. Bounds: `u_{4:8} in [-40.0, 40.0] N`. **Critical Coupling**: Mounted at `X = -0.10 m` offset from CoM, so tangential forces `F_y, F_z` induce parasitic overturning moments `T_z, T_y`.
-   - `rank(B) = 6`, `dim ker(B) = 2`. Quasi-static compliant contact map: `A_contact = -G_pinv * B_{[F_x, T_y, T_z]}` (4x8).
+   - ROV (`0.2 x 0.6 x 0.4 m` hull box) presses along body $-X$ against the wall at $X = 0$ (normal reaction force along $+X$).
+   - Facing the wall, the ROV is **wider horizontally (left-right along body $Y$, half-span $L_y = 0.25\text{ m}$) and narrower vertically (bottom-to-top along body $Z$, half-span $L_z = 0.15\text{ m}$)**.
+   - 4 coplanar contact pads (`pad_TL, pad_TR, pad_BL, pad_BR`) sit at body coordinates $r_i = (-0.10, \pm L_y, \pm L_z) = (-0.10, \pm 0.25, \pm 0.15)\text{ m}$.
+   - Unilateral tensionless Kelvin-Voigt model: $\lambda_i = \max(0, k_c d_i + b_c \dot{d}_i)$ with relaxation time constant $\tau_c = b_c / k_c \le 5\text{ ms}$ ($f_c \approx 31.8\text{ Hz}$, $\zeta \approx 0.2$).
+   - Corner separation velocity kinematics: $v_{\text{sep}, i} = v_{x,b} + \omega_y z_i - \omega_z y_i$.
+3. **8-Thruster Configuration & Wrench Allocation Matrix $B \in \mathbb{R}^{6 \times 8}$**:
+   - $NU = 8$ thrusters, rail limit $\pm 40.0\text{ N}$ (saturation threshold $\vert{}u_i\vert{} \ge 39.0\text{ N}$).
+   - `thr_N1..4` (indices `0:4`): 4 corner normal thrusters co-located with the 4 pads, generating $-X$ pressing force and moments $T_y, T_z$.
+   - `thr_T5..8` (indices `4:8`): 4 tangential thrusters generating $F_y, F_z, T_x$, mounted at $X = -0.10\text{ m}$ offset from CoM (inducing parasitic overturning moments $T_z, T_y$).
+   - $\text{rank}(B) = 6$, $\dim\ker(B) = 2$. Quasi-static compliant contact map: $A_{\text{contact}} = -G^\dagger B_{[F_x, T_y, T_z]} \in \mathbb{R}^{4 \times 8}$.
 4. **Rhombic Kern Admissibility**:
-   - Center of Pressure `p_z = T_y / F_press`, `p_y = -T_z / F_press` must satisfy:
-     `K_val = |p_y|/a + |p_z|/b <= 1 - (4 * F_crit) / F_press`, with signed margin `M_kern = 1 - K_val`.
-5. **6-DOF Fossen Hydrodynamics & 12.0s Benchmark**:
-   - Includes added mass, Morison quadratic drag, near-wall Venturi suction effect, and `58.86 N` gravity/buoyancy bias.
-   - Standard 12.0s disturbance profile: steady cross-flow `V_y = 0.3 m/s` + two half-sine wave gusts (`t in [3.0, 4.2] s` and `t in [7.0, 8.2] s`, peak lateral flow `0.9 m/s`, normal suction flow `0.2 m/s`).
+   - Center of Pressure $p_y = \frac{\sum F_{N,i} y_i}{\sum F_{N,i}}$, $p_z = \frac{\sum F_{N,i} z_i}{\sum F_{N,i}}$ must satisfy:
+     $$K_{\text{val}} = \frac{\vert{}p_y\vert{}}{L_y} + \frac{\vert{}p_z\vert{}}{L_z} \le 1 - \frac{4 F_{\text{crit}}}{F_{\text{press}}}, \qquad M_{\text{kern}} = 1 - K_{\text{val}}$$
 
 ---
 
 ## 5. Locked `KAMR-MPPI` (`pr_wbc_mppi_v4`) Mathematical Contract
 1. **Outer Loop (`>=20Hz`, Async CUDA/C++ Thread)**:
-   - Samples in 4-DOF wrench space `w_cmd = [F_x, F_y, F_z, T_x]^T` with covariance pushforward `sigma_w = sqrt((B_cmd^2) * sigma_u^2)` (`sigma_u = [40,40,40,40,10,10,10,10]^T N`, `sigma_{F_x} = 80.0 N`).
-   - **Atom-Free C^inf Softplus Interior Retraction**:
-     `F_{x,floor,live} = 4 * F_min + F_{x,extra_preload}`, `c = -(F_{x,floor,live} + delta_int)`,
-     `F_x^{smooth} = c - tau_s * ln(1 + exp((c - F_x^{raw}) / tau_s))`
-     (`F_min = 27.0 N, delta_int = 6.0 N, tau_s = 8.0 N`).
-   - **Inner-Aligned Rollout**: Zero out thruster `ctrl` during wrench rollout and inject `tau_body = [T_x, -D_omega * omega_y + k_ff * F_z, -D_omega * omega_z - k_ff * F_y]^T` (`D_omega = 20.0, k_ff = 0.1 m`).
-   - **Cost Weights**: `Q_pos = [800, 800], Q_psi = 20.0, Q_vel = [8, 8], Q_omega = 1.0, R_u = 1e-3` (shifted `F_x` center `-F_{x,floor,live}`), `R_du = 5e-3, Q_contact = 0.05, F_safe = 10.0 N, lambda = 25.0`.
-2. **Inner Loop (`>=200Hz`, inside `AdhereKamrController`)**:
-   - **>=200Hz Planar Impedance PD**: `K_{p,yz} = 50.0, K_{d,yz} = 20.0, K_{p,psi} = 5.0, K_{d,psi} = 2.0`.
-   - **Pad-Force DOB (Breaking the `z = -K_f` Algebraic Loop)**:
-     `d_{raw,k} = F_{N,meas,k} - A_contact * u_{k-1}`,
-     `d_hat_{ext,k} = (1 - alpha_dob) * d_hat_{ext,k-1} + alpha_dob * d_{raw,k}`,
-     `d_hat_{unload,k} = max(0, -d_hat_{ext,k})`
-     with `tau_dob = 0.02 s` (`alpha_dob = 1 - exp(-0.005 / 0.02)`), exporting `F_{x,extra_preload} = sum_{i=1}^4 d_hat_{unload,k,i}` to the outer loop.
+   - Samples in 4-DOF wrench space $w_{\text{cmd}} = [F_x, F_y, F_z, T_x]^T$ with covariance pushforward $\sigma_w = \sqrt{(B_{\text{cmd}}^{\circ 2}) \sigma_u^2}$ ($\sigma_u = [40,40,40,40,10,10,10,10]^T\text{ N}$, $\sigma_{F_x} = 80.0\text{ N}$).
+   - **Atom-Free $C^\infty$ Softplus Interior Retraction**:
+     $$F_{x,\text{floor,live}} = 4 F_{\text{min}} + F_{x,\text{extra\_preload}}, \quad c = -(F_{x,\text{floor,live}} + \delta_{\text{int}}), \quad F_x^{\text{smooth}} = c - \tau_s \ln\left(1 + \exp\left(\frac{c - F_x^{\text{raw}}}{\tau_s}\right)\right)$$
+     ($F_{\text{min}} = 27.0\text{ N}, \delta_{\text{int}} = 6.0\text{ N}, \tau_s = 8.0\text{ N}$).
+   - **Inner-Aligned Rollout**: Zero out thruster `ctrl` during wrench rollout and inject $\tau_{\text{body}} = [T_x, -D_\omega \omega_y + k_{\text{ff}} F_z, -D_\omega \omega_z - k_{\text{ff}} F_y]^T$ ($D_\omega = 20.0, k_{\text{ff}} = 0.1\text{ m}$).
+   - **Cost Weights**: $Q_{\text{pos}} = [800, 800], Q_\psi = 20.0, Q_{\text{vel}} = [8, 8], Q_\omega = 1.0, R_u = 10^{-3}$ (shifted $F_x$ center $-F_{x,\text{floor,live}}$), $R_{\Delta u} = 5 \times 10^{-3}, Q_{\text{contact}} = 0.05, F_{\text{safe}} = 10.0\text{ N}, \lambda = 25.0$.
+2. **Inner Loop (`250Hz` / `>=200Hz`, inside `AdhereController`)**:
+   - **Planar Impedance PD**: $K_{p,yz} = 50.0, K_{d,yz} = 20.0, K_{p,\psi} = 5.0, K_{d,\psi} = 2.0$.
+   - **Pad-Force DOB (Breaking the $z = -K_f$ Algebraic Loop)**:
+     $$d_{\text{raw},k} = F_{N,\text{meas},k} - A_{\text{contact}} u_{k-1}, \quad \hat{d}_{\text{ext},k} = (1 - \alpha_{\text{dob}}) \hat{d}_{\text{ext},k-1} + \alpha_{\text{dob}} d_{\text{raw},k}, \quad \hat{d}_{\text{unload},k} = \max(0, -\hat{d}_{\text{ext},k})$$
+     with $\tau_{\text{dob}} = 0.02\text{ s}$ ($\alpha_{\text{dob}} = 1 - e^{-\Delta t_{\text{inner}} / 0.02}$), exporting $F_{x,\text{extra\_preload}} = \sum_{i=1}^4 \hat{d}_{\text{unload},k,i}$ to the outer loop.
    - **6-DOF Wrench Reconstruction**:
-     `F_{x,cmd}^{full} = min(F_{x,cmd}, -4 * F_critical) - D_{vx} * max(0, v_{x,b}) - alpha_gust * sqrt((F_{y,cmd}^{inner})^2 + (F_{z,cmd}^{inner})^2) - gamma_dob * sum d_hat_{unload,i}`
-     `T_{y,cmd}^{full} = -D_omega * omega_y + k_ff * F_{z,cmd}^{inner} - k_{moment,cbf} * sum (d_hat_{unload,i} * z_i)`
-     `T_{z,cmd}^{full} = -D_omega * omega_z - k_ff * F_{y,cmd}^{inner} + k_{moment,cbf} * sum (d_hat_{unload,i} * y_i)`
-     (`F_critical = 26.0 N, D_{vx} = 20.0, alpha_gust = 0.1, gamma_dob = 0.9, k_{moment,cbf} = 0.02`).
+     $$\begin{aligned} F_{x,\text{cmd}}^{\text{full}} &= \min(F_{x,\text{cmd}}, -4 F_{\text{critical}}) - D_{v_x} \max(0, v_{x,b}) - \alpha_{\text{gust}} \sqrt{(F_{y,\text{cmd}}^{\text{inner}})^2 + (F_{z,\text{cmd}}^{\text{inner}})^2} - \gamma_{\text{dob}} \sum_{i=1}^4 \hat{d}_{\text{unload},i} \\ T_{y,\text{cmd}}^{\text{full}} &= -D_\omega \omega_y + k_{\text{ff}} F_{z,\text{cmd}}^{\text{inner}} - k_{\text{moment,cbf}} \sum_{i=1}^4 \hat{d}_{\text{unload},i} z_i \\ T_{z,\text{cmd}}^{\text{full}} &= -D_\omega \omega_z - k_{\text{ff}} F_{y,\text{cmd}}^{\text{inner}} + k_{\text{moment,cbf}} \sum_{i=1}^4 \hat{d}_{\text{unload},i} y_i \end{aligned}$$
+     ($F_{\text{critical}} = 26.0\text{ N}, D_{v_x} = 20.0, \alpha_{\text{gust}} = 0.1, \gamma_{\text{dob}} = 0.9, k_{\text{moment,cbf}} = 0.02$).
    - **12D Elastic Rhombic-Kern OSQP**:
-     Decision variable `x = [u^T, s^T]^T in R^{12}` (`u in R^8, s in R^4 >= 0`), minimizing `||B*u - w_cmd^{full}||_W^2 + rho*||u||_2^2 + rho_du*||u - u_prev||_2^2 + M_slack*||s||_2^2` (`W = diag(1,1,1,1,0.2,0.2), rho = 1e-4, rho_du = 1e-3, M_slack = 1e4`), subject to box bounds, `A_contact * u + s >= F_critical + D_pad * max(0, v_{sep,i}) + gamma_dob * d_hat_{unload,i}` (`D_pad = 300.0`), and `C_kern * u <= 0` (`epsilon_margin = 0.20`).
+     Decision variable $x = [u^T, s^T]^T \in \mathbb{R}^{12}$ ($u \in \mathbb{R}^8, s \in \mathbb{R}^4 \ge 0$), minimizing $\Vert{}Bu - w_{\text{cmd}}^{\text{full}}\Vert{}_W^2 + \rho\Vert{}u\Vert{}_2^2 + \rho_{\Delta u}\Vert{}u - u_{\text{prev}}\Vert{}_2^2 + M_{\text{slack}}\Vert{}s\Vert{}_2^2$ ($W = \text{diag}(1,1,1,1,0.2,0.2), \rho = 10^{-4}, \rho_{\Delta u} = 10^{-3}, M_{\text{slack}} = 10^4$), subject to box bounds, $A_{\text{contact}} u + s \ge F_{\text{critical}} + D_{\text{pad}} \max(0, v_{\text{sep},i}) + \gamma_{\text{dob}} \hat{d}_{\text{unload},i}$ ($D_{\text{pad}} = 300.0$), and $C_{\text{kern}} u \le 0$ ($\epsilon_{\text{margin}} = 0.20$).
 
 ---
 
-## 6. Workspace Directory & Package Architecture (`adhere_rov_ws/src/`)
+## 6. Workspace 5-Package Architecture (`adhere_robot_ws/`)
 ```text
-adhere_rov_ws/
-├── CLAUDE.md
-├── README.md                                  # Top-level Chinese architecture & workflow guide
+adhere_robot_ws/
+├── CLAUDE.md                                  # Architectural & mathematical constitution (English)
+├── PROGRESS.md                                # Centralized chronological development & V&V log (Chinese)
+├── README.md                                  # Top-level architecture & user tutorial (Chinese, NO changelog!)
 └── src/
     ├── interfaces/
-    │   ├── adhere_control_msgs/               # FSM commands, target pose/trajectory, KAMR-MPPI telemetry & 500Hz metrics msgs
+    │   ├── adhere_control_msgs/               # 4 orthogonal msgs: FsmCommand, SetpointCommand, TeleopCommand, FsmState
     │   │   └── README.md
     │   └── README.md
     ├── descriptions/
-    │   ├── simplified_v1_description/            # URDF/Xacro (ros2_control tags), MuJoCo MJCF (rov_wall.xml), meshes, rviz & control yaml
+    │   ├── simplified_v1_description/         # Pure robot URDF/Xacro (base_link root), MJCF (rov_wall.xml, Z in [-10,0]m), robot_control.yaml
     │   │   └── README.md
     │   └── README.md
-    ├── libraries/                             # 3-rd Party Libraries
+    ├── libraries/                             # 3rd-party external libraries (if any)
     │   └── README.md
     ├── hardwares/
-    │   ├── adhere_mujoco_hardware/            # AdhereMujocoHardware (500Hz SystemInterface: read cmd -> Fossen hydro -> mj_step -> update state) + MujocoVisBridge + 60Hz MujocoViewer
+    │   ├── adhere_mujoco_hardware/            # 500Hz AdhereMujocoHardware + Dual-Mode Hydro + MujocoVisBridge + 60Hz MujocoViewer + open-loop mujoco_sim.launch.py
     │   │   └── README.md
     │   └── README.md
     ├── controllers/
-    │   ├── adhere_kamr_controller/            # ROS2 ControllerInterface plugin: FSM manager + 200Hz Inner Loop (PD + DOB + 12D OSQP) + 20Hz Async CUDA/C++ KAMR-MPPI Outer Loop
-    │   │   └── README.md
-    │   ├── adhere_controller_common/          # CtrlInterfaces, FSMState base class, common states (Passive, PreloadAttach, EmergencyDetach), mathTypes/mathTools, Fossen hydrodynamics
+    │   ├── adhere_controller/                 # Unified ROS2 ControllerInterface plugin (500Hz->250Hz/25Hz) + CtrlInterfaces + ModelParams + ThrusterAllocator + FSM States + mujoco.launch.py
     │   │   └── README.md
     │   └── README.md
     └── commands/
-        ├── adhere_keyboard_input/             # Teleop & benchmark trigger node (station-keeping, trajectory tracking, gust injection, FSM switching)
+        ├── adhere_keyboard_input/             # Standalone GCS teleop: fsm_console_node + state_cmd_console_node + xbox_teleop_node + teleop_gcs.launch.py
         │   └── README.md
         └── README.md
 ```
-*(Note: Physical hardware interface `adhere_real_hardware` is deferred to the future Jetson AGX Xavier deployment phase; focus 100% on `adhere_mujoco_hardware` now.)*
 
 ---
 
-## 7. Engineering & Documentation Rules
+## 7. Engineering, Documentation & Git Discipline (STRICT)
 1. **Language Policy**:
-   - All C++ source code, comments, CMakeLists, and git commit messages: **English**.
-   - All `README.md` files (top-level and per-module): **Simplified Chinese (中文)** with clear architectural diagrams, mathematical formulas, interface tables, and build/launch instructions.
-2. **No Premature Implementation**:
-   - In Phase 1, create valid `package.xml`, `CMakeLists.txt`, directory skeletons, and comprehensive Chinese `README.md` files first without writing untested implementation code.
+   - All C++ source code, comments, CMakeLists, launch files, and git commit messages: **English**.
+   - All `README.md` files and `PROGRESS.md`: **Simplified Chinese (中文)**.
+2. **Strict Separation of `README.md` vs. `PROGRESS.md` (CRITICAL)**:
+   - Every `README.md` (root, category, and package level) must **ONLY** contain functional descriptions, architecture diagrams, mathematical models, parameter tables, and build/run tutorials. **NEVER put step-by-step changelogs, phase logs, or modification history inside any `README.md`!**
+   - All chronological development records, bug fixes, and verification results must be centralized exclusively in the top-level `PROGRESS.md`.
+3. **Repository Hygiene & Path Discipline**:
+   - Never hardcode absolute paths in C++ or launch files (always use `ament_index_cpp::get_package_share_directory` or `get_package_share_directory`).
+   - Whenever a directory becomes non-empty, remove any leftover `.gitkeep` placeholder file inside it.
+4. **Automatic Verification, Commit & Push**:
+   - At the end of every milestone, run `colcon build --symlink-install` and `colcon test`, update `PROGRESS.md` and relevant `README.md` tutorials, stage all changes (`git add -A`), commit with a descriptive English message, and push to the remote repository (`git push`).
 
-## 8. Git & Engineering Discipline
-- Never hardcode absolute paths in C++ or launch files (use `ament_index_cpp::get_package_share_directory`).
-- Document main run commands in the root `README.md`, and create separate `README.md` under each package for its own core commands.
-- Upon completing and verifying each milestone, update `PROGRESS.md` and `README.md` in the workspace root, commit with a clear message, and push to the remote repository.
+---
+
+## 9. Current Codebase Snapshot & Mandatory Session Startup Rule
+
+**Always re-read the last 2 sections of `PROGRESS.md` after every `/clear`** (Sec.0's startup protocol) before trusting this snapshot — it is a point-in-time summary, `PROGRESS.md` is the authoritative chronological record. Whenever a `/clear` session completes a major architectural change (package merge/split, new topic, new coordinate convention, new FSM state), **update this section in the same commit**.
+
+### Exact 5-Package Workspace Layout (as of Phase 3.3)
+```text
+src/
+├── interfaces/adhere_control_msgs/        # FsmCommand, SetpointCommand, TeleopCommand, FsmState (zero MuJoCo/CUDA/ros2_control deps)
+├── descriptions/simplified_v1_description/ # URDF/Xacro + mjcf/rov_wall.xml + config/robot_control.yaml (single source of model params)
+├── hardwares/adhere_mujoco_hardware/       # AdhereMujocoHardware (500Hz SystemInterface) + FossenHydrodynamics + MujocoViewer + adhere_mujoco_node
+├── controllers/adhere_controller/          # AdhereController plugin (FSM: PASSIVE/DEPTH_HOLD/OPEN_LOOP/PID_HOLD) + ModelParams + ThrusterAllocator + MultiRateDecimator
+└── commands/adhere_keyboard_input/         # fsm_console_node + state_cmd_console_node + xbox_teleop_node (zero MuJoCo/CUDA/ros2_control deps)
+```
+`adhere_controller_common` and `adhere_kamr_controller` NO LONGER EXIST (merged into `adhere_controller` in Phase 3.3) — do not recreate them or reference their names in new code.
+
+### 4 ROS Topics (`adhere_control_msgs`, orthogonal contract, Sec.3.4)
+1. `/rov/fsm_command` (`FsmCommand`) — ONLY switches FSM state (`1=PASSIVE, 2=DEPTH_HOLD, 3=OPEN_LOOP, 4=PID_HOLD`).
+2. `/rov/setpoint_cmd` (`SetpointCommand`) — ONLY discrete numeric targets (`mode`, `lock_current_pose`, `target_x/y/z/yaw`).
+3. `/rov/teleop_cmd` (`TeleopCommand`) — ONLY `50Hz` continuous Xbox Mode-2 stick commands (`surge_x/sway_y/heave_z/yaw_rate` in `[-1,1]`).
+4. `/rov/fsm_state` (`FsmState`) — `25Hz` feedback (`current_state, state_name, target_pose, actual_pose`), published by `AdhereController`.
+
+### Water Tank Coordinate Convention (Sec.4, Phase 3.3)
+Water surface at world `Z=0.0m`; tank floor at world `Z=-10.0m` (10m depth); wall at `X=0.0m` spanning `Y∈[-10,10]m × Z∈[-10,0]m` (20m×10m); ROV spawns at `pos="0.125 0 -2.0"`. Depth below surface `d = -Z`. All submerged positions have `Z ≤ 0.0m`.
+
+### Model-Decoupling Status (Sec.3.3)
+`ModelParams::loadFromNode()` (`adhere_controller/include/adhere_controller/common/ModelParams.h`) loads ALL thruster/pad geometry, Fossen hydro params, workspace bounds, and per-FSM-state gains from `simplified_v1_description/config/robot_control.yaml` at `on_configure()`. `ThrusterAllocator.h::buildThrusterAllocationMatrix()` builds `B` dynamically from `ModelParams`' loaded geometry (no hardcoded corner coordinates). `robot_control.yaml`'s `thruster_pos_xyz`/`thruster_dir_xyz` encode `rov_wall.xml`'s REAL geometry (all 8 thruster sites at body `X=0.0`, zero lever arm) — a documented, user-confirmed deviation from this file's own Sec.4.3 illustrative placeholder.
+
+### FSM States Implemented (Phase 3.2/3.3, `adhere_controller`)
+`PASSIVE` (zero-thrust safe default), `DEPTH_HOLD` (world-Z PID + attitude damping), `OPEN_LOOP` (direct teleop-to-wrench, no memory), `PID_HOLD` (6-DOF PID + buoyancy/drag feedforward, lock-on-release). `KAMR-MPPI`'s 250Hz inner loop (Impedance PD + Pad-Force DOB + 12D OSQP) and 25Hz async CUDA MPPI outer loop (Sec.5) are NOT yet implemented — only the uniform `MultiRateDecimator` timing contract and an empty outer-loop hook exist today.

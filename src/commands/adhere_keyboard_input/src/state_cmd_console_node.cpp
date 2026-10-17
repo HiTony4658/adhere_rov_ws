@@ -27,6 +27,18 @@ std::array<double, 4> g_actual_pose{0.0, 0.0, 0.0, 0.0};
 constexpr double kRadToDeg = 180.0 / M_PI;
 constexpr double kDegToRad = M_PI / 180.0;
 
+// CLAUDE.md Phase 3.3 tank geometry: water surface at world Z=0.0m, floor at Z=-10.0m.
+// Mirrors adhere_controller's robot_control.yaml workspace_z_min/workspace_z_max.
+constexpr double kWorkspaceZMin = -9.80;
+constexpr double kWorkspaceZMax = -0.15;
+
+// Accepts either a positive depth (2.50 -> 2.50m below the surface) or the raw negative world
+// Z (-2.50) -- both normalize to the same target_z, clamped into the safe workspace band.
+double depthInputToTargetZ(double input_val)
+{
+  return std::clamp(-std::abs(input_val), kWorkspaceZMin, kWorkspaceZMax);
+}
+
 void printDepthHoldPrompt()
 {
   std::array<double, 4> target, actual;
@@ -35,13 +47,17 @@ void printDepthHoldPrompt()
     target = g_target_pose;
     actual = g_actual_pose;
   }
+  // CLAUDE.md Phase 3.3 tank geometry: water surface at world Z=0.0m, floor at Z=-10.0m, so
+  // depth below surface = -Z. Displayed alongside raw Z for unambiguous cross-reference.
   std::cout << "============================================================\n"
             << "  [DEPTH_HOLD] Setpoint Console (定深设定终端)\n"
             << "============================================================\n"
-            << "  Actual Z: " << actual[2] << " m   |   Target Z: " << target[2] << " m\n"
+            << "  Current Depth: " << -actual[2] << " m (Z = " << actual[2] << " m)   |   "
+            << "Target Depth: " << -target[2] << " m (Z = " << target[2] << " m)\n"
             << "------------------------------------------------------------\n"
-            << "[DEPTH_HOLD] Enter target depth Z in meters (float, e.g. 0.50), or 'h' to hold "
-               "current Z: " << std::flush;
+            << "[DEPTH_HOLD] Enter target depth in meters, positive or negative (float, e.g. "
+               "2.50 or -2.50 -- both mean 2.50m below the surface), or 'h' to hold current "
+               "depth: " << std::flush;
 }
 
 void printPidHoldPrompt()
@@ -52,13 +68,14 @@ void printPidHoldPrompt()
     target = g_target_pose;
     actual = g_actual_pose;
   }
+  // CLAUDE.md Phase 3.3 tank geometry: water surface at world Z=0.0m, so depth = -Z.
   std::cout << "============================================================\n"
             << "  [PID_HOLD] Setpoint Console (6DOF 位置+航向保持设定终端)\n"
             << "============================================================\n"
             << "  Actual [X, Y, Z, Yaw]: [" << actual[0] << ", " << actual[1] << ", " << actual[2]
-            << ", " << actual[3] * kRadToDeg << " deg]\n"
+            << ", " << actual[3] * kRadToDeg << " deg]  (Depth: " << -actual[2] << " m)\n"
             << "  Target [X, Y, Z, Yaw]: [" << target[0] << ", " << target[1] << ", " << target[2]
-            << ", " << target[3] * kRadToDeg << " deg]\n"
+            << ", " << target[3] * kRadToDeg << " deg]  (Depth: " << -target[2] << " m)\n"
             << "------------------------------------------------------------\n"
             << "[PID_HOLD] Enter 'z <val>' (depth), 'y <val>' (lateral), 'x <val>' (wall dist), "
                "'yaw <deg>', 'all <x> <y> <z> <yaw_deg>', or 'h' (lock current pose): "
@@ -120,7 +137,7 @@ int main(int argc, char ** argv)
         cmd.lock_current_pose = true;
       } else {
         try {
-          cmd.target_z = std::stod(line);
+          cmd.target_z = depthInputToTargetZ(std::stod(line));
         } catch (const std::exception &) {
           valid = false;
         }
@@ -150,7 +167,7 @@ int main(int argc, char ** argv)
           if (token == "z") {
             double v;
             iss >> v;
-            cmd.target_z = v;
+            cmd.target_z = depthInputToTargetZ(v);
           } else if (token == "y") {
             double v;
             iss >> v;
@@ -168,7 +185,7 @@ int main(int argc, char ** argv)
             iss >> x >> y >> z >> yaw_deg;
             cmd.target_x = x;
             cmd.target_y = y;
-            cmd.target_z = z;
+            cmd.target_z = depthInputToTargetZ(z);
             cmd.target_yaw = yaw_deg * kDegToRad;
           } else {
             valid = false;

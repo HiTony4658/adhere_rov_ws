@@ -8,7 +8,7 @@ FSM 状态切换命令、状态内数值设定点、Xbox 手柄连续遥操作�
 依赖图的叶子节点，可与 `adhere_keyboard_input` 一并部署到不安装 MuJoCo/CUDA/
 `ros2_control` 的远程上位机（GCS）笔记本上。
 
-> 这些消息类型**不**用于 `AdhereMujocoHardware` ↔ `AdhereKamrController` 的主数据
+> 这些消息类型**不**用于 `AdhereMujocoHardware` ↔ `AdhereController` 的主数据
 > 通路（该通路走 `ros2_control` 的 `CtrlInterfaces` 零拷贝指针），仅用于低频
 > 监控、人机交互、日志记录场景。
 
@@ -23,8 +23,8 @@ FSM 状态切换命令、状态内数值设定点、Xbox 手柄连续遥操作�
 |---|---|---|---|
 | `FsmCommand.msg` | `/rov/fsm_command`，`fsm_console_node` 或 `xbox_teleop_node` 按键边沿 | `int32 command`（`NO_CHANGE=0, PASSIVE=1, DEPTH_HOLD=2, OPEN_LOOP=3, PID_HOLD=4`） | **仅**用于切换 FSM 状态，不再携带任何数值设定点 |
 | `SetpointCommand.msg` | `/rov/setpoint_cmd`，`state_cmd_console_node` | `uint8 mode`（`2`=`DEPTH_HOLD` 用 `target_z`；`4`=`PID_HOLD` 用 `target_x/y/z/yaw` 或 `lock_current_pose`）; `bool lock_current_pose`; `float64 target_x/y/z/yaw` | 离散数值设定点，与状态切换正交，不触发 `FSMState::enter()`（不重置积分器） |
-| `TeleopCommand.msg` | `/rov/teleop_cmd`，`xbox_teleop_node`，50Hz | `float64 surge_x, sway_y, heave_z, yaw_rate`（归一化至 `[-1,1]`，美国手/Mode 2 映射）; `bool active` | Xbox 手柄连续遥操作指令，被 `StateOpenLoop`/`StatePidHold`/`StateDepthHold` 消费；`AdhereKamrController` 对其施加 `0.25s` 失联看门狗 |
-| `FsmState.msg` | `/rov/fsm_state`，`AdhereKamrController`，外环速率 | `int32 current_state`; `string state_name`; `float64[4] target_pose`; `float64[4] actual_pose` | 控制器实时反馈，供 `fsm_console_node`/`state_cmd_console_node` 显示；是终端感知"当前到底是哪个状态"的唯一信源，无论状态切换来自键盘还是手柄按键 |
+| `TeleopCommand.msg` | `/rov/teleop_cmd`，`xbox_teleop_node`，50Hz | `float64 surge_x, sway_y, heave_z, yaw_rate`（归一化至 `[-1,1]`，美国手/Mode 2 映射）; `bool active` | Xbox 手柄连续遥操作指令，被 `StateOpenLoop`/`StatePidHold`/`StateDepthHold` 消费；`AdhereController` 对其施加 `0.25s` 失联看门狗 |
+| `FsmState.msg` | `/rov/fsm_state`，`AdhereController`，外环速率 | `int32 current_state`; `string state_name`; `float64[4] target_pose`; `float64[4] actual_pose` | 控制器实时反馈，供 `fsm_console_node`/`state_cmd_console_node` 显示；是终端感知"当前到底是哪个状态"的唯一信源，无论状态切换来自键盘还是手柄按键 |
 
 ## 规划中的接口列表（后续阶段实现）
 

@@ -280,7 +280,7 @@ hardware_interface::return_type write() override;  // 无参数！Foxy 特有
 | `augmented_mass` | `26.0 kg` | `D_ang_quad` | `[15.0, 15.0, 20.0]` |
 | `displaced_volume` | `0.0202 m^3` | `C_venturi` | `0.45` |
 | `cob_offset_body` | `[0, 0, 0.05] m` | `h_gap_nominal` | `0.025 m` |
-| `z_surface` | `1.0 m` | `A_plate` | `0.24 m^2` |
+| `z_surface` | `0.0 m` | `A_plate` | `0.24 m^2` |
 | `z_transition` | `0.4 m` | `h0_decay` | `0.05 m` |
 | — | — | `wall_x_offset` | `0.1 m` |
 
@@ -561,7 +561,7 @@ GLFW 窗口创建，仅空转等待停止信号。
 打印精度（10 位小数）下逐位一致，满足 `CLAUDE.md` 要求的 `<1e-5` 数值一致性。
 
 在默认静水模式（`1`）下以 `u=0` 运行：ROV 因初始姿态与壁面重叠而被接触反力
-推离壁面，随后因净正浮力（约 `+1.96 N`）缓慢上浮至自由液面（`z_surface=1.0`）
+推离壁面，随后因净正浮力（约 `+1.96 N`）缓慢上浮至自由液面（`z_surface=0.0`）
 附近并稳定，`Y` 方向无漂移。切换到造浪模式（`2`）后，`Y` 方向机体速度随定常
 流速 `0.300 m/s`（`X`/`Z` 方向速度趋近于零）持续收敛，相对造浪时钟 `τ∈[3.0,4.2]s`
 与 `[7.0,8.2]s` 的阵风窗口内可观察到额外的侧向/吸附扰动，均与预期物理行为一致；
@@ -761,7 +761,7 @@ ros2 topic pub /rov/wave_mode_cmd std_msgs/msg/Int32 "{data: 1}" --once   # 切�
 
 本包的 `mujoco_sim.launch.py` 是**纯开环硬件仿真**（CLAUDE.md Phase 3.1.1）：对任何
 具体控制器或 FSM 终端控制台零知晓，`autostart_controllers` 默认空数组，始终以
-`u=0` 启动。需要 `AdhereKamrController` 闭环 FSM（`PASSIVE`/`DEPTH_HOLD` 切换、
-定深 PID 目标深度设定）与 FSM 终端控制台时，改用
-[`adhere_kamr_controller/README.md`](../../controllers/adhere_kamr_controller/README.md)
-中的 `ros2 launch adhere_kamr_controller mujoco.launch.py`。
+`u=0` 启动。需要 `AdhereController` 闭环 FSM（`PASSIVE`/`DEPTH_HOLD`/`OPEN_LOOP`/`PID_HOLD`
+切换、定深 PID 目标深度设定）与 FSM 终端控制台时，改用
+[`adhere_controller/README.md`](../../controllers/adhere_controller/README.md)
+中的 `ros2 launch adhere_controller mujoco.launch.py`。

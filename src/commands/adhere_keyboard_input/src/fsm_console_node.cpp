@@ -62,7 +62,7 @@ void killChildConsole()
 // a bare gnome-terminal client without --wait exits immediately after asking the persistent
 // gnome-terminal-server to open a window, which would make the forked pid meaningless to kill),
 // falling back to xterm if gnome-terminal is not installed. Mirrors the idiom already used in
-// adhere_kamr_controller/launch/mujoco.launch.py's fsm_console ExecuteProcess block.
+// adhere_controller/launch/mujoco.launch.py's fsm_console ExecuteProcess block.
 void spawnStateConsole(int mode)
 {
   killChildConsole();

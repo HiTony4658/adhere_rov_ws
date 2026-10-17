@@ -1,5 +1,5 @@
-# Closed-loop parameter file for adhere_kamr_controller/launch/mujoco.launch.py (CLAUDE.md
-# Phase 3.1.1 Stage 2.2). This single file is passed to the adhere_mujoco_node executable's
+# Closed-loop parameter file for adhere_controller/launch/mujoco.launch.py (CLAUDE.md Phase
+# 3.1.1/3.3 Stage 2.2). This single file is passed to the adhere_mujoco_node executable's
 # --params-file.
 #
 # Single top-level key gotcha: ros2 launch's Node action always adds a blanket
@@ -7,26 +7,111 @@
 # That remap is unscoped, so it silently overrides the ROS-visible name of EVERY node
 # constructed in this one process with default NodeOptions -- not just the top-level
 # rclcpp::Node, but also the internal ControllerManager node (named "controller_manager" in
-# C++) AND AdhereKamrController's own controller_interface node (named "adhere_kamr_controller"
-# in C++). Empirically verified: `ros2 node list` shows THREE "/adhere_mujoco_node" entries
-# while this launch is active, and a controller-side parameter declared under a nested
-# "adhere_kamr_controller:" top-level key (as controller_manager.ros__parameters style YAML
-# would suggest) is silently never read -- auto_declare() falls back to its C++ default instead.
-# So every parameter below -- controller_manager's own update_rate/"<name>.type" entries AND
-# AdhereKamrController's own cm_update_rate/inner_decimation/outer_decimation/kp_z/ki_z/kd_z --
-# must live flat under this single "adhere_mujoco_node" key.
+# C++) AND AdhereController's own controller_interface node (named "adhere_controller" in C++).
+# Empirically verified: `ros2 node list` shows THREE "/adhere_mujoco_node" entries while this
+# launch is active, and a controller-side parameter declared under a nested
+# "adhere_controller:" top-level key (as controller_manager.ros__parameters style YAML would
+# suggest) is silently never read -- auto_declare()/declare_parameter() falls back to its C++
+# default instead. So every parameter below -- controller_manager's own update_rate/"<name>.type"
+# entries AND every AdhereController/ModelParams parameter -- must live flat (or nested as a
+# sub-map, which ROS 2 YAML parsing still resolves under the SAME top-level node name) under
+# this single "adhere_mujoco_node" key.
 adhere_mujoco_node:
   ros__parameters:
     update_rate: 500  # Hz (master hardware & sensor sampling rate, CLAUDE.md Sec.3)
 
-    adhere_kamr_controller:
-      type: adhere_kamr_controller/AdhereKamrController
+    adhere_controller:
+      type: adhere_controller/AdhereController
 
     cm_update_rate: 500
     inner_decimation: 2    # 500 / 2 = 250 Hz uniform inner loop (dt = 4.0 ms)
     outer_decimation: 20   # 500 / 20 = 25 Hz uniform outer loop (dt = 40.0 ms, 10 inner steps)
-    # Reserved for a future parameterized StateDepthHold PID (not yet consumed -- the live gains
-    # are still the Phase 3.1-tuned constants in StateDepthHold.cpp, kKpZ/kKiZ/kKdZ).
-    kp_z: 120.0
-    ki_z: 15.0
-    kd_z: 60.0
+
+    # --- Model-decoupled parameters (CLAUDE.md Phase 3.3 Sec.3/Sec.2 Stage 2) ---
+    # ModelParams::loadFromNode() reads every key below; adhere_controller's C++ contains zero
+    # hardcoded robot geometry/physical constants. Switching to a new robot model with different
+    # thruster positions, mass, or geometry requires editing ONLY this file.
+
+    # Thruster geometry/limits: flattened 8x3 arrays, body frame relative to CoM. Encodes the
+    # REAL rov_wall.xml geometry (thr_N1..N4 normal thrusters at the 4 corners, gear
+    # "-1 0 0 0 0 0"; thr_T5..T8 tangential thrusters at the same 4 corners, direction from each
+    # site's zaxis), NOT CLAUDE.md Sec.4.3's illustrative X=-0.10m lever-arm placeholder (see
+    # adhere_controller/README.md's documented Phase 3.2 deviation).
+    thruster_names: ["thr_N1", "thr_N2", "thr_N3", "thr_N4", "thr_T5", "thr_T6", "thr_T7", "thr_T8"]
+    thruster_pos_xyz: [
+       0.0,  0.25,  0.15,
+       0.0, -0.25,  0.15,
+       0.0,  0.25, -0.15,
+       0.0, -0.25, -0.15,
+       0.0,  0.25,  0.15,
+       0.0, -0.25,  0.15,
+       0.0,  0.25, -0.15,
+       0.0, -0.25, -0.15,
+    ]
+    thruster_dir_xyz: [
+      -1.0,  0.0,            0.0,
+      -1.0,  0.0,            0.0,
+      -1.0,  0.0,            0.0,
+      -1.0,  0.0,            0.0,
+       0.0, -0.8660254038,   0.5,
+       0.0,  0.8660254038,   0.5,
+       0.0, -0.8660254038,  -0.5,
+       0.0,  0.8660254038,  -0.5,
+    ]
+    thruster_min: [-40.0, -40.0, -40.0, -40.0, -40.0, -40.0, -40.0, -40.0]
+    thruster_max: [40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0]
+
+    # Contact pad geometry: flattened 4x3 array, body frame. For Rhombic Kern / future WBC
+    # (unused by the current PASSIVE/DEPTH_HOLD/OPEN_LOOP/PID_HOLD FSM states).
+    pad_names: ["pad_TL", "pad_TR", "pad_BL", "pad_BR"]
+    pad_pos_xyz: [
+      -0.10,  0.25,  0.15,
+      -0.10, -0.25,  0.15,
+      -0.10,  0.25, -0.15,
+      -0.10, -0.25, -0.15,
+    ]
+
+    # Hydrostatic & Fossen hydrodynamic feedforward parameters (mirrors
+    # adhere_mujoco_hardware/fossen_hydrodynamics.hpp::HydroParams's defaults exactly, so
+    # StatePidHold's buoyancy/drag feedforward and AdhereMujocoHardware's own physics agree;
+    # adhere_controller stays package-decoupled from adhere_mujoco_hardware per CLAUDE.md Sec.3
+    # by reading its own independent copy of these same numbers rather than linking against it).
+    rho_water: 1000.0
+    gravity: 9.81
+    vehicle_mass: 20.0        # kg, dry mass
+    augmented_mass: 26.0      # kg, MJCF <inertial> mass (dry + hydrodynamic added mass)
+    displaced_volume: 0.0202  # m^3
+    cob_offset_body: [0.0, 0.0, 0.05]
+    z_surface: 0.0       # m, water surface (CLAUDE.md Phase 3.3 tank geometry: surface at Z=0)
+    z_transition: 0.4    # m
+    D_lin: [30.0, 20.0, 25.0]
+    D_quad: [140.0, 50.0, 70.0]
+    D_ang_lin: [8.0, 8.0, 10.0]
+    D_ang_quad: [15.0, 15.0, 20.0]
+
+    # Workspace safety bounds, world frame (CLAUDE.md Phase 3.3 tank geometry: surface Z=0.0m,
+    # floor Z=-10.0m, ROV spawns at Z=-2.0m).
+    workspace_z_min: -9.80
+    workspace_z_max: -0.15
+    workspace_x_min: 0.115
+
+    # StateDepthHold gains (already-verified Phase 3.1/3.2 closed-loop tracking contract:
+    # <5mm steady-state error).
+    depth_hold.kp_z: 180.0
+    depth_hold.ki_z: 95.0
+    depth_hold.kd_z: 62.0
+    depth_hold.max_heave_vel: 0.30  # m/s, Xbox left-stick full-deflection target_z_ rate
+    depth_hold.kp_att: 6.0
+    depth_hold.kd_att: 4.0
+
+    # StateOpenLoop gains: [Fx, Fy, Fz, Tx, Ty, Tz] max wrench at full stick deflection.
+    open_loop.max_wrench: [60.0, 50.0, 50.0, 5.0, 5.0, 8.0]
+
+    # StatePidHold gains (CLAUDE.md Phase 3.3 Sec.2 Stage 2.4).
+    pid_hold.kp_pos: [120.0, 120.0, 120.0]
+    pid_hold.ki_pos: [10.0, 10.0, 15.0]
+    pid_hold.kd_vel: [60.0, 60.0, 60.0]
+    pid_hold.kp_att: [40.0, 40.0, 25.0]
+    pid_hold.ki_att: [2.0, 2.0, 2.0]
+    pid_hold.kd_att: [15.0, 15.0, 12.0]
+    pid_hold.max_teleop_vel: [0.25, 0.25, 0.25, 0.6]  # [vx_max, vy_max, vz_max, omega_z_max]

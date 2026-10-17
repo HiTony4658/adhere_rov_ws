@@ -669,7 +669,7 @@ void MujocoViewer::resetCameraView()
   cam_.elevation = -20.0;
   cam_.lookat[0] = 0.0;
   cam_.lookat[1] = 0.0;
-  cam_.lookat[2] = 0.6;
+  cam_.lookat[2] = -2.0;
 }
 
 // Section C3 camera presets. lookat/distance are the convention-independent, load-bearing
@@ -683,7 +683,7 @@ void MujocoViewer::setCameraWallYZ()
   cam_.elevation = 0.0;
   cam_.lookat[0] = 0.0;
   cam_.lookat[1] = 0.0;
-  cam_.lookat[2] = 0.5;
+  cam_.lookat[2] = -2.0;
 }
 
 void MujocoViewer::setCameraTopXY()
@@ -693,7 +693,7 @@ void MujocoViewer::setCameraTopXY()
   cam_.elevation = -90.0;
   cam_.lookat[0] = 0.0;
   cam_.lookat[1] = 0.0;
-  cam_.lookat[2] = 0.5;
+  cam_.lookat[2] = -2.0;
 }
 
 void MujocoViewer::setCameraSideXZ()
@@ -703,7 +703,7 @@ void MujocoViewer::setCameraSideXZ()
   cam_.elevation = 0.0;
   cam_.lookat[0] = 0.0;
   cam_.lookat[1] = 0.0;
-  cam_.lookat[2] = 0.5;
+  cam_.lookat[2] = -2.0;
 }
 
 void MujocoViewer::drawKernDiamond()
