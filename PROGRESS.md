@@ -1291,3 +1291,138 @@ mujoco.launch.py headless:=true use_rviz:=false spawn_fsm_console:=false`
 `list_controllers` 服务在闭环启动后返回 `adhere_kamr_controller`
 （`state='active'`，`type='adhere_kamr_controller/AdhereKamrController'`，
 claimed 全部 8 个 `thr_*/effort` 命令接口）。
+
+## Phase 3.2（2026-10-17）：4 话题解耦通信契约、共享 `ThrusterAllocator`、`OPEN_LOOP`/`PID_HOLD` 两态、官方 `joy` 包 Xbox 手柄遥操作、上位机（GCS）独立部署
+
+### 动机
+
+Phase 3.1 把 FSM 状态切换与状态内设定点（定深目标）揉进同一个 `FsmCommand.msg`
+与同一个单体终端循环，难以扩展到更多控制模式与硬件遥操作。本阶段落地
+`CLAUDE.md` Phase 3.2 的 4 话题正交解耦契约，新增 `StateOpenLoop`/`StatePidHold`
+两个 FSM 状态用 Xbox 手柄验证 `B`/`B^+` 分配与闭环动力学补偿，并让
+`adhere_control_msgs`/`adhere_keyboard_input` 可独立部署到不装 MuJoCo/CUDA/
+`ros2_control` 的远程上位机（GCS）笔记本。
+
+**对任务文本的一处偏离（已与用户确认）**：任务描述中 `ThrusterAllocator` 的
+几何（`thr_N1..4` 在 `X=-0.10m` 杠杆臂、`thr_T5/T6` 用 `gear="0 1 0 0 0 0"` 等）
+与真实 `rov_wall.xml` 不符（该文件里全部 8 个推力器站点都在 `X=0.0`，与质心
+同一 X 坐标，`thr_T5..T8` 是 4 个在 Y-Z 平面内 30° 矢量角的切向推力器）。这正是
+`phase2_status_and_decisions` 记忆中已记录的 `CLAUDE.md` 占位几何与真实 MJCF
+不符问题。按用户决定，`ThrusterAllocator` 复用 `StateDepthHold.cpp` 已有的、
+基于真实几何推导的 `buildAllocationMatrix()`，而非任务文本的占位几何。
+
+### 包 1：`src/interfaces/adhere_control_msgs`
+
+重写 `FsmCommand.msg`（去掉 `target_z/target_y/target_yaw`，新增
+`OPEN_LOOP=3, PID_HOLD=4` 常量，只保留 `command` 一个字段）；新增
+`SetpointCommand.msg`（离散设定点）、`TeleopCommand.msg`（50Hz 连续遥操作）、
+`FsmState.msg`（控制器实时反馈）。`CMakeLists.txt` 的
+`rosidl_generate_interfaces()` 列出全部 4 个 `.msg`。
+
+### 包 2：`src/controllers/adhere_controller_common`
+
+- `common/enumClass.h`：`FSMStateName` 新增 `OPEN_LOOP`/`PID_HOLD`。
+- 新增 `common/ThrusterAllocator.h`（header-only）：把 `StateDepthHold.cpp` 原有
+  的 `buildAllocationMatrix()` 几何搬到这里作 `buildThrusterAllocationMatrix()`
+  共享实现，新增 `buildThrusterAllocationPseudoInverse()` 实现任务指定的阻尼
+  Moore-Penrose 伪逆 `B^T(BB^T + 1e-6*I_6)^-1`（`rank(B)=6`，阻尼项数值上可忽略，
+  仅做条件数安全边际）。`StateDepthHold`/`StateOpenLoop`/`StatePidHold` 三者
+  统一调用这一对函数，不再各自维护几何推导副本。
+- `CtrlInterfaces.h` 的 `ControlInputs` 新增 `setpoint_*`/`setpoint_seq`
+  （`SetpointCommand` 镜像 + 沿边检测序号）与 `teleop_*`/`teleop_last_rx_time_sec`
+  （`TeleopCommand` 镜像 + 看门狗时间戳）两组原子字段。`FSMState` 基类新增
+  非虚共享方法 `checkFsmCommandChange()`（把 `command` 映射到目标
+  `FSMStateName`，4 个具体状态的 `checkChange()` 均只需转发它，取代 Phase 3.1
+  每个状态各自硬编码 `== 1`/`== 2` 的写法）与虚方法 `targetPose()`（默认全零，
+  供 `/rov/fsm_state::target_pose` 使用）。
+- `StateDepthHold` 新增真正的 `target_z_` 成员（Phase 3.1 版本直接读
+  `control_inputs_.target_z` 原子量，没有本地状态）：`enter()` 用当前世界 Z
+  做种；`run()` 先按 `setpoint_seq` 沿边应用 `SetpointCommand`（`mode==2`），
+  再无条件叠加 Xbox 左摇杆上下的连续微调
+  `target_z_ += 0.30 * teleop.heave_z * dt`（摇杆回中后天然锁定，无需额外
+  "release" 分支），最终钳制到 `[0.10, 0.95]m`。
+- 新增 `StateOpenLoop`：无记忆地把 `/rov/teleop_cmd` 的 4 维输入映射为机体力矩
+  （`Fx=-60*surge_x, Fy=-50*sway_y, Fz=50*heave_z, Tz=8*yaw_rate`），经 `B^+`
+  分配并钳制 `±40N`。
+- 新增 `StatePidHold`：`enter()` 锁存当前 `(x,y,z,yaw)`；`run()` 中
+  `teleop.active` 为真时按机体对齐速度平移/旋转设定点（钳制 `x_d>=0.12m`，
+  `z_d∈[0.10,0.95]`），为假时速度目标与设定点均冻结；6-DOF 机体帧 PID（新调的
+  `Phase 3.2` 增益，`Z` 轴复用 `StateDepthHold` 已验证的 `180/95/62`）+
+  浮力/科氏力阻力前馈（浮力常数直接抄 `fossen_hydrodynamics.hpp` 的
+  `HydroParams` 默认值，而非反向依赖 `adhere_mujoco_hardware`，保持
+  `CLAUDE.md` §3 的包解耦约束；净浮力用**干重** `20kg`，不是 MJCF `<inertial>`
+  的 26kg 增广质量——增广质量是水动力附加质量的惯性反应项，不是真实重力，
+  得到的净浮力 `rho*g*V - m_dry*g = 198.162 - 196.2 = +1.962N` 与任务给出的数值
+  一致）。
+- 新增 `test/test_thruster_allocator.cpp`（3 个 gtest：`B*B^+ ~= I_6` 在
+  `1e-4` 内；纯 `Fy`/`Fz` 指令零寄生力矩）与 `test/test_fsm_states.cpp`（3 个
+  闭环 gtest：用 `hardware_interface::StateInterface/CommandInterface` 的
+  `(name, interface_name, double*)` 构造函数搭一个假 `CtrlInterfaces`——无需
+  `ResourceManager`——配合测试自身充当的简单质点欧拉积分"虚拟物理"，验证
+  `StateDepthHold` 对 `SetpointCommand`+摇杆微调的 `<5mm` 收敛、`StateOpenLoop`
+  零寄生力矩、`StatePidHold` 的移动+释放锁定 `<5mm`）。`CMakeLists.txt` 新增
+  对应的 `ament_add_gtest` 目标。
+
+### 包 3：`src/controllers/adhere_kamr_controller`
+
+`on_configure()` 订阅改为 3 个输入话题（`/rov/fsm_command` 只写
+`control_inputs_.command`；`/rov/setpoint_cmd` 写 `setpoint_*` 并把
+`setpoint_seq` 自增；`/rov/teleop_cmd` 写 `teleop_*` 并戳
+`teleop_last_rx_time_sec`），新增 `/rov/fsm_state` 发布者。`FSMStateList`/
+`getNextState()` 新增 `open_loop`/`pid_hold`。`update()` 的内环 tick 上先做
+`0.25s` 失联看门狗（陈旧则把 `teleop_active` 与 4 个遥操作轴集中清零，各
+`FSMState` 自身不用关心断联处理），外环 tick 上发布 `/rov/fsm_state`
+（`target_pose` 取自 `current_state_->targetPose()`，`actual_pose` 由
+`odom_state_interface_` 直接算出 `[x,y,z,yaw]`）。
+`launch/mujoco.launch.py` 把原来硬编码的 `spawn_fsm_console` + 独立
+`ExecuteProcess` 换成 `launch_teleop`（默认 `true`）+
+`IncludeLaunchDescription(adhere_keyboard_input/launch/teleop_gcs.launch.py)`。
+
+### 包 4：`src/commands/adhere_keyboard_input`
+
+- `fsm_console_node` 重写：订阅 `/rov/fsm_state`（不再订阅 `/rov/odom`），只发布
+  `FsmCommand{command}`；`current_state` 变化时用
+  `fork()+setsid()+execl()` 动态弹出/`killpg()` 清理
+  `state_cmd_console_node`（`gnome-terminal --wait`/`xterm` 回退，与
+  `mujoco.launch.py` 既有弹窗惯用法一致，`--wait`/`setsid()` 保证 fork 出的
+  pid 真能代表并杀掉整条终端+内部 `ros2 run` 进程链）。
+- 新增 `state_cmd_console_node`（ROS 参数 `mode=2|4`）：订阅 `/rov/fsm_state`
+  显示 Actual/Target，只发布 `SetpointCommand`；`mode=4` 下 `z`/`y`/`x`/`yaw`
+  单轴部分更新会把当前已知 `target_pose` 回填到另外 3 轴再覆盖被改的那一个。
+- 新增 `xbox_teleop_node`：订阅官方 `joy` 包的 `/joy`，在回调里同步发布
+  `/rov/teleop_cmd`（死区 `0.08` + 三次方曲线，默认轴映射
+  `axis_heave=1,axis_yaw=0,axis_surge=4,axis_sway=3`，匹配 Linux `xpad` 默认
+  8 轴布局）与按键上升沿去抖触发的 `/rov/fsm_command`（默认 `A/B/X/Y ->
+  PASSIVE/PID_HOLD/DEPTH_HOLD/OPEN_LOOP`）。新增 `config/xbox_teleop.yaml`。
+- 新增 `launch/teleop_gcs.launch.py`（`joy_node` + `xbox_teleop_node` +
+  `fsm_console_node`，零 MuJoCo/CUDA/`ros2_control` 依赖）。
+- `package.xml`/`CMakeLists.txt`：去掉未再使用的 `nav_msgs`/`geometry_msgs`，
+  新增 `sensor_msgs`（`depend`）与 `joy`（`exec_depend`，运行期依赖，本包不
+  include 任何 `joy` 头文件）。
+
+### 验证结果
+
+`colcon build --symlink-install`（全部 6 个包）**零警告零错误**。
+`colcon test --packages-select adhere_controller_common`：新增的
+`test_thruster_allocator`（3/3）、`test_fsm_states`（3/3）与既有的
+`test_multirate_decimator`（4/4）**全部通过**；`cpplint` 对新文件报出的
+`line_length`/缺 `#include <algorithm>` 问题已修复，`copyright`/`cppcheck`/
+`uncrustify`/`xmllint` 失败均为 Phase 2.14 起已记录的"全仓库缺版权头"等预先
+存在问题，与本阶段无关。
+
+真实 MuJoCo 闭环（`ros2 launch adhere_kamr_controller mujoco.launch.py
+headless:=true use_rviz:=false launch_teleop:=false`，经 `rclpy` 脚本驱动 4
+个 `/rov/*` 话题）：
+
+| 状态 | 驱动 | 结果 |
+|---|---|---|
+| `PASSIVE`（默认启动） | — | `z=1.0029m`（自由漂流，与 Phase 3.1.1 基线一致） |
+| `DEPTH_HOLD` | `SetpointCommand{target_z=0.40}` | `z=0.399999995m`，残差 `<0.01mm` ✅ |
+| `OPEN_LOOP` | `TeleopCommand{sway_y=1.0}` 持续 2s | `Y` 平移约 `-8.4m`，`Z`/姿态几乎不变（`z=1.0031m`），确认零寄生俯仰/偏航耦合 ✅ |
+| `PID_HOLD`（驱动中） | `TeleopCommand{surge_x=-1.0}` 持续 3s | `target_pose.x` 持续前移，`actual` 跟随（有追踪滞后，符合"移动中"预期） |
+| `PID_HOLD`（释放后） | 摇杆回中，再等 8s | `actual` 收敛到释放瞬间的 `target`，`X/Y/Z` 残差 `<1e-6m` ✅ 远优于 `<5mm` 契约 |
+
+另用合成 `sensor_msgs/msg/Joy` 消息独立验证 `xbox_teleop_node`（未接真实手柄）：
+死区`0.08`+三次方曲线对 `axis=0.5`/`-0.9` 的变换结果与手算一致；`buttons[2]`
+（X 键）按住两帧只触发一次 `FsmCommand{command=DEPTH_HOLD}`，确认上升沿去抖
+生效。

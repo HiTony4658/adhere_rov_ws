@@ -11,13 +11,10 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(adhere_control_msgs REQUIRED)
-find_package(geometry_msgs REQUIRED)
-find_package(nav_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
 
 include_directories(include)
 
-# TODO(Phase 3.2+): add the benchmark-trigger/teleop executable once station-keeping and
-# trajectory-tracking targets + gust injection are implemented.
 add_executable(fsm_console_node src/fsm_console_node.cpp)
 target_include_directories(fsm_console_node PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -26,10 +23,35 @@ target_include_directories(fsm_console_node PUBLIC
 ament_target_dependencies(fsm_console_node
   rclcpp
   adhere_control_msgs
-  nav_msgs
 )
-install(TARGETS fsm_console_node
+
+add_executable(state_cmd_console_node src/state_cmd_console_node.cpp)
+target_include_directories(state_cmd_console_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+ament_target_dependencies(state_cmd_console_node
+  rclcpp
+  adhere_control_msgs
+)
+
+add_executable(xbox_teleop_node src/xbox_teleop_node.cpp)
+target_include_directories(xbox_teleop_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+ament_target_dependencies(xbox_teleop_node
+  rclcpp
+  adhere_control_msgs
+  sensor_msgs
+)
+
+install(TARGETS fsm_console_node state_cmd_console_node xbox_teleop_node
   DESTINATION lib/${PROJECT_NAME}
+)
+
+install(DIRECTORY config launch
+  DESTINATION share/${PROJECT_NAME}
 )
 
 if(BUILD_TESTING)

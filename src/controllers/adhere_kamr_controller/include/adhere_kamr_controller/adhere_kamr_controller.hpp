@@ -8,12 +8,17 @@
 #include "controller_interface/controller_interface.hpp"
 
 #include "adhere_control_msgs/msg/fsm_command.hpp"
+#include "adhere_control_msgs/msg/fsm_state.hpp"
+#include "adhere_control_msgs/msg/setpoint_command.hpp"
+#include "adhere_control_msgs/msg/teleop_command.hpp"
 #include "adhere_controller_common/common/enumClass.h"
 #include "adhere_controller_common/common/MultiRateDecimator.h"
 #include "adhere_controller_common/CtrlInterfaces.h"
 #include "adhere_controller_common/FSM/FSMState.h"
 #include "adhere_controller_common/FSM/StateDepthHold.h"
+#include "adhere_controller_common/FSM/StateOpenLoop.h"
 #include "adhere_controller_common/FSM/StatePassive.h"
+#include "adhere_controller_common/FSM/StatePidHold.h"
 
 namespace adhere_kamr_controller
 {
@@ -66,6 +71,8 @@ private:
   {
     std::shared_ptr<adhere_controller_common::StatePassive> passive;
     std::shared_ptr<adhere_controller_common::StateDepthHold> depth_hold;
+    std::shared_ptr<adhere_controller_common::StateOpenLoop> open_loop;
+    std::shared_ptr<adhere_controller_common::StatePidHold> pid_hold;
   };
 
   std::shared_ptr<adhere_controller_common::FSMState> getNextState(
@@ -81,6 +88,17 @@ private:
     adhere_controller_common::FSMStateName::INVALID;
 
   rclcpp::Subscription<adhere_control_msgs::msg::FsmCommand>::SharedPtr fsm_command_subscription_;
+  rclcpp::Subscription<adhere_control_msgs::msg::SetpointCommand>::SharedPtr
+    setpoint_command_subscription_;
+  rclcpp::Subscription<adhere_control_msgs::msg::TeleopCommand>::SharedPtr
+    teleop_command_subscription_;
+  rclcpp::Publisher<adhere_control_msgs::msg::FsmState>::SharedPtr fsm_state_publisher_;
+
+  // 0.25s /rov/teleop_cmd staleness watchdog (CLAUDE.md Phase 3.2 Stage 2.3): compared against
+  // ctrl_interfaces_.control_inputs_.teleop_last_rx_time_sec on every inner-due tick, in
+  // get_node()->now().seconds() units (consistent with how the subscription callback stamps
+  // it) so no clock-type mismatch is possible.
+  static constexpr double kTeleopWatchdogSeconds = 0.25;
 
   // Uniform integer-ratio multi-rate decimation (CLAUDE.md Phase 3.1.1 Stage 2.1): cm_update_rate_
   // is the master controller_manager/AdhereMujocoHardware tick rate (500Hz); inner_decimation_/

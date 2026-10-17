@@ -1,0 +1,18 @@
+# xbox_teleop_node parameters (CLAUDE.md Phase 3.2 Stage 2.3): Mode-2 (美国手) stick/button
+# mapping. Axis indices match the Linux xpad driver's default 8-axis Xbox-360-style layout
+# ([LX, LY, LT, RX, RY, RT, DX, DY]); adjust axis_*/button_* here if a different pad or driver
+# reports a different index order (run `ros2 topic echo /joy` to find the right indices).
+xbox_teleop_node:
+  ros__parameters:
+    deadzone: 0.08
+    cubic_curve: true
+
+    axis_heave: 1   # Left stick vertical (LY):  up(+)   -> heave_z > 0 (ascend +Z)
+    axis_yaw: 0     # Left stick horizontal (LX): left(+) -> yaw_rate > 0 (+omega_z, CCW)
+    axis_surge: 4   # Right stick vertical (RY):  up(+)   -> surge_x > 0 (toward the wall, -X body)
+    axis_sway: 3    # Right stick horizontal (RX): right/left -> sway_y
+
+    button_passive: 0     # A -> PASSIVE (instant safety zero-thrust)
+    button_pid_hold: 1    # B -> PID_HOLD
+    button_depth_hold: 2  # X -> DEPTH_HOLD
+    button_open_loop: 3   # Y -> OPEN_LOOP

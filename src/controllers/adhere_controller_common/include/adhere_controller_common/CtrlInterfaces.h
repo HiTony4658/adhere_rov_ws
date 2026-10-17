@@ -2,6 +2,7 @@
 #define ADHERE_CONTROLLER_COMMON__CTRLINTERFACES_H_
 
 #include <atomic>
+#include <cstdint>
 #include <vector>
 
 #include "hardware_interface/loaned_command_interface.hpp"
@@ -10,17 +11,40 @@
 namespace adhere_controller_common
 {
 
-// Live FSM target set by /rov/fsm_command (AdhereKamrController's subscription callback, which
-// runs on the executor thread) and read every tick by the active FSMState::run() (which runs on
-// the 500Hz physics thread). Plain std::atomic<T> members instead of a mutex: command/target_z/
-// target_y/target_yaw are each a single scalar, so lock-free read-modify-write is sufficient and
-// avoids blocking the 500Hz hot loop on the (much slower) ROS executor thread.
+// Live FSM inputs set by AdhereKamrController's /rov/fsm_command, /rov/setpoint_cmd, and
+// /rov/teleop_cmd subscription callbacks (which run on the executor thread) and read every tick
+// by the active FSMState::run() (which runs on the 500Hz physics thread). Plain std::atomic<T>
+// members instead of a mutex: every field here is a single scalar, so lock-free
+// read-modify-write is sufficient and avoids blocking the 500Hz hot loop on the (much slower)
+// ROS executor thread (CLAUDE.md Phase 3.2 Stage 2.1's 4-topic decoupled contract).
 struct ControlInputs
 {
-  std::atomic<int> command{0};          // 0 = NO_CHANGE, 1 = PASSIVE, 2 = DEPTH_HOLD
-  std::atomic<double> target_z{0.5};    // m, world frame
-  std::atomic<double> target_y{0.0};    // m, world frame (reserved)
-  std::atomic<double> target_yaw{0.0};  // rad (reserved)
+  // /rov/fsm_command (FsmCommand.msg): ONLY switches FSM states.
+  std::atomic<int> command{0};  // 0=NO_CHANGE, 1=PASSIVE, 2=DEPTH_HOLD, 3=OPEN_LOOP, 4=PID_HOLD
+
+  // /rov/setpoint_cmd (SetpointCommand.msg): discrete numeric setpoints, orthogonal to state
+  // switching. setpoint_seq increments once per received message so StateDepthHold/StatePidHold
+  // can edge-detect "a new setpoint just arrived" instead of re-applying the same message every
+  // tick (which would fight the Xbox left-stick continuous nudge/move integration).
+  std::atomic<uint64_t> setpoint_seq{0};
+  std::atomic<uint8_t> setpoint_mode{0};         // 2 = DEPTH_HOLD, 4 = PID_HOLD
+  std::atomic<bool> setpoint_lock_current_pose{false};
+  std::atomic<double> setpoint_target_x{0.0};    // m, world frame
+  std::atomic<double> setpoint_target_y{0.0};    // m, world frame
+  std::atomic<double> setpoint_target_z{0.5};    // m, world frame
+  std::atomic<double> setpoint_target_yaw{0.0};  // rad
+
+  // /rov/teleop_cmd (TeleopCommand.msg): continuous Mode-2 (美国手) joystick inputs in
+  // [-1.0, 1.0]. last_rx_time_sec is wall-clock seconds at last receipt, stamped by
+  // AdhereKamrController's subscription callback and read by its own 0.25s watchdog (which
+  // forces teleop_active/the 4 axes to false/0.0 if the joystick has gone stale -- so FSMState
+  // implementations never need to know about watchdog timeouts themselves).
+  std::atomic<double> teleop_surge_x{0.0};
+  std::atomic<double> teleop_sway_y{0.0};
+  std::atomic<double> teleop_heave_z{0.0};
+  std::atomic<double> teleop_yaw_rate{0.0};
+  std::atomic<bool> teleop_active{false};
+  std::atomic<double> teleop_last_rx_time_sec{0.0};
 };
 
 // Zero-copy FSM/hardware bridge, modeled after quadruped_ros2_control's CtrlInterfaces: holds

@@ -197,15 +197,20 @@ ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py
 
 # 3c. 完整 FSM 闭环仿真：AdhereKamrController 自动加载/配置/激活（默认 PASSIVE 态，
 # 250Hz 均匀内环 / 25Hz 均匀外环），MuJoCo 窗口 + RViz2 双可视化同步，并自动弹出
-# FSM 终端控制台（输入 1 切 PASSIVE、输入 2 并指定目标深度切 DEPTH_HOLD 做闭环定深）
+# Xbox 手柄遥操作 + FSM 终端控制台（PASSIVE/DEPTH_HOLD/OPEN_LOOP/PID_HOLD 四态）
 ros2 launch adhere_kamr_controller mujoco.launch.py
+
+# 3d. 远程上位机（GCS 笔记本）独立遥操作：仅需 adhere_control_msgs +
+# adhere_keyboard_input，零 MuJoCo/CUDA/ros2_control 依赖，通过 DDS 远程控制
+# 3c 中已以 launch_teleop:=false 启动的仿真服务器（或未来 Jetson AGX Xavier 真机）
+ros2 launch adhere_keyboard_input teleop_gcs.launch.py
 ```
 
 各命令的完整参数说明见 [`src/descriptions/simplified_v1_description/README.md`](src/descriptions/simplified_v1_description/README.md)、
 [`src/hardwares/adhere_mujoco_hardware/README.md`](src/hardwares/adhere_mujoco_hardware/README.md)、
 [`src/controllers/adhere_kamr_controller/README.md`](src/controllers/adhere_kamr_controller/README.md)
 与 [`src/commands/adhere_keyboard_input/README.md`](src/commands/adhere_keyboard_input/README.md)
-（FSM 终端控制台用法）。
+（FSM 终端控制台、Xbox 手柄遥操作、上位机/下位机分布式部署用法）。
 
 ---
 
@@ -216,7 +221,8 @@ ros2 launch adhere_kamr_controller mujoco.launch.py
 | **Phase 1** | 工作空间骨架、6 个包清单、全量中文 README | ✅ 完成 |
 | **Phase 2** | `AdhereMujocoHardware` 500Hz 读写循环 + Fossen 水动力 + 可插拔水流环境 + `MujocoViewer`/RViz2 双可视化 | ✅ 完成 |
 | **Phase 3.1** | `adhere_controller_common`（`CtrlInterfaces`/FSM/数学工具）+ `PASSIVE`/`DEPTH_HOLD` 两态 + `AdhereKamrController` 插件 + FSM 终端控制台 | ✅ 完成 |
-| **Phase 3.1.1** | 均匀整数抽取多速率（500Hz→250Hz 内环/25Hz 外环，`MultiRateDecimator`）+ `adhere_mujoco_hardware`/`adhere_kamr_controller` 严格包解耦（独立 `mujoco_sim.launch.py` / `mujoco.launch.py`） | ✅ 当前阶段 |
+| **Phase 3.1.1** | 均匀整数抽取多速率（500Hz→250Hz 内环/25Hz 外环，`MultiRateDecimator`）+ `adhere_mujoco_hardware`/`adhere_kamr_controller` 严格包解耦（独立 `mujoco_sim.launch.py` / `mujoco.launch.py`） | ✅ 完成 |
+| **Phase 3.2** | 4 话题解耦通信契约（`FsmCommand`/`SetpointCommand`/`TeleopCommand`/`FsmState`）+ 共享 `ThrusterAllocator` + `OPEN_LOOP`/`PID_HOLD` 两态 + 官方 `joy` 包 Xbox 手柄遥操作 + 上位机（GCS）独立部署 | ✅ 当前阶段 |
 | **Phase 4** | `AdhereKamrController` 250Hz 内环（PD + DOB + 12D OSQP） | 待开始 |
 | **Phase 5** | 25Hz 异步 CUDA MPPI 外环滚动线程（`sm_72`/`sm_75` 双架构） | 待开始 |
 | **Phase 6** | 与 Python/JAX 基准（`mujoco_mppi_ws`）数值对齐验证 + 论文实验复现 | 待开始 |

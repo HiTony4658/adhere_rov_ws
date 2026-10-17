@@ -4,9 +4,11 @@
   <name>adhere_keyboard_input</name>
   <version>0.1.0</version>
   <description>
-    Teleoperation and benchmark trigger node: issues station-keeping/trajectory-tracking
-    targets, triggers the standard 12.0s wave-gust disturbance profile, and switches
-    AdhereKamrController FSM states via adhere_control_msgs services.
+    Decoupled FSM/teleop terminal + Xbox gamepad bridge for the KAMR-MPPI ROV (CLAUDE.md Phase
+    3.2): fsm_console_node (master state-switcher), state_cmd_console_node (DEPTH_HOLD/PID_HOLD
+    setpoint terminal), and xbox_teleop_node (joy -> TeleopCommand/FsmCommand bridge). Zero
+    dependency on MuJoCo/CUDA/ros2_control, so it deploys standalone on a remote Upper-Computer
+    (GCS) laptop.
   </description>
   <maintainer email="chesnuttbattiste@gmail.com">HiTony4658</maintainer>
   <license>Apache-2.0</license>
@@ -15,8 +17,12 @@
 
   <depend>rclcpp</depend>
   <depend>adhere_control_msgs</depend>
-  <depend>geometry_msgs</depend>
-  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+
+  <!-- Runtime-only: xbox_teleop_node consumes sensor_msgs/msg/Joy published by the official
+       ROS 2 joy package's joy_node, launched alongside it in launch/teleop_gcs.launch.py. This
+       package never includes any joy header, so exec_depend (not depend) is correct. -->
+  <exec_depend>joy</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

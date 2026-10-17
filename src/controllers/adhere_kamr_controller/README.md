@@ -3,16 +3,17 @@
 ## 职责
 
 `AdhereKamrController` 是 `controller_interface::ControllerInterface` 的
-`pluginlib` 插件。当前（Phase 3.1.1）承载 FSM 管理本身：`PASSIVE`/`DEPTH_HOLD`
-两个状态（实现于 `adhere_controller_common`，本包只负责生命周期管理、接口装配、
-均匀整数抽取多速率调度与状态切换）。未来阶段将在本包内继续承载 `KAMR-MPPI`
+`pluginlib` 插件。当前（Phase 3.2）承载 FSM 管理本身：`PASSIVE`/`DEPTH_HOLD`/
+`OPEN_LOOP`/`PID_HOLD` 四个状态（实现于 `adhere_controller_common`，本包只负责
+生命周期管理、接口装配、均匀整数抽取多速率调度、4 话题订阅/发布、Xbox 手柄
+`0.25s` 失联看门狗与状态切换）。未来阶段将在本包内继续承载 `KAMR-MPPI`
 （`pr_wbc_mppi_v4`）算法的完整实现：250Hz 内环（Planar Impedance PD +
 Pad-Force DOB + 12D Elastic Rhombic-Kern OSQP）、25Hz 异步 CUDA MPPI 外环（见
 下方"未来 KAMR-MPPI 数学契约"各节，这些是尚未实现的设计契约，不是已完成的
 功能）。详见 [`src/controllers/README.md`](../README.md) 中与
 `adhere_controller_common` 的职责划分表。
 
-## 当前实现（Phase 3.1.1）
+## 当前实现（Phase 3.2）
 
 ```text
 include/adhere_kamr_controller/
@@ -21,15 +22,20 @@ include/adhere_kamr_controller/
 ├── inner_wbc/                     # 占位：未来 PlanarImpedancePD/PadForceDOB/RhombicKernQP
 └── outer_mppi_cuda/                # 占位：未来 MppiRolloutThread/mppi_rollout_kernel
 
-src/adhere_kamr_controller.cpp      # 生命周期方法 + 均匀多速率调度 + FSM 切换逻辑 + pluginlib 导出
+src/adhere_kamr_controller.cpp      # 生命周期方法 + 均匀多速率调度 + 4 话题订阅/发布 + FSM 切换逻辑 + pluginlib 导出
 config/controllers.yaml             # controller_manager 参数服务器文档（历史参考，见下）
 launch/mujoco.launch.py             # 闭环启动文件：robot_state_publisher + adhere_mujoco_node
                                      # (autostart_controllers=['adhere_kamr_controller']) + RViz2
-                                     # + FSM 终端控制台
+                                     # + launch_teleop:=true 时自动包含 adhere_keyboard_input 的
+                                     # teleop_gcs.launch.py（joy_node + xbox_teleop_node + fsm_console_node）
 ```
 
 `AdhereKamrController` 持有 `adhere_controller_common::CtrlInterfaces`，在
-`on_configure()` 中订阅 `/rov/fsm_command`（`adhere_control_msgs::msg::FsmCommand`）
+`on_configure()` 中订阅 CLAUDE.md Phase 3.2 的 4 话题解耦契约中的 3 个输入话题
+——`/rov/fsm_command`（`FsmCommand`，仅状态切换）、`/rov/setpoint_cmd`
+（`SetpointCommand`，离散设定点，写入后 `setpoint_seq` 自增供状态侧沿边检测）、
+`/rov/teleop_cmd`（`TeleopCommand`，连续遥操作，回调同时戳
+`teleop_last_rx_time_sec`）——并创建 `/rov/fsm_state`（`FsmState`）发布者；
 并通过 `auto_declare<int>()` 读取 `cm_update_rate`/`inner_decimation`/
 `outer_decimation` 三个 ROS 参数（默认 `500`/`2`/`20`），据此构造
 `adhere_controller_common::MultiRateDecimator` 与恒定的 `inner_period_`
@@ -37,11 +43,15 @@ launch/mujoco.launch.py             # 闭环启动文件：robot_state_publisher
 （如 `thr_N1/effort`、`imu_sensor/orientation.w`、`rov_odom/pos.x`、
 `pad_contact/pad_TL/force`）从 `command_interfaces_`/`state_interfaces_` 中
 逐一查找并装入 `CtrlInterfaces` 的对应插槽（不依赖 `controller_manager` 内部
-装配顺序与请求顺序一致这一假设），并重置 `MultiRateDecimator`、把
+装配顺序与请求顺序一致这一假设），构造全部 4 个 `FSMState`（`PASSIVE`/
+`DEPTH_HOLD`/`OPEN_LOOP`/`PID_HOLD`），并重置 `MultiRateDecimator`、把
 `ctrl_interfaces_.frequency_` 改写为实际内环频率。默认在 `PASSIVE` 态启动。
-`update()` 每次调用时先 `tick()`，非内环 tick 直接原样返回（ZOH）；内环 tick
-上才转发恒定 `inner_period_` 给当前 `FSMState::run()`（见下方"均匀整数抽取
-多速率调度"）。
+`update()` 每次调用时先 `tick()`；内环 tick 上先执行 `/rov/teleop_cmd` 的
+`0.25s` 失联看门狗（陈旧则集中清零 `teleop_active`/4 个遥操作轴，各
+`FSMState` 自身无需关心断联），再转发恒定 `inner_period_` 给当前
+`FSMState::run()`；外环 tick 上发布 `/rov/fsm_state`（`target_pose` 取自
+`FSMState::targetPose()`，`actual_pose` 由 `odom_state_interface_` 直接算出）。
+非内环 tick 上 `hw_commands_` 原样保持不变（ZOH）。
 
 本包对 `adhere_mujoco_hardware` 的包是**完全解耦**的（CLAUDE.md Phase 3.1.1）：
 `adhere_mujoco_node.cpp` 本身对任何具体控制器零知晓，本控制器的加载/配置/
@@ -261,18 +271,21 @@ source install/setup.bash
 
 # 完整闭环仿真：adhere_mujoco_node 自动加载/配置/激活 AdhereKamrController
 # （默认 PASSIVE 态，250Hz 均匀内环/25Hz 均匀外环），MuJoCo 窗口 + RViz2 双可视化，
-# 并自动弹出 FSM 终端控制台
+# 并自动包含 adhere_keyboard_input 的 teleop_gcs.launch.py（joy_node + Xbox 手柄
+# 遥操作桥 + FSM 终端控制台，launch_teleop 默认 true）
 ros2 launch adhere_kamr_controller mujoco.launch.py
 
-# 无头模式 + 不弹出 FSM 终端控制台（例如脚本化测试，改用 /rov/fsm_command 话题）
+# 无头模式 + 不随本机启动手柄/终端（例如脚本化测试改用 4 个 /rov/* 话题，
+# 或已有独立的远程 GCS 笔记本在跑 teleop_gcs.launch.py）
 ros2 launch adhere_kamr_controller mujoco.launch.py headless:=true use_rviz:=false \
-    spawn_fsm_console:=false
+    launch_teleop:=false
 ```
 
 与 `adhere_mujoco_hardware/launch/mujoco_sim.launch.py`（纯开环，0 个控制器）
 不同，本启动文件会把 `autostart_controllers:=['adhere_kamr_controller']` 与
 `simplified_v1_description/config/robot_control.yaml` 一并传给同一个通用
-`adhere_mujoco_node` 可执行文件。
+`adhere_mujoco_node` 可执行文件。`launch_teleop:=false` 时的上位机/下位机分布式
+部署方式见 [`adhere_keyboard_input/README.md`](../../commands/adhere_keyboard_input/README.md)。
 
 ## 尚未实现部分的当前状态
 

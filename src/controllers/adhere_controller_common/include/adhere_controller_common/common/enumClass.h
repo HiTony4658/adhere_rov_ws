@@ -8,7 +8,9 @@ enum class FSMStateName
 {
   INVALID,
   PASSIVE,
-  DEPTH_HOLD
+  DEPTH_HOLD,
+  OPEN_LOOP,
+  PID_HOLD
 };
 
 enum class FSMMode

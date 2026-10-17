@@ -1,8 +1,11 @@
 #include "adhere_kamr_controller/adhere_kamr_controller.hpp"
 
+#include <algorithm>
 #include <array>
 #include <string>
 #include <vector>
+
+#include "adhere_controller_common/common/mathTools.h"
 
 namespace adhere_kamr_controller
 {
@@ -71,6 +74,25 @@ bool findAndAppend(
   return false;
 }
 
+// Inverse of FSMState::checkFsmCommandChange()'s int -> FSMStateName mapping, used to populate
+// FsmState.msg::current_state with the ACTIVE state (not whatever raw command value happens to
+// be latched in ControlInputs, which may be stale or mid-transition).
+int32_t fsmStateNameToInt(adhere_controller_common::FSMStateName name)
+{
+  switch (name) {
+    case adhere_controller_common::FSMStateName::PASSIVE:
+      return 1;
+    case adhere_controller_common::FSMStateName::DEPTH_HOLD:
+      return 2;
+    case adhere_controller_common::FSMStateName::OPEN_LOOP:
+      return 3;
+    case adhere_controller_common::FSMStateName::PID_HOLD:
+      return 4;
+    default:
+      return 0;
+  }
+}
+
 }  // namespace
 
 controller_interface::InterfaceConfiguration
@@ -96,14 +118,47 @@ controller_interface::return_type AdhereKamrController::init(const std::string &
 
 CallbackReturn AdhereKamrController::on_configure(const rclcpp_lifecycle::State & /*previous_state*/)
 {
+  // 4-topic decoupled contract (CLAUDE.md Phase 3.2 Stage 2.1): FsmCommand ONLY switches
+  // states; SetpointCommand/TeleopCommand feed the live ControlInputs atomics consumed by the
+  // active FSMState's run().
   fsm_command_subscription_ = get_node()->create_subscription<adhere_control_msgs::msg::FsmCommand>(
     "/rov/fsm_command", 10,
     [this](const adhere_control_msgs::msg::FsmCommand::SharedPtr msg) {
       ctrl_interfaces_.control_inputs_.command.store(msg->command);
-      ctrl_interfaces_.control_inputs_.target_z.store(msg->target_z);
-      ctrl_interfaces_.control_inputs_.target_y.store(msg->target_y);
-      ctrl_interfaces_.control_inputs_.target_yaw.store(msg->target_yaw);
     });
+
+  setpoint_command_subscription_ =
+    get_node()->create_subscription<adhere_control_msgs::msg::SetpointCommand>(
+      "/rov/setpoint_cmd", 10,
+      [this](const adhere_control_msgs::msg::SetpointCommand::SharedPtr msg) {
+        auto & ci = ctrl_interfaces_.control_inputs_;
+        ci.setpoint_mode.store(msg->mode);
+        ci.setpoint_lock_current_pose.store(msg->lock_current_pose);
+        ci.setpoint_target_x.store(msg->target_x);
+        ci.setpoint_target_y.store(msg->target_y);
+        ci.setpoint_target_z.store(msg->target_z);
+        ci.setpoint_target_yaw.store(msg->target_yaw);
+        // Bumped last (CLAUDE.md Phase 3.2 Stage 2.1's edge-detection contract): any FSMState
+        // polling setpoint_seq only ever observes it change once every field above is already
+        // up to date, never a half-written setpoint.
+        ci.setpoint_seq.fetch_add(1);
+      });
+
+  teleop_command_subscription_ =
+    get_node()->create_subscription<adhere_control_msgs::msg::TeleopCommand>(
+      "/rov/teleop_cmd", 10,
+      [this](const adhere_control_msgs::msg::TeleopCommand::SharedPtr msg) {
+        auto & ci = ctrl_interfaces_.control_inputs_;
+        ci.teleop_surge_x.store(msg->surge_x);
+        ci.teleop_sway_y.store(msg->sway_y);
+        ci.teleop_heave_z.store(msg->heave_z);
+        ci.teleop_yaw_rate.store(msg->yaw_rate);
+        ci.teleop_active.store(msg->active);
+        ci.teleop_last_rx_time_sec.store(get_node()->now().seconds());
+      });
+
+  fsm_state_publisher_ =
+    get_node()->create_publisher<adhere_control_msgs::msg::FsmState>("/rov/fsm_state", 10);
 
   // Uniform integer-ratio multi-rate parameters (CLAUDE.md Phase 3.1.1 Stage 2.1), read here
   // (rather than on_activate()) so robot_control.yaml's adhere_kamr_controller.ros__parameters
@@ -159,6 +214,10 @@ CallbackReturn AdhereKamrController::on_activate(const rclcpp_lifecycle::State &
   state_list_.passive = std::make_shared<adhere_controller_common::StatePassive>(ctrl_interfaces_);
   state_list_.depth_hold =
     std::make_shared<adhere_controller_common::StateDepthHold>(ctrl_interfaces_);
+  state_list_.open_loop =
+    std::make_shared<adhere_controller_common::StateOpenLoop>(ctrl_interfaces_);
+  state_list_.pid_hold =
+    std::make_shared<adhere_controller_common::StatePidHold>(ctrl_interfaces_);
 
   // Default-boots in PASSIVE (CLAUDE.md Phase 3.1 Stage 2.3): launching mujoco_sim.launch.py
   // immediately brings up the FSM in the safe zero-thrust state.
@@ -206,38 +265,72 @@ controller_interface::return_type AdhereKamrController::update()
   // the decimator reports which of the uniform inner/outer schedules are due on this tick.
   const auto tick = decimator_->tick();
 
+  if (!current_state_) {
+    return controller_interface::return_type::OK;
+  }
+
+  const rclcpp::Time time = get_node()->now();
+
+  if (tick.inner_due) {
+    // 0.25s /rov/teleop_cmd staleness watchdog (CLAUDE.md Phase 3.2 Stage 2.3): forces teleop
+    // inputs to a safe all-zero/inactive state centrally, so no FSMState implementation needs
+    // its own disconnect-handling logic.
+    auto & ci = ctrl_interfaces_.control_inputs_;
+    if (time.seconds() - ci.teleop_last_rx_time_sec.load() > kTeleopWatchdogSeconds) {
+      ci.teleop_active.store(false);
+      ci.teleop_surge_x.store(0.0);
+      ci.teleop_sway_y.store(0.0);
+      ci.teleop_heave_z.store(0.0);
+      ci.teleop_yaw_rate.store(0.0);
+    }
+
+    if (mode_ == adhere_controller_common::FSMMode::NORMAL) {
+      current_state_->run(time, inner_period_);
+      next_state_name_ = current_state_->checkChange();
+      if (next_state_name_ != current_state_->state_name) {
+        mode_ = adhere_controller_common::FSMMode::CHANGE;
+        next_state_ = getNextState(next_state_name_);
+      }
+    } else {
+      current_state_->exit();
+      current_state_ = next_state_;
+      current_state_->enter();
+      mode_ = adhere_controller_common::FSMMode::NORMAL;
+    }
+  }
+
   if (tick.outer_due) {
     // Outer-loop hook (default 25Hz, CLAUDE.md Phase 3.1.1 Stage 2.1): the async CUDA MPPI
     // rollout thread hand-off (qpos, qvel, F_x_extra_preload) <-> w_cmd via
     // realtime_tools::RealtimeBuffer is a Phase 4/5 milestone -- intentionally a no-op placeholder
     // here so the uniform timing contract itself is already wired and verifiable (see
     // adhere_controller_common's test_multirate_decimator).
-  }
 
-  if (!tick.inner_due) {
-    // Intermediate 500Hz tick (CLAUDE.md Phase 3.1.1 Stage 2.1): leave
-    // thruster_command_interface_ untouched so AdhereMujocoHardware::write() holds the previous
-    // inner-loop command (exact ESC Zero-Order Hold).
-    return controller_interface::return_type::OK;
-  }
+    // Live terminal feedback (CLAUDE.md Phase 3.2 Stage 2.1's FsmState.msg): published here
+    // (not gated on tick.inner_due) so fsm_console_node/state_cmd_console_node see live
+    // actual_pose/target_pose at the outer-loop rate regardless of which inner-loop state is
+    // active.
+    adhere_control_msgs::msg::FsmState fsm_state_msg;
+    fsm_state_msg.header.stamp = time;
+    fsm_state_msg.current_state = fsmStateNameToInt(current_state_->state_name);
+    fsm_state_msg.state_name = current_state_->state_name_string;
 
-  if (!current_state_) {
-    return controller_interface::return_type::OK;
-  }
+    const auto target_pose = current_state_->targetPose();
+    std::copy(target_pose.begin(), target_pose.end(), fsm_state_msg.target_pose.begin());
 
-  const rclcpp::Time time = get_node()->now();
-  if (mode_ == adhere_controller_common::FSMMode::NORMAL) {
-    current_state_->run(time, inner_period_);
-    next_state_name_ = current_state_->checkChange();
-    if (next_state_name_ != current_state_->state_name) {
-      mode_ = adhere_controller_common::FSMMode::CHANGE;
-      next_state_ = getNextState(next_state_name_);
-    }
-  } else {
-    current_state_->exit();
-    current_state_ = next_state_;
-    current_state_->enter();
-    mode_ = adhere_controller_common::FSMMode::NORMAL;
+    const double x = ctrl_interfaces_.odom_state_interface_[0].get().get_value();
+    const double y = ctrl_interfaces_.odom_state_interface_[1].get().get_value();
+    const double z = ctrl_interfaces_.odom_state_interface_[2].get().get_value();
+    const adhere_controller_common::Quat quat(
+      ctrl_interfaces_.odom_state_interface_[3].get().get_value(),
+      ctrl_interfaces_.odom_state_interface_[4].get().get_value(),
+      ctrl_interfaces_.odom_state_interface_[5].get().get_value(),
+      ctrl_interfaces_.odom_state_interface_[6].get().get_value());
+    const double yaw =
+      adhere_controller_common::rotMatToRPY(adhere_controller_common::quatToRotMat(quat))(2);
+    fsm_state_msg.actual_pose = {x, y, z, yaw};
+
+    fsm_state_publisher_->publish(fsm_state_msg);
   }
 
   return controller_interface::return_type::OK;
@@ -251,6 +344,10 @@ std::shared_ptr<adhere_controller_common::FSMState> AdhereKamrController::getNex
       return state_list_.passive;
     case adhere_controller_common::FSMStateName::DEPTH_HOLD:
       return state_list_.depth_hold;
+    case adhere_controller_common::FSMStateName::OPEN_LOOP:
+      return state_list_.open_loop;
+    case adhere_controller_common::FSMStateName::PID_HOLD:
+      return state_list_.pid_hold;
     default:
       return state_list_.passive;
   }

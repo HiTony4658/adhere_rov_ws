@@ -31,10 +31,7 @@ void StatePassive::exit()
 
 FSMStateName StatePassive::checkChange()
 {
-  if (ctrl_interfaces_.control_inputs_.command.load() == 2) {
-    return FSMStateName::DEPTH_HOLD;
-  }
-  return FSMStateName::PASSIVE;
+  return checkFsmCommandChange();
 }
 
 }  // namespace adhere_controller_common

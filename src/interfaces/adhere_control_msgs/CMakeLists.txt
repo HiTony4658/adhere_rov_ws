@@ -11,11 +11,14 @@ find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 
-# TODO(Phase 3.2+): populate msg/ and srv/ with the remaining real .msg / .srv definitions
-# (TargetPose.msg, TargetTrajectory.msg, KamrMppiTelemetry.msg, RhombicKernMetrics.msg,
-#  PadContactState.msg, SwitchFsmState.srv) and list them here alongside FsmCommand.msg.
+# TODO(Phase 4+): populate msg/ and srv/ with the remaining real .msg / .srv definitions
+# (TargetTrajectory.msg, KamrMppiTelemetry.msg, RhombicKernMetrics.msg, PadContactState.msg)
+# once the 200Hz inner loop / 20Hz CUDA MPPI outer loop land.
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/FsmCommand.msg"
+  "msg/SetpointCommand.msg"
+  "msg/TeleopCommand.msg"
+  "msg/FsmState.msg"
   DEPENDENCIES std_msgs
 )
 

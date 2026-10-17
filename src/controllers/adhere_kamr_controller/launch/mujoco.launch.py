@@ -14,10 +14,12 @@ One-line usage:
     ros2 launch adhere_kamr_controller mujoco.launch.py
     ros2 launch adhere_kamr_controller mujoco.launch.py headless:=true spawn_fsm_console:=false
 
-spawn_fsm_console (default true) opens the interactive FSM terminal console
-(adhere_keyboard_input's fsm_console_node) in its own gnome-terminal/xterm window; set
-spawn_fsm_console:=false and run it manually instead:
-    ros2 run adhere_keyboard_input fsm_console_node
+launch_teleop (default true, CLAUDE.md Phase 3.2 Stage 2.5) includes
+adhere_keyboard_input/launch/teleop_gcs.launch.py (joy_node + xbox_teleop_node +
+fsm_console_node) for single-workstation convenience. Set launch_teleop:=false when this
+simulation server is controlled remotely from a separate Upper-Computer (GCS) laptop running
+teleop_gcs.launch.py on its own:
+    ros2 launch adhere_kamr_controller mujoco.launch.py launch_teleop:=false
 
 Zero-recompile model switching (CLAUDE.md Phase 2.12 Section 1): pkg_description/mjcf_file/
 xacro_file default to simplified_v1_description's rov_wall.xml + its xacro entry point, exactly
@@ -28,8 +30,9 @@ import os
 import xacro
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
 from launch.conditions import IfCondition
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -60,10 +63,13 @@ def generate_launch_description():
         "robot_control_yaml", default_value="config/robot_control.yaml",
         description="controller_manager + adhere_kamr_controller parameter file path, relative "
                      "to pkg_description's share directory.")
-    declare_spawn_fsm_console = DeclareLaunchArgument(
-        "spawn_fsm_console", default_value="true",
-        description="If true, opens adhere_keyboard_input's fsm_console_node in a dedicated "
-                     "gnome-terminal/xterm window.")
+    declare_launch_teleop = DeclareLaunchArgument(
+        "launch_teleop", default_value="true",
+        description="If true, includes adhere_keyboard_input/launch/teleop_gcs.launch.py "
+                     "(joy_node + xbox_teleop_node + fsm_console_node) for single-workstation "
+                     "convenience. Set false when a separate Upper-Computer (GCS) laptop "
+                     "already runs teleop_gcs.launch.py against this server (CLAUDE.md Phase "
+                     "3.2 Stage 2.5).")
 
     def _make_robot_description(context):
         # Mirrors adhere_mujoco_hardware/launch/mujoco_sim.launch.py's pure-xacro decoupling
@@ -116,24 +122,11 @@ def generate_launch_description():
         condition=IfCondition(use_rviz),
     )
 
-    # gnome-terminal (fallback xterm) running fsm_console_node in its own window, so it keeps
-    # reading stdin independently of this launch file's own terminal/log output. Guarded by
-    # `command -v` + if/elif so one missing terminal emulator falls back to the other instead of
-    # failing the whole launch.
-    fsm_console = ExecuteProcess(
-        cmd=[
-            "bash", "-c",
-            "if command -v gnome-terminal >/dev/null 2>&1; then "
-            "gnome-terminal --title='ROV FSM Console' -- "
-            "ros2 run adhere_keyboard_input fsm_console_node; "
-            "elif command -v xterm >/dev/null 2>&1; then "
-            "xterm -T 'ROV FSM Console' -e "
-            "ros2 run adhere_keyboard_input fsm_console_node; "
-            "else echo 'fsm_console: neither gnome-terminal nor xterm found, run "
-            "\"ros2 run adhere_keyboard_input fsm_console_node\" manually' >&2; fi",
-        ],
-        condition=IfCondition(LaunchConfiguration("spawn_fsm_console")),
-        output="screen",
+    teleop_gcs_share = get_package_share_directory("adhere_keyboard_input")
+    teleop_gcs = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(teleop_gcs_share, "launch", "teleop_gcs.launch.py")),
+        condition=IfCondition(LaunchConfiguration("launch_teleop")),
     )
 
     return LaunchDescription(
@@ -144,9 +137,9 @@ def generate_launch_description():
             declare_mjcf_file,
             declare_xacro_file,
             declare_robot_control_yaml,
-            declare_spawn_fsm_console,
+            declare_launch_teleop,
             adhere_mujoco_node,
             rviz,
-            fsm_console,
+            teleop_gcs,
         ]
     )

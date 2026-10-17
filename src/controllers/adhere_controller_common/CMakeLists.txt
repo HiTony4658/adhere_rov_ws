@@ -19,11 +19,14 @@ find_package(adhere_control_msgs REQUIRED)
 
 include_directories(include)
 
-# TODO(Phase 3.2+): add FossenHydrodynamics relocation + PreloadAttach/EmergencyDetach states
-# once those milestones land; StatePassive/StateDepthHold are the Phase 3.1 FSM states.
+# TODO(Phase 4+): add FossenHydrodynamics relocation once the 200Hz inner loop / 20Hz CUDA MPPI
+# outer loop land; StatePassive/StateDepthHold/StateOpenLoop/StatePidHold are the Phase 3.2 FSM
+# states.
 add_library(${PROJECT_NAME} SHARED
   src/FSM/StatePassive.cpp
   src/FSM/StateDepthHold.cpp
+  src/FSM/StateOpenLoop.cpp
+  src/FSM/StatePidHold.cpp
 )
 target_include_directories(${PROJECT_NAME} PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -73,6 +76,25 @@ if(BUILD_TESTING)
     test/test_multirate_decimator.cpp
   )
   target_include_directories(test_multirate_decimator PRIVATE include)
+
+  # Header-only (ThrusterAllocator.h): pure-Eigen allocation-matrix contract (CLAUDE.md Phase
+  # 3.2 Stage 3.2) -- B*B^dagger ~= I_6 and zero parasitic pitch/yaw coupling for pure sway/heave.
+  ament_add_gtest(test_thruster_allocator
+    test/test_thruster_allocator.cpp
+  )
+  target_include_directories(test_thruster_allocator PRIVATE include)
+  target_link_libraries(test_thruster_allocator Eigen3::Eigen)
+
+  # Closed-loop FSM state contract (CLAUDE.md Phase 3.2 Stage 3.2): fakes CtrlInterfaces with
+  # hardware_interface::StateInterface/CommandInterface backed by local doubles (no
+  # ResourceManager needed), and drives each state's run() against a simple point-mass/attitude
+  # Euler-integration "plant" owned by the test itself.
+  ament_add_gtest(test_fsm_states
+    test/test_fsm_states.cpp
+  )
+  target_include_directories(test_fsm_states PRIVATE include)
+  target_link_libraries(test_fsm_states ${PROJECT_NAME})
+  ament_target_dependencies(test_fsm_states rclcpp hardware_interface)
 endif()
 
 ament_package()
