@@ -26,47 +26,36 @@ include_directories(include)
 # set(CMAKE_CUDA_ARCHITECTURES "72;75")
 # find_package(CUDAToolkit REQUIRED)
 
-# TODO(Phase 2): find osqp / osqp-eigen once the 12D Elastic Rhombic-Kern QP is implemented.
+# TODO(Phase 3.2+/KAMR-MPPI): find osqp / osqp-eigen once the 12D Elastic Rhombic-Kern QP is
+# implemented, and enable_language(CUDA) once outer_mppi_cuda/*.cu kernels are authored.
 # find_package(osqp REQUIRED)
 # find_package(OsqpEigen REQUIRED)
 
-# TODO(Phase 2): add real sources once implemented, e.g.:
-# add_library(${PROJECT_NAME} SHARED
-#   src/adhere_kamr_controller.cpp
-#   src/fsm_states/StateStationKeeping.cpp
-#   src/fsm_states/StateTrajectoryTracking.cpp
-#   src/inner_wbc/PlanarImpedancePD.cpp
-#   src/inner_wbc/PadForceDOB.cpp
-#   src/inner_wbc/RhombicKernQP.cpp
-#   src/outer_mppi_cuda/MppiRolloutThread.cpp
-#   src/outer_mppi_cuda/mppi_rollout_kernel.cu
-# )
-# target_include_directories(${PROJECT_NAME} PUBLIC
-#   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-#   $<INSTALL_INTERFACE:include>
-#   ${EIGEN3_INCLUDE_DIR}
-# )
-# target_link_libraries(${PROJECT_NAME}
-#   adhere_controller_common::adhere_controller_common
-#   OsqpEigen::OsqpEigen
-#   CUDA::cudart
-# )
-# ament_target_dependencies(${PROJECT_NAME}
-#   rclcpp
-#   rclcpp_lifecycle
-#   hardware_interface
-#   controller_interface
-#   pluginlib
-#   realtime_tools
-#   adhere_control_msgs
-# )
-# pluginlib_export_plugin_description_file(controller_interface adhere_kamr_controller.xml)
-#
-# install(TARGETS ${PROJECT_NAME}
-#   ARCHIVE DESTINATION lib
-#   LIBRARY DESTINATION lib
-#   RUNTIME DESTINATION bin
-# )
+add_library(${PROJECT_NAME} SHARED
+  src/adhere_kamr_controller.cpp
+)
+target_include_directories(${PROJECT_NAME} PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+  ${EIGEN3_INCLUDE_DIR}
+)
+ament_target_dependencies(${PROJECT_NAME}
+  rclcpp
+  rclcpp_lifecycle
+  hardware_interface
+  controller_interface
+  pluginlib
+  realtime_tools
+  adhere_control_msgs
+  adhere_controller_common
+)
+pluginlib_export_plugin_description_file(controller_interface adhere_kamr_controller.xml)
+
+install(TARGETS ${PROJECT_NAME}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
 
 install(DIRECTORY include/
   DESTINATION include

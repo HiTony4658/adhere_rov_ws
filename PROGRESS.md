@@ -1002,3 +1002,144 @@ MuJoCo 数据/指针安全、500Hz 数值稳定性），并对审计中确认的
   14 个文件上同样失败（每个文件均缺版权头，与本次改动无关），新增的
   `rhombic_kern.hpp`/`test_rhombic_kern_and_thruster_model.cpp` 仅复现
   同一"缺版权头"问题，未引入任何新增类别的风格问题，未处理。
+
+---
+
+## Phase 3.1（2026-10-17）：FSM 控制框架（`StatePassive`/`StateDepthHold`）、`AdhereKamrController` 插件、FSM 终端控制台
+
+### 目标
+
+在 Phase 2 验证过的 500Hz `AdhereMujocoHardware` 被动漂流物理闭环之上，首次闭合
+控制回路：搭建 `adhere_control_msgs`/`adhere_controller_common`/
+`adhere_kamr_controller`/`adhere_keyboard_input` 四个包协作的模块化 FSM 流水线
+（`StatePassive` 零输出安全态 + `StateDepthHold` 闭环 PID 定深），并提供交互式
+终端控制台用于运行时切换状态/更新定深目标。
+
+### 包 1：`src/interfaces/adhere_control_msgs`
+
+新增 `msg/FsmCommand.msg`（`std_msgs/Header header`；`int32 command` 常量
+`NO_CHANGE=0, PASSIVE=1, DEPTH_HOLD=2`；`float64 target_z, target_y, target_yaw`，
+后两者为未来平面站位保持/航向控制预留），`CMakeLists.txt` 新增对应的
+`rosidl_generate_interfaces()` 调用。
+
+### 包 2：`src/controllers/adhere_controller_common`
+
+- `common/enumClass.h`：`FSMStateName{INVALID, PASSIVE, DEPTH_HOLD}`、
+  `FSMMode{NORMAL, CHANGE}`。
+- `common/mathTypes.h`/`mathTools.h`：Eigen 类型别名（`Vec3/Vec6/Vec8/Mat68/
+  Mat86/RotMat`）与 `quatToRotMat`/`rotMatToRPY`（ZYX 欧拉角提取）/`saturation`。
+- `CtrlInterfaces.h`：`ControlInputs`（`command`/`target_z`/`target_y`/
+  `target_yaw` 均为 `std::atomic<T>`，供 ROS executor 线程写、500Hz 物理线程
+  无锁读）+ 固定顺序的 8 推力器指令/8 推力器状态/10 IMU/10 Odom/8 pad-contact
+  `LoanedCommandInterface`/`LoanedStateInterface` 引用容器。
+- `FSM/FSMState.h`：抽象基类（`enter()`/`run(time, period)`/`exit()`/
+  `checkChange()`），移植自 `quadruped_ros2_control` 设计但改用本项目自己的
+  `CtrlInterfaces`/`FSMStateName`。
+- `FSM/StatePassive.{h,cpp}`：`enter()`/`run()` 均将 8 个推力器指令置零；
+  `checkChange()` 在 `command==2` 时迁移至 `DEPTH_HOLD`。
+- `FSM/StateDepthHold.{h,cpp}`：世界坐标系 Z 向 PID（`Kp=180, Ki=95, Kd=62`，
+  抗饱和积分钳位 `±180/95N`，测量值微分避免设定值突变时的微分冲击）+ 滚转/
+  俯仰/偏航姿态阻尼（`Kp_att=6, Kd_att=4`，纯阻尼/弱回正，因
+  `rov_wall.xml` 的切向推力器安装点 `X=0.0` 与质心 `X` 坐标重合、不存在
+  `CLAUDE.md` §5 所述 `X=-0.10m` 杠杆臂，故无需额外的寄生俯仰/偏航力矩补偿项）；
+  期望力矩经逐项从 `rov_wall.xml` 实际几何（角点 `(y,z)=(±0.25,±0.15)m`、法向
+  推力器 `gear="-1 0 0 0 0 0"`、切向推力器沿各自 `zaxis`）推导出的精确 `6x8`
+  刚体力/力矩分配矩阵 `B` 的 Moore-Penrose 伪逆（`Eigen::
+  CompleteOrthogonalDecomposition::pseudoInverse()`）映射到 8 个推力器指令，
+  逐分量钳位至 `[-40,40]N`。`integral_z_` 仅在 `enter()`（即
+  `PASSIVE -> DEPTH_HOLD` 迁移）清零，运行时更新 `target_z` 不触发 `enter()`，
+  故不重置积分器。
+- `CMakeLists.txt` 由 Phase 1 的全量注释占位改为真实构建
+  `adhere_controller_common` 共享库（`src/FSM/StatePassive.cpp` +
+  `src/FSM/StateDepthHold.cpp`），`ament_export_targets`/
+  `ament_export_libraries` 导出供 `adhere_kamr_controller` 消费。
+
+### 包 3：`src/controllers/adhere_kamr_controller`
+
+- `include/adhere_kamr_controller/adhere_kamr_controller.hpp` +
+  `src/adhere_kamr_controller.cpp`：`AdhereKamrController`
+  （`controller_interface::ControllerInterface` 插件，ROS 2 Foxy 精确签名：
+  `init(const std::string&)`、`update()` 无参、`on_configure/on_activate/
+  on_deactivate/on_cleanup/on_error/on_shutdown` 均为
+  `rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn`）。
+  `on_configure()` 订阅 `/rov/fsm_command`，原子写入 `ControlInputs`；
+  `on_activate()` 按固定全名（如 `thr_N1/effort`、`imu_sensor/orientation.w`、
+  `rov_odom/pos.x`、`pad_contact/pad_TL/force`）在 `command_interfaces_`/
+  `state_interfaces_` 中逐一查找装入 `CtrlInterfaces`（不假设
+  `controller_manager` 内部装配顺序等于请求顺序），默认启动于 `PASSIVE`；
+  `update()` 用 `get_node()->now()` 与上次调用时刻的差值得到实际 `period`
+  （而非假设恒定 `1/frequency_`），驱动 FSM 的 `run()`/`checkChange()`/
+  `enter()`/`exit()` 切换循环。
+- `adhere_kamr_controller.xml` 取消 Phase 1 的注释占位，正式导出插件。
+- `CMakeLists.txt` 由全量注释改为真实构建该插件库并
+  `pluginlib_export_plugin_description_file`；新增
+  `config/controllers.yaml`（`controller_manager` 参数服务器描述，供未来
+  spawner 式启动参考——当前编程式加载路径不读取它）。
+
+### 包 4：`src/commands/adhere_keyboard_input`
+
+新增 `src/fsm_console_node.cpp`：订阅 `/rov/odom` 在独立 executor 线程持续刷新
+显示的当前 Z，主线程阻塞 `std::cin` 读取菜单选择（`1`=`PASSIVE`，`2`=提示输入
+目标深度后发 `DEPTH_HOLD`，`q`=退出控制台），发布 `FsmCommand` 至
+`/rov/fsm_command`。`CMakeLists.txt` 新增 `fsm_console_node` 可执行目标。
+
+### 包 5：`src/hardwares/adhere_mujoco_hardware`（集成，非新增）
+
+- `adhere_mujoco_node.cpp`：在物理线程启动前调用
+  `controller_manager->load_controller(name, type)` + `configure_controller(name)`
+  加载/配置 `adhere_kamr_controller`；`switch_controller(...)`
+  （真正激活）则推迟到物理线程**启动之后**才调用。
+  **关键发现**：ROS 2 Foxy 的 `ControllerManager::switch_controller()` 会阻塞
+  等待下一次 `ControllerManager::update()` 真正执行切换（两阶段设计：
+  `switch_controller()` 只是登记待切换请求，`update()` 才实际调用
+  `on_activate()`/清除待切换标志）；若在任何线程开始调用 `update()` 之前就
+  调用 `switch_controller()`，默认的无限超时会导致永久死锁——本次实现中
+  最初把三步全部放在物理线程启动之前，复现了这个死锁（进程挂起、
+  `/rov/odom` 从不出现），之后通过把 `switch_controller()` 单独移到
+  `std::thread physics_thread(...)` 构造之后解决。
+- `launch/mujoco_sim.launch.py`：新增 `spawn_fsm_console`（默认 `true`）
+  launch 参数，用 `ExecuteProcess` + `bash -c` 探测 `gnome-terminal`/`xterm`
+  （均不存在时打印手动运行提示而非让整个 launch 失败）自动弹出
+  `fsm_console_node` 终端窗口。
+- `package.xml` 新增 `controller_manager_msgs`（`depend`，
+  `SwitchController::Request::STRICT` 常量）、`adhere_kamr_controller`/
+  `adhere_keyboard_input`（`exec_depend`，运行时通过 pluginlib ament-index
+  插件清单发现/通过 `ros2 run` 启动，非头文件/链接依赖，不构成与
+  `adhere_mujoco_hardware` 的构建环）。
+
+### 推力分配矩阵 `B` 的推导（`StateDepthHold.cpp`）
+
+`rov_wall.xml` 的 8 个推力器全部安装在 `X=0.0`（与质心 `X` 坐标相同，无杠杆臂），
+4 个角点 `(y,z) ∈ {(0.25,0.15),(-0.25,0.15),(0.25,-0.15),(-0.25,-0.15)}`：
+法向推力器（`thr_N1..N4`，方向 `-X_B`）贡献 `Fx=-u, Ty=-z*u, Tz=y*u`；切向推力器
+（`thr_T5..T8`，方向沿各自 `zaxis` 在 Y-Z 平面内 `±cos30°/±sin30°`）贡献
+`Fy=dy*u, Fz=dz*u, Tx=(y*dz-z*dy)*u`（`Ty=Tz=0`，因杠杆臂的 `X` 分量为零）。
+`rank(B)=6 < 8` 列，欠定系统的最小范数（伪逆）解在无饱和时精确复现期望的
+6 维力/力矩，不存在结构性稳态残差。
+
+### 闭环验证结果
+
+`colcon build --symlink-install`（全部 6 个包）与隔离式
+`colcon build --packages-select <pkg>`（逐包）均 **零警告零错误**。
+`colcon test --packages-select adhere_mujoco_hardware` 的两个 `gtest` 目标
+**35/35 全部通过**，对本阶段改动（`adhere_mujoco_node.cpp`/
+`CMakeLists.txt`/`package.xml`）零回归（既有 style-lint 失败——`copyright`/
+`cpplint`/`flake8`/`pep257`/`uncrustify`——是 Phase 2.14 已记录的"缺版权头"
+预先存在问题，与本阶段改动无关）。
+
+用 `rclpy` 脚本化驱动 `ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py
+headless:=true use_rviz:=false spawn_fsm_console:=false` 跑完整 FSM 生命周期
+（经过 `Kp_z=180, Ki_z=95, Kd_z=62` 的增益整定，初版 `Kp_z=120, Ki_z=15,
+Kd_z=55` 在 6s 窗口内收敛至 25-30mm 残差，不满足 `<5mm` 契约，提升积分增益后
+达标）：
+
+| 阶段 | 目标 | 耗时 | 终值 `z` | 残差 |
+|---|---|---|---|---|
+| `PASSIVE`（默认启动） | 自由漂流 | 2s | 单调上升（净浮力驱动） | — |
+| `DEPTH_HOLD` | `z_des=0.40m` | 6s | `0.3970m` | `3.0mm` ✅ `<5mm` |
+| `DEPTH_HOLD`（运行时重定目标，同一状态不重置积分器） | `z_des=0.75m` | 6s | `0.7539m` | `3.9mm` ✅ `<5mm` |
+| `PASSIVE`（切回） | 自由漂流 | 2s | 恢复单调上升 | — |
+
+`fsm_console_node` 手动交互测试（管道注入 `1`/`2`+深度值/`q`）确认菜单渲染、
+`Current Z` 实时刷新（ROS 2 发现延迟后的首次 `/rov/odom` 到达，数秒量级，
+符合预期）、`FsmCommand` 发布三条路径均正确工作。

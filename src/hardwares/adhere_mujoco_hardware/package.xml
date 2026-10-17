@@ -21,6 +21,7 @@
   <depend>rclcpp_lifecycle</depend>
   <depend>hardware_interface</depend>
   <depend>controller_manager</depend>
+  <depend>controller_manager_msgs</depend>
   <depend>pluginlib</depend>
   <depend>realtime_tools</depend>
   <!-- simplified_v1_description is read at runtime (ament_index_cpp::get_package_share_
@@ -38,6 +39,12 @@
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>rviz2</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
+  <!-- adhere_mujoco_node load_controller()'s at runtime by plugin class name, discovered via
+       pluginlib's ament-index plugin manifest (no header/link dependency), so this is a
+       one-directional exec_depend (not a build-order cycle: adhere_kamr_controller declares no
+       dependency back on this package). -->
+  <exec_depend>adhere_kamr_controller</exec_depend>
+  <exec_depend>adhere_keyboard_input</exec_depend>
 
   <!-- MuJoCo (libmujoco) and GLFW3/OpenGL are located manually in CMakeLists.txt
        (no official find_package(mujoco) config is assumed); they are not declared here

@@ -14,6 +14,7 @@ find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(controller_manager REQUIRED)
+find_package(controller_manager_msgs REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(realtime_tools REQUIRED)
 find_package(tf2_ros REQUIRED)
@@ -96,6 +97,7 @@ ament_target_dependencies(adhere_mujoco_node
   rclcpp
   hardware_interface
   controller_manager
+  controller_manager_msgs
   tf2_ros
   nav_msgs
   sensor_msgs

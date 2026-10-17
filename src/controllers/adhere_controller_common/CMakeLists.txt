@@ -19,37 +19,33 @@ find_package(adhere_control_msgs REQUIRED)
 
 include_directories(include)
 
-# TODO(Phase 2): add real sources once implemented, e.g.:
-# add_library(${PROJECT_NAME} SHARED
-#   src/CtrlInterfaces.cpp
-#   src/FSM/FSMState.cpp
-#   src/FSM/StatePassive.cpp
-#   src/FSM/StatePreloadAttach.cpp
-#   src/FSM/StateEmergencyDetach.cpp
-#   src/common/mathTypes.cpp
-#   src/common/mathTools.cpp
-#   src/hydrodynamics/FossenHydrodynamics.cpp
-# )
-# target_include_directories(${PROJECT_NAME} PUBLIC
-#   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-#   $<INSTALL_INTERFACE:include>
-#   ${EIGEN3_INCLUDE_DIR}
-# )
-# ament_target_dependencies(${PROJECT_NAME}
-#   rclcpp
-#   rclcpp_lifecycle
-#   hardware_interface
-#   controller_interface
-#   realtime_tools
-#   adhere_control_msgs
-# )
-# install(TARGETS ${PROJECT_NAME}
-#   EXPORT export_${PROJECT_NAME}
-#   ARCHIVE DESTINATION lib
-#   LIBRARY DESTINATION lib
-#   RUNTIME DESTINATION bin
-# )
-# ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
+# TODO(Phase 3.2+): add FossenHydrodynamics relocation + PreloadAttach/EmergencyDetach states
+# once those milestones land; StatePassive/StateDepthHold are the Phase 3.1 FSM states.
+add_library(${PROJECT_NAME} SHARED
+  src/FSM/StatePassive.cpp
+  src/FSM/StateDepthHold.cpp
+)
+target_include_directories(${PROJECT_NAME} PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+  ${EIGEN3_INCLUDE_DIR}
+)
+ament_target_dependencies(${PROJECT_NAME}
+  rclcpp
+  rclcpp_lifecycle
+  hardware_interface
+  controller_interface
+  realtime_tools
+  adhere_control_msgs
+)
+install(TARGETS ${PROJECT_NAME}
+  EXPORT export_${PROJECT_NAME}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
+ament_export_libraries(${PROJECT_NAME})
 
 install(DIRECTORY include/
   DESTINATION include

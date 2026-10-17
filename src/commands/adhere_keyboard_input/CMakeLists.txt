@@ -12,23 +12,25 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(adhere_control_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 
 include_directories(include)
 
-# TODO(Phase 2): add real executable once implemented, e.g.:
-# add_executable(${PROJECT_NAME}_node src/keyboard_input_node.cpp)
-# target_include_directories(${PROJECT_NAME}_node PUBLIC
-#   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-#   $<INSTALL_INTERFACE:include>
-# )
-# ament_target_dependencies(${PROJECT_NAME}_node
-#   rclcpp
-#   adhere_control_msgs
-#   geometry_msgs
-# )
-# install(TARGETS ${PROJECT_NAME}_node
-#   DESTINATION lib/${PROJECT_NAME}
-# )
+# TODO(Phase 3.2+): add the benchmark-trigger/teleop executable once station-keeping and
+# trajectory-tracking targets + gust injection are implemented.
+add_executable(fsm_console_node src/fsm_console_node.cpp)
+target_include_directories(fsm_console_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+ament_target_dependencies(fsm_console_node
+  rclcpp
+  adhere_control_msgs
+  nav_msgs
+)
+install(TARGETS fsm_console_node
+  DESTINATION lib/${PROJECT_NAME}
+)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "controller_manager/controller_manager.hpp"
+#include "controller_manager_msgs/srv/switch_controller.hpp"
 #include "hardware_interface/resource_manager.hpp"
 
 #include "adhere_mujoco_hardware/adhere_mujoco_hardware.hpp"
@@ -144,6 +145,30 @@ int main(int argc, char ** argv)
     std::move(resource_manager), executor, "controller_manager");
   executor->add_node(controller_manager);
   executor->add_node(node);
+
+  // Programmatic load/configure/activate (CLAUDE.md Phase 3.1 Stage 2.3): the (name, type)
+  // load_controller() overload reads the plugin type straight from this call rather than from
+  // the parameter server, so launching mujoco_sim.launch.py always brings up
+  // adhere_kamr_controller in its default FSM state (PASSIVE) with no controllers.yaml param
+  // file required. The library itself is discovered via pluginlib's ament-index plugin
+  // manifest at runtime (adhere_kamr_controller.xml), not by linking against it here.
+  if (!controller_manager->load_controller(
+        "adhere_kamr_controller", "adhere_kamr_controller/AdhereKamrController")) {
+    RCLCPP_FATAL(node->get_logger(), "Failed to load adhere_kamr_controller");
+    rclcpp::shutdown();
+    return 1;
+  }
+  if (controller_manager->configure_controller("adhere_kamr_controller") !=
+      controller_interface::return_type::OK) {
+    RCLCPP_FATAL(node->get_logger(), "Failed to configure adhere_kamr_controller");
+    rclcpp::shutdown();
+    return 1;
+  }
+  // switch_controller() itself is deferred until AFTER the physics thread starts (below): Foxy's
+  // ControllerManager::switch_controller() busy-waits for the pending switch to be APPLIED,
+  // which only happens inside a subsequent ControllerManager::update() call -- calling it here,
+  // before any thread is calling update(), would deadlock forever on the infinite default
+  // timeout.
 
   auto tf_broadcaster = std::make_shared<tf2_ros::TransformBroadcaster>(node);
   auto odom_pub = node->create_publisher<nav_msgs::msg::Odometry>("/rov/odom", 10);
@@ -345,6 +370,21 @@ int main(int argc, char ** argv)
       }
     }
   });
+
+  // Now that physics_thread is concurrently calling controller_manager->update() every tick,
+  // switch_controller()'s busy-wait for the pending switch to be applied resolves quickly
+  // (CLAUDE.md Phase 3.1 Stage 2.3): launching mujoco_sim.launch.py always brings up
+  // adhere_kamr_controller active and in its default FSM state (PASSIVE).
+  if (controller_manager->switch_controller(
+        {"adhere_kamr_controller"}, {},
+        controller_manager_msgs::srv::SwitchController::Request::STRICT, true) !=
+      controller_interface::return_type::OK) {
+    RCLCPP_FATAL(node->get_logger(), "Failed to activate adhere_kamr_controller");
+    physics_running = false;
+    physics_thread.join();
+    rclcpp::shutdown();
+    return 1;
+  }
 
   executor->spin();
 

@@ -179,13 +179,16 @@ source install/setup.bash
 # 3a. 静态几何检视（RobotModel + TF，无物理仿真）
 ros2 launch simplified_v1_description visualize.launch.py
 
-# 3b. 零控制输入（u=0）被动随波漂流仿真，MuJoCo 窗口 + RViz2 双可视化同步
-# 默认静水启动，并自动弹出造浪机控制台终端（输入 1/2 可在运行时随时切换静水/造浪）
+# 3b. 完整 FSM 闭环仿真：AdhereKamrController 自动加载/配置/激活（默认 PASSIVE 态），
+# MuJoCo 窗口 + RViz2 双可视化同步，并自动弹出 FSM 终端控制台（输入 1 切 PASSIVE、
+# 输入 2 并指定目标深度切 DEPTH_HOLD 做闭环定深）
 ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py
 ```
 
-各命令的完整参数说明见 [`src/descriptions/simplified_v1_description/README.md`](src/descriptions/simplified_v1_description/README.md)
-与 [`src/hardwares/adhere_mujoco_hardware/README.md`](src/hardwares/adhere_mujoco_hardware/README.md)。
+各命令的完整参数说明见 [`src/descriptions/simplified_v1_description/README.md`](src/descriptions/simplified_v1_description/README.md)、
+[`src/hardwares/adhere_mujoco_hardware/README.md`](src/hardwares/adhere_mujoco_hardware/README.md)
+与 [`src/commands/adhere_keyboard_input/README.md`](src/commands/adhere_keyboard_input/README.md)
+（FSM 终端控制台用法）。
 
 ---
 
@@ -194,8 +197,8 @@ ros2 launch adhere_mujoco_hardware mujoco_sim.launch.py
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | **Phase 1** | 工作空间骨架、6 个包清单、全量中文 README | ✅ 完成 |
-| **Phase 2** | `AdhereMujocoHardware` 500Hz 读写循环 + Fossen 水动力 + 可插拔水流环境 + `MujocoViewer`/RViz2 双可视化 | ✅ 当前阶段 |
-| **Phase 3** | `adhere_controller_common`（`CtrlInterfaces`/FSM/数学工具）实现 | 待开始 |
+| **Phase 2** | `AdhereMujocoHardware` 500Hz 读写循环 + Fossen 水动力 + 可插拔水流环境 + `MujocoViewer`/RViz2 双可视化 | ✅ 完成 |
+| **Phase 3.1** | `adhere_controller_common`（`CtrlInterfaces`/FSM/数学工具）+ `PASSIVE`/`DEPTH_HOLD` 两态 + `AdhereKamrController` 插件 + FSM 终端控制台 | ✅ 当前阶段 |
 | **Phase 4** | `AdhereKamrController` 200Hz 内环（PD + DOB + 12D OSQP） | 待开始 |
 | **Phase 5** | 20Hz 异步 CUDA MPPI 外环滚动线程（`sm_72`/`sm_75` 双架构） | 待开始 |
 | **Phase 6** | 与 Python/JAX 基准（`mujoco_mppi_ws`）数值对齐验证 + 论文实验复现 | 待开始 |

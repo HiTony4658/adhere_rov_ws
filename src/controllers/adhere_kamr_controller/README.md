@@ -3,17 +3,51 @@
 ## 职责
 
 `AdhereKamrController` 是 `controller_interface::ControllerInterface` 的
-`pluginlib` 插件，承载 `KAMR-MPPI`（`pr_wbc_mppi_v4`）算法的完整实现：FSM 管理、
-200Hz 内环（Planar Impedance PD + Pad-Force DOB + 12D Elastic Rhombic-Kern OSQP）、
-20Hz 异步 CUDA MPPI 外环。详见
+`pluginlib` 插件。当前（Phase 3.1）承载 FSM 管理本身：`PASSIVE`/`DEPTH_HOLD`
+两个状态（实现于 `adhere_controller_common`，本包只负责生命周期管理、接口装配
+与状态切换）。未来阶段将在本包内继续承载 `KAMR-MPPI`（`pr_wbc_mppi_v4`）算法的
+完整实现：200Hz 内环（Planar Impedance PD + Pad-Force DOB + 12D Elastic
+Rhombic-Kern OSQP）、20Hz 异步 CUDA MPPI 外环（见下方"未来 KAMR-MPPI 数学契约"
+各节，这些是尚未实现的设计契约，不是已完成的功能）。详见
 [`src/controllers/README.md`](../README.md) 中与 `adhere_controller_common` 的
 职责划分表。
+
+## 当前实现（Phase 3.1）
+
+```text
+include/adhere_kamr_controller/
+├── adhere_kamr_controller.hpp     # AdhereKamrController 声明
+├── fsm_states/                    # 占位：未来 StateStationKeeping/StateTrajectoryTracking
+├── inner_wbc/                     # 占位：未来 PlanarImpedancePD/PadForceDOB/RhombicKernQP
+└── outer_mppi_cuda/                # 占位：未来 MppiRolloutThread/mppi_rollout_kernel
+
+src/adhere_kamr_controller.cpp      # 生命周期方法 + FSM 切换逻辑 + pluginlib 导出
+config/controllers.yaml             # controller_manager 参数服务器描述（文档用途，见下）
+```
+
+`AdhereKamrController` 持有 `adhere_controller_common::CtrlInterfaces`，在
+`on_configure()` 中订阅 `/rov/fsm_command`（`adhere_control_msgs::msg::FsmCommand`），
+在 `on_activate()` 中按固定名称（如 `thr_N1/effort`、`imu_sensor/orientation.w`、
+`rov_odom/pos.x`、`pad_contact/pad_TL/force`）从 `command_interfaces_`/
+`state_interfaces_` 中逐一查找并装入 `CtrlInterfaces` 的对应插槽（不依赖
+`controller_manager` 内部装配顺序与请求顺序一致这一假设）。默认在 `PASSIVE`
+态启动。`update()` 每次调用时，通过 `get_node()->now()` 与上一次调用时刻的差值
+计算实际 `period`，再转发给当前 `FSMState::run()`。
+
+`adhere_mujoco_node.cpp` 以编程方式调用
+`controller_manager->load_controller(name, type)` /
+`configure_controller(name)` / `switch_controller(...)` 完成本控制器的加载/
+配置/激活，不依赖 `controllers.yaml` 的参数服务器查找路径（该 YAML 文件仅作为
+未来 `spawner` 式启动方式的文档参考）。`switch_controller()` 在 Foxy 下会
+阻塞等待下一次 `ControllerManager::update()` 真正执行切换，因此该调用被安排在
+500Hz 物理线程启动**之后**，避免与尚未开始调用 `update()` 的早期阶段死锁。
+
+## 未来 KAMR-MPPI 数学契约（Phase 1/5 设计冻结文档，尚未实现）
 
 ## 类与文件规划
 
 ```text
 include/adhere_kamr_controller/
-├── adhere_kamr_controller.hpp
 ├── fsm_states/
 │   ├── StateStationKeeping.hpp
 │   └── StateTrajectoryTracking.hpp
@@ -26,7 +60,6 @@ include/adhere_kamr_controller/
     └── mppi_rollout_kernel.cuh    # CUDA kernel 声明
 
 src/
-├── adhere_kamr_controller.cpp
 ├── fsm_states/
 │   ├── StateStationKeeping.cpp
 │   └── StateTrajectoryTracking.cpp
@@ -183,8 +216,9 @@ set(CMAKE_CUDA_ARCHITECTURES "72;75")   # sm_72 = Jetson AGX Xavier, sm_75 = Qua
 - 外环求解延迟 `< 30 ms` 目标，若超过 50ms 窗口未完成，内环沿用上一次有效
   `w_cmd`（图优雅降级，不阻塞实时线程）。
 
-## Phase 1 状态
+## 尚未实现部分的当前状态
 
-仅搭建 `include/adhere_kamr_controller/{fsm_states,inner_wbc,outer_mppi_cuda}/`
-与 `src/`、`config/`、`launch/` 目录骨架；`CMakeLists.txt` 中 OSQP/CUDA 依赖发现
-与构建目标以 `# TODO(Phase 2)`/`# TODO(Phase 4/5)` 注释占位。
+`include/adhere_kamr_controller/{fsm_states,inner_wbc,outer_mppi_cuda}/` 与
+`launch/` 目前仍是目录骨架；`CMakeLists.txt` 中 OSQP/CUDA 依赖发现与对应构建
+目标以 `# TODO(Phase 3.2+/KAMR-MPPI)` 注释占位，待 200Hz 内环/20Hz 外环里程碑
+启动时再实现。

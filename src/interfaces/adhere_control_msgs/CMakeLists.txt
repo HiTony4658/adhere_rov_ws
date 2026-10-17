@@ -11,21 +11,13 @@ find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 
-# TODO(Phase 2): populate msg/ and srv/ with the real .msg / .srv definitions
-# (FsmCommand.msg, TargetPose.msg, TargetTrajectory.msg, KamrMppiTelemetry.msg,
-#  RhombicKernMetrics.msg, PadContactState.msg, SwitchFsmState.srv) and list
-# them here, e.g.:
-#
-# rosidl_generate_interfaces(${PROJECT_NAME}
-#   "msg/FsmCommand.msg"
-#   "msg/TargetPose.msg"
-#   "msg/TargetTrajectory.msg"
-#   "msg/KamrMppiTelemetry.msg"
-#   "msg/RhombicKernMetrics.msg"
-#   "msg/PadContactState.msg"
-#   "srv/SwitchFsmState.srv"
-#   DEPENDENCIES std_msgs geometry_msgs builtin_interfaces
-# )
+# TODO(Phase 3.2+): populate msg/ and srv/ with the remaining real .msg / .srv definitions
+# (TargetPose.msg, TargetTrajectory.msg, KamrMppiTelemetry.msg, RhombicKernMetrics.msg,
+#  PadContactState.msg, SwitchFsmState.srv) and list them here alongside FsmCommand.msg.
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/FsmCommand.msg"
+  DEPENDENCIES std_msgs
+)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
