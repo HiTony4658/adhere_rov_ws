@@ -18,8 +18,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/FsmCommand.msg"
   "msg/SetpointCommand.msg"
   "msg/TeleopCommand.msg"
-  "msg/FsmState.msg"
-  DEPENDENCIES std_msgs
+  "msg/ControllerState.msg"
+  "msg/RuntimeDiagnostics.msg"
+  DEPENDENCIES std_msgs geometry_msgs
 )
 
 if(BUILD_TESTING)

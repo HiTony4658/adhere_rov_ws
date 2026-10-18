@@ -119,28 +119,9 @@ public:
   Vec3 rpy() const { return rotMatToRPY(quatToRotMat(q_hat_)); }
 
 private:
-  static Quat quatMul(const Quat & a, const Quat & b)
-  {
-    Quat out;
-    out(0) = a(0) * b(0) - a(1) * b(1) - a(2) * b(2) - a(3) * b(3);
-    out(1) = a(0) * b(1) + a(1) * b(0) + a(2) * b(3) - a(3) * b(2);
-    out(2) = a(0) * b(2) - a(1) * b(3) + a(2) * b(0) + a(3) * b(1);
-    out(3) = a(0) * b(3) + a(1) * b(2) - a(2) * b(1) + a(3) * b(0);
-    return out;
-  }
-
-  static Quat normalizeQuat(const Quat & q)
-  {
-    const double n = q.norm();
-    return n > 1e-12 ? (q / n).eval() : Quat(1.0, 0.0, 0.0, 0.0);
-  }
-
-  static Quat smallAngleQuat(const Vec3 & theta)
-  {
-    Quat dq;
-    dq << 1.0, 0.5 * theta.x(), 0.5 * theta.y(), 0.5 * theta.z();
-    return normalizeQuat(dq);
-  }
+  // quatMul/normalizeQuat/smallAngleQuat now live in mathTools.h (Phase 3.6: hoisted out of here
+  // so StatePidHold's quaternion setpoint integration can reuse the exact same math instead of
+  // duplicating it).
 
   // Fixed correction gains (see class-level design note): analytically chosen from the
   // CLAUDE.md Stage 2.1 noise std values via the EMA steady-state-variance formula, verified

@@ -17,6 +17,7 @@
 
   <depend>rclcpp</depend>
   <depend>adhere_control_msgs</depend>
+  <depend>geometry_msgs</depend>
   <depend>sensor_msgs</depend>
 
   <!-- Runtime-only: xbox_teleop_node consumes sensor_msgs/msg/Joy published by the official

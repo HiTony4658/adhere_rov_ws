@@ -49,8 +49,11 @@ void StateDepthHold::run(const rclcpp::Time & /*time*/, const rclcpp::Duration &
   const uint64_t seq = ci.setpoint_seq.load();
   if (seq != last_seen_setpoint_seq_) {
     last_seen_setpoint_seq_ = seq;
-    if (ci.setpoint_mode.load() == 2) {
-      target_z_ = ci.setpoint_lock_current_pose.load() ? pos_z : ci.setpoint_target_z.load();
+    const uint8_t cmd_type = ci.setpoint_command_type.load();
+    if (cmd_type == 1 /* MODE_DEPTH_ONLY */) {
+      target_z_ = ci.setpoint_target_pos_z.load();
+    } else if (cmd_type == 3 /* MODE_LOCK_CURRENT */) {
+      target_z_ = pos_z;
     }
   }
 
@@ -98,9 +101,11 @@ FSMStateName StateDepthHold::checkChange()
   return checkFsmCommandChange();
 }
 
-std::array<double, 6> StateDepthHold::targetPose() const
+PoseTarget StateDepthHold::targetPose() const
 {
-  return {0.0, 0.0, target_z_, 0.0, 0.0, 0.0};
+  PoseTarget t;
+  t.pos = Vec3(0.0, 0.0, target_z_);
+  return t;
 }
 
 }  // namespace adhere_controller

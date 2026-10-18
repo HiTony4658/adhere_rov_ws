@@ -149,12 +149,14 @@ CallbackReturn AdhereController::on_configure(const rclcpp_lifecycle::State & /*
       "/rov/setpoint_cmd", 10,
       [this](const adhere_control_msgs::msg::SetpointCommand::SharedPtr msg) {
         auto & ci = ctrl_interfaces_.control_inputs_;
-        ci.setpoint_mode.store(msg->mode);
-        ci.setpoint_lock_current_pose.store(msg->lock_current_pose);
-        ci.setpoint_target_x.store(msg->target_x);
-        ci.setpoint_target_y.store(msg->target_y);
-        ci.setpoint_target_z.store(msg->target_z);
-        ci.setpoint_target_yaw.store(msg->target_yaw);
+        ci.setpoint_command_type.store(msg->command_type);
+        ci.setpoint_target_pos_x.store(msg->target_pose.position.x);
+        ci.setpoint_target_pos_y.store(msg->target_pose.position.y);
+        ci.setpoint_target_pos_z.store(msg->target_pose.position.z);
+        ci.setpoint_target_quat_w.store(msg->target_pose.orientation.w);
+        ci.setpoint_target_quat_x.store(msg->target_pose.orientation.x);
+        ci.setpoint_target_quat_y.store(msg->target_pose.orientation.y);
+        ci.setpoint_target_quat_z.store(msg->target_pose.orientation.z);
         // Bumped last (CLAUDE.md Phase 3.2 Stage 2.1's edge-detection contract): any FSMState
         // polling setpoint_seq only ever observes it change once every field above is already
         // up to date, never a half-written setpoint.
@@ -166,16 +168,18 @@ CallbackReturn AdhereController::on_configure(const rclcpp_lifecycle::State & /*
       "/rov/teleop_cmd", 10,
       [this](const adhere_control_msgs::msg::TeleopCommand::SharedPtr msg) {
         auto & ci = ctrl_interfaces_.control_inputs_;
-        ci.teleop_surge_x.store(msg->surge_x);
-        ci.teleop_sway_y.store(msg->sway_y);
-        ci.teleop_heave_z.store(msg->heave_z);
-        ci.teleop_yaw_rate.store(msg->yaw_rate);
+        ci.teleop_surge_x.store(msg->linear.x);
+        ci.teleop_sway_y.store(msg->linear.y);
+        ci.teleop_heave_z.store(msg->linear.z);
+        ci.teleop_roll_rate.store(msg->angular.x);
+        ci.teleop_pitch_rate.store(msg->angular.y);
+        ci.teleop_yaw_rate.store(msg->angular.z);
         ci.teleop_active.store(msg->active);
         ci.teleop_last_rx_time_sec.store(get_node()->now().seconds());
       });
 
-  fsm_state_publisher_ =
-    get_node()->create_publisher<adhere_control_msgs::msg::FsmState>("/rov/fsm_state", 10);
+  controller_state_publisher_ = get_node()->create_publisher<adhere_control_msgs::msg::ControllerState>(
+    "/rov/controller_state", 10);
 
   // Uniform integer-ratio multi-rate parameters (CLAUDE.md Phase 3.1.1 Stage 2.1), read here
   // (rather than on_activate()) so robot_control.yaml's adhere_controller.ros__parameters
@@ -321,11 +325,12 @@ controller_interface::return_type AdhereController::update()
 
   const rclcpp::Time time = get_node()->now();
 
-  // --- Phase 3.5: 500Hz dual state-acquisition, every physics tick, ahead of the inner-loop
-  // gate (CLAUDE.md Stage 2.2/2.3). Ground truth is read here purely for FsmState::
-  // ground_truth_pose evaluation (and for "ground_truth" mode's active_state copy) -- it is
-  // NEVER itself assigned into ctrl_interfaces_.active_state while in "sensor_fusion" mode, so
-  // no FSMState ever observes it.
+  // --- Phase 3.5/3.6: 500Hz dual state-acquisition, every physics tick, ahead of the inner-loop
+  // gate (CLAUDE.md Stage 2.2/2.3). Ground truth is read here purely to seed/compare against
+  // RovStateEstimator and to populate "ground_truth" mode's active_state copy (Phase 3.6: no
+  // longer published by this controller at all -- /rov/ground_truth_odom is adhere_mujoco_node's
+  // job) -- it is NEVER itself assigned into ctrl_interfaces_.active_state while in
+  // "sensor_fusion" mode, so no FSMState ever observes it.
   const Vec3 gt_pos(
     gt_odom_state_interface_[0].get().get_value(), gt_odom_state_interface_[1].get().get_value(),
     gt_odom_state_interface_[2].get().get_value());
@@ -338,7 +343,6 @@ controller_interface::return_type AdhereController::update()
   const Vec3 gt_omega_body(
     gt_imu_state_interface_[4].get().get_value(), gt_imu_state_interface_[5].get().get_value(),
     gt_imu_state_interface_[6].get().get_value());
-  const Vec3 gt_rpy = rotMatToRPY(quatToRotMat(gt_quat));
 
   if (model_params_.estimation_mode == "sensor_fusion") {
     if (!estimator_initialized_) {
@@ -373,12 +377,16 @@ controller_interface::return_type AdhereController::update()
     const Vec3 est_pos = estimator_.positionWorld();
     const Vec3 est_vel = estimator_.velocityBody();
     const Vec3 est_omega = estimator_.angularVelocityBody();
+    const Quat est_quat = estimator_.orientation();
     const Vec3 est_rpy = estimator_.rpy();
     for (int i = 0; i < 3; ++i) {
       ctrl_interfaces_.active_state.pos_w[i] = est_pos(i);
       ctrl_interfaces_.active_state.rpy[i] = est_rpy(i);
       ctrl_interfaces_.active_state.vel_body[i] = est_vel(i);
       ctrl_interfaces_.active_state.omega_body[i] = est_omega(i);
+    }
+    for (int i = 0; i < 4; ++i) {
+      ctrl_interfaces_.active_state.quat_w[i] = est_quat(i);
     }
     for (size_t i = 0; i < kPadNames.size(); ++i) {
       ctrl_interfaces_.active_state.pad_force[i] = noisy_loadcell_state_interface_[i].get().get_value();
@@ -388,11 +396,15 @@ controller_interface::return_type AdhereController::update()
     }
   } else {
     estimator_initialized_ = false;
+    const Vec3 gt_rpy = rotMatToRPY(quatToRotMat(gt_quat));
     for (int i = 0; i < 3; ++i) {
       ctrl_interfaces_.active_state.pos_w[i] = gt_pos(i);
       ctrl_interfaces_.active_state.rpy[i] = gt_rpy(i);
       ctrl_interfaces_.active_state.vel_body[i] = gt_vel_body(i);
       ctrl_interfaces_.active_state.omega_body[i] = gt_omega_body(i);
+    }
+    for (int i = 0; i < 4; ++i) {
+      ctrl_interfaces_.active_state.quat_w[i] = gt_quat(i);
     }
     for (size_t i = 0; i < kPadNames.size(); ++i) {
       ctrl_interfaces_.active_state.pad_force[i] = gt_pad_contact_state_interface_[i].get().get_value();
@@ -437,27 +449,51 @@ controller_interface::return_type AdhereController::update()
     // here so the uniform timing contract itself is already wired and verifiable (see
     // adhere_controller's test_multirate_decimator).
 
-    // Live terminal feedback (CLAUDE.md Phase 3.2 Stage 2.1's FsmState.msg): published here
-    // (not gated on tick.inner_due) so fsm_console_node/state_cmd_console_node see live
-    // actual_pose/target_pose at the outer-loop rate regardless of which inner-loop state is
-    // active.
-    adhere_control_msgs::msg::FsmState fsm_state_msg;
-    fsm_state_msg.header.stamp = time;
-    fsm_state_msg.current_state = fsmStateNameToInt(current_state_->state_name);
-    fsm_state_msg.state_name = current_state_->state_name_string;
-    fsm_state_msg.estimation_mode = model_params_.estimation_mode;
+    // Live terminal feedback (CLAUDE.md Phase 3.6's ControllerState.msg, 100% Sim-to-Real pure
+    // -- no ground truth here at all): published here (not gated on tick.inner_due) so
+    // fsm_console_node/state_cmd_console_node see live estimated_pose/target_pose at the
+    // outer-loop rate regardless of which inner-loop state is active.
+    adhere_control_msgs::msg::ControllerState controller_state_msg;
+    controller_state_msg.header.stamp = time;
+    controller_state_msg.current_state = fsmStateNameToInt(current_state_->state_name);
+    controller_state_msg.state_name = current_state_->state_name_string;
+    controller_state_msg.estimation_mode = model_params_.estimation_mode;
 
-    const auto target_pose = current_state_->targetPose();
-    std::copy(target_pose.begin(), target_pose.end(), fsm_state_msg.target_pose.begin());
+    const auto target = current_state_->targetPose();
+    controller_state_msg.target_pose.position.x = target.pos.x();
+    controller_state_msg.target_pose.position.y = target.pos.y();
+    controller_state_msg.target_pose.position.z = target.pos.z();
+    controller_state_msg.target_pose.orientation.w = target.quat(0);
+    controller_state_msg.target_pose.orientation.x = target.quat(1);
+    controller_state_msg.target_pose.orientation.y = target.quat(2);
+    controller_state_msg.target_pose.orientation.z = target.quat(3);
 
     const auto & active = ctrl_interfaces_.active_state;
-    fsm_state_msg.estimated_pose = {
-      active.pos_w[0], active.pos_w[1], active.pos_w[2],
-      active.rpy[0], active.rpy[1], active.rpy[2]};
-    fsm_state_msg.ground_truth_pose = {
-      gt_pos.x(), gt_pos.y(), gt_pos.z(), gt_rpy(0), gt_rpy(1), gt_rpy(2)};
+    controller_state_msg.estimated_pose.position.x = active.pos_w[0];
+    controller_state_msg.estimated_pose.position.y = active.pos_w[1];
+    controller_state_msg.estimated_pose.position.z = active.pos_w[2];
+    controller_state_msg.estimated_pose.orientation.w = active.quat_w[0];
+    controller_state_msg.estimated_pose.orientation.x = active.quat_w[1];
+    controller_state_msg.estimated_pose.orientation.y = active.quat_w[2];
+    controller_state_msg.estimated_pose.orientation.z = active.quat_w[3];
+    controller_state_msg.estimated_twist_body.linear.x = active.vel_body[0];
+    controller_state_msg.estimated_twist_body.linear.y = active.vel_body[1];
+    controller_state_msg.estimated_twist_body.linear.z = active.vel_body[2];
+    controller_state_msg.estimated_twist_body.angular.x = active.omega_body[0];
+    controller_state_msg.estimated_twist_body.angular.y = active.omega_body[1];
+    controller_state_msg.estimated_twist_body.angular.z = active.omega_body[2];
+    for (int i = 0; i < 4; ++i) {
+      controller_state_msg.contact_forces[i] = active.pad_force[i];
+    }
+    for (int i = 0; i < 8; ++i) {
+      controller_state_msg.thruster_cmds[i] =
+        ctrl_interfaces_.thruster_state_interface_[i].get().get_value();
+    }
+    // kern_margin (Rhombic Kern safety margin, CLAUDE.md Sec.4.4) requires the A_contact/C_kern
+    // precompute landing in Phase 3.6.3's ThrusterAllocator extension -- placeholder until then.
+    controller_state_msg.kern_margin = 0.0;
 
-    fsm_state_publisher_->publish(fsm_state_msg);
+    controller_state_publisher_->publish(controller_state_msg);
   }
 
   return controller_interface::return_type::OK;

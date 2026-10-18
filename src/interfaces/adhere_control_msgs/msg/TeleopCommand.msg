@@ -1,13 +1,9 @@
-# Mode-2 (美国手) continuous joystick teleop command (CLAUDE.md Phase 3.2 Stage 2.1), published
+# Mode-2 (美国手) continuous joystick teleop command (Phase 3.6 quaternion refactor), published
 # at 50Hz by xbox_teleop_node on /rov/teleop_cmd. Normalized inputs in [-1.0, 1.0]; consumed by
 # StateOpenLoop/StatePidHold/StateDepthHold, with a 0.25s staleness watchdog enforced centrally
 # by AdhereController.
 std_msgs/Header header
 
-float64 surge_x        # Right stick up/down: +1.0 = forward toward wall (-X body), -1.0 = backward (+X body)
-float64 sway_y         # Right stick left/right: lateral velocity command
-float64 heave_z        # Left stick up/down: +1.0 = ascend (+Z), -1.0 = descend (-Z)
-float64 yaw_rate       # Left stick left/right: +1.0 = CCW yaw (+omega_z), -1.0 = CW yaw (-omega_z)
-float64 pitch_rate     # Left trigger (LT, +1.0) / Left bumper (LB, reverses sign): +1.0 = +omega_y
-float64 roll_rate      # Right trigger (RT, +1.0) / Right bumper (RB, reverses sign): +1.0 = +omega_x
-bool active            # True when at least one stick axis/trigger is outside its deadzone
+geometry_msgs/Vector3 linear   # Normalized [-1.0, 1.0]: x = surge (+forward toward wall), y = sway, z = heave
+geometry_msgs/Vector3 angular  # Normalized [-1.0, 1.0]: x = roll_rate (RT/RB), y = pitch_rate (LT/LB), z = yaw_rate
+bool active                    # True when any axis/trigger is outside deadzone

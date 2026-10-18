@@ -9,10 +9,20 @@
 
 #include "adhere_controller/common/enumClass.h"
 #include "adhere_controller/common/ModelParams.h"
+#include "adhere_controller/common/mathTypes.h"
 #include "adhere_controller/CtrlInterfaces.h"
 
 namespace adhere_controller
 {
+
+// Live reference pose (CLAUDE.md Phase 3.6: replaces the old Euler float64[6] -- quaternion
+// orientation avoids gimbal lock and matches ControllerState.msg::target_pose's
+// geometry_msgs/Pose). Default is position [0,0,0] + identity orientation.
+struct PoseTarget
+{
+  Vec3 pos = Vec3::Zero();
+  Quat quat = Quat(1.0, 0.0, 0.0, 0.0);
+};
 
 class FSMState
 {
@@ -60,12 +70,12 @@ public:
 
   virtual FSMStateName checkChange() { return checkFsmCommandChange(); }
 
-  // Live reference-pose report for /rov/fsm_state (CLAUDE.md Phase 3.2/3.5 Stage 2.1's
-  // FsmState.msg::target_pose, [x, y, z, roll, pitch, yaw]), published by AdhereController on
+  // Live reference-pose report for /rov/controller_state (CLAUDE.md Phase 3.6's
+  // ControllerState.msg::target_pose, geometry_msgs/Pose), published by AdhereController on
   // every outer-loop tick. Meaning is per-state: PASSIVE/OPEN_LOOP have no reference pose
-  // (default all-zero); StateDepthHold overrides index 2 (Z) only; StatePidHold overrides the
-  // full 6-DOF pose.
-  virtual std::array<double, 6> targetPose() const { return {0.0, 0.0, 0.0, 0.0, 0.0, 0.0}; }
+  // (default identity); StateDepthHold overrides pos.z only; StatePidHold overrides the full
+  // 6-DOF pose (position + quaternion).
+  virtual PoseTarget targetPose() const { return PoseTarget{}; }
 
   FSMStateName state_name;
   std::string state_name_string;

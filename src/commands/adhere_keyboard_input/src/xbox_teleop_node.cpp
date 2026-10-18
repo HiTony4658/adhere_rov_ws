@@ -111,12 +111,12 @@ private:
 
     adhere_control_msgs::msg::TeleopCommand teleop_msg;
     teleop_msg.header.stamp = now();
-    teleop_msg.surge_x = surge_x;
-    teleop_msg.sway_y = sway_y;
-    teleop_msg.heave_z = heave_z;
-    teleop_msg.yaw_rate = yaw_rate;
-    teleop_msg.pitch_rate = pitch_rate;
-    teleop_msg.roll_rate = roll_rate;
+    teleop_msg.linear.x = surge_x;
+    teleop_msg.linear.y = sway_y;
+    teleop_msg.linear.z = heave_z;
+    teleop_msg.angular.x = roll_rate;
+    teleop_msg.angular.y = pitch_rate;
+    teleop_msg.angular.z = yaw_rate;
     teleop_msg.active = (surge_x != 0.0) || (sway_y != 0.0) || (heave_z != 0.0) ||
       (yaw_rate != 0.0) || (pitch_rate != 0.0) || (roll_rate != 0.0);
     teleop_pub_->publish(teleop_msg);

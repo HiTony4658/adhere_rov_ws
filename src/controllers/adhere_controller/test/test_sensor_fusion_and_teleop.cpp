@@ -15,6 +15,7 @@
 
 #include "hardware_interface/loaned_command_interface.hpp"
 
+#include "adhere_controller/common/mathTools.h"
 #include "adhere_controller/common/ModelParams.h"
 #include "adhere_controller/common/ThrusterAllocator.h"
 #include "adhere_controller/CtrlInterfaces.h"
@@ -201,11 +202,15 @@ private:
     const Vec3 est_vel = estimator_.velocityBody();
     const Vec3 est_rpy = estimator_.rpy();
     const Vec3 est_omega = estimator_.angularVelocityBody();
+    const auto est_quat = estimator_.orientation();
     for (int i = 0; i < 3; ++i) {
       ci.active_state.pos_w[i] = est_pos(i);
       ci.active_state.rpy[i] = est_rpy(i);
       ci.active_state.vel_body[i] = est_vel(i);
       ci.active_state.omega_body[i] = est_omega(i);
+    }
+    for (int i = 0; i < 4; ++i) {
+      ci.active_state.quat_w[i] = est_quat(i);
     }
   }
 
@@ -239,9 +244,8 @@ TEST(SensorFusionClosedLoop, StateDepthHoldTracksWithin15mmUsingOnlyNoisySensors
   adhere_controller::StateDepthHold state(plant.ci, kModelParams);
   state.enter();
 
-  plant.ci.control_inputs_.setpoint_mode.store(2);
-  plant.ci.control_inputs_.setpoint_lock_current_pose.store(false);
-  plant.ci.control_inputs_.setpoint_target_z.store(-3.00);
+  plant.ci.control_inputs_.setpoint_command_type.store(1);  // MODE_DEPTH_ONLY
+  plant.ci.control_inputs_.setpoint_target_pos_z.store(-3.00);
   plant.ci.control_inputs_.setpoint_seq.store(1);
 
   const rclcpp::Time t0(0, 0, RCL_ROS_TIME);
@@ -267,14 +271,14 @@ TEST(SensorFusionClosedLoop, StatePidHoldLocksWithin15mmUsingOnlyNoisySensors)
   const rclcpp::Time t0(0, 0, RCL_ROS_TIME);
   const rclcpp::Duration period = rclcpp::Duration::from_seconds(kInnerDt);
 
-  plant.ci.control_inputs_.setpoint_mode.store(4);
-  plant.ci.control_inputs_.setpoint_lock_current_pose.store(false);
-  plant.ci.control_inputs_.setpoint_target_x.store(1.0);
-  plant.ci.control_inputs_.setpoint_target_y.store(0.0);
-  plant.ci.control_inputs_.setpoint_target_z.store(-2.0);
-  plant.ci.control_inputs_.setpoint_target_roll.store(0.0);
-  plant.ci.control_inputs_.setpoint_target_pitch.store(0.0);
-  plant.ci.control_inputs_.setpoint_target_yaw.store(0.0);
+  plant.ci.control_inputs_.setpoint_command_type.store(2);  // MODE_FULL_POSE
+  plant.ci.control_inputs_.setpoint_target_pos_x.store(1.0);
+  plant.ci.control_inputs_.setpoint_target_pos_y.store(0.0);
+  plant.ci.control_inputs_.setpoint_target_pos_z.store(-2.0);
+  plant.ci.control_inputs_.setpoint_target_quat_w.store(1.0);  // identity orientation (rpy=0)
+  plant.ci.control_inputs_.setpoint_target_quat_x.store(0.0);
+  plant.ci.control_inputs_.setpoint_target_quat_y.store(0.0);
+  plant.ci.control_inputs_.setpoint_target_quat_z.store(0.0);
   plant.ci.control_inputs_.setpoint_seq.store(1);
 
   for (int i = 0; i < 6000; ++i) {  // 24s settling budget @ 250Hz
@@ -362,7 +366,9 @@ TEST(RollPitchTeleopMapping, StatePidHoldIntegratesAndClampsTiltTargets)
   }
 
   const double max_tilt_rad = kModelParams.pid_hold.max_tilt_deg * M_PI / 180.0;
-  EXPECT_NEAR(state.targetPose()[3], max_tilt_rad, 1e-3);  // phi_d_ clamped at +max_tilt_deg
+  const Vec3 q_d_rpy = adhere_controller::rotMatToRPY(
+    adhere_controller::quatToRotMat(state.targetPose().quat));
+  EXPECT_NEAR(q_d_rpy(0), max_tilt_rad, 1e-3);  // roll target clamped at +max_tilt_deg
 }
 
 int main(int argc, char ** argv)

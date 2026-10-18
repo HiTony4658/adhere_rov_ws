@@ -133,10 +133,9 @@ TEST(FsmStates, StateDepthHoldTracksSetpointAndTeleopNudgeWithin5mm)
   adhere_controller::StateDepthHold state(plant.ci, kModelParams);
   state.enter();
 
-  // Discrete setpoint: target depth 3.5m (target_z = -3.50m).
-  plant.ci.control_inputs_.setpoint_mode.store(2);
-  plant.ci.control_inputs_.setpoint_lock_current_pose.store(false);
-  plant.ci.control_inputs_.setpoint_target_z.store(-3.50);
+  // Discrete setpoint: target depth 3.5m (target_z = -3.50m). command_type=1=MODE_DEPTH_ONLY.
+  plant.ci.control_inputs_.setpoint_command_type.store(1);
+  plant.ci.control_inputs_.setpoint_target_pos_z.store(-3.50);
   plant.ci.control_inputs_.setpoint_seq.store(1);
 
   const rclcpp::Time t0(0, 0, RCL_ROS_TIME);
@@ -157,7 +156,7 @@ TEST(FsmStates, StateDepthHoldTracksSetpointAndTeleopNudgeWithin5mm)
   }
   plant.ci.control_inputs_.teleop_active.store(false);
   plant.ci.control_inputs_.teleop_heave_z.store(0.0);
-  const double target_after_nudge = state.targetPose()[2];
+  const double target_after_nudge = state.targetPose().pos.z();
   EXPECT_NEAR(target_after_nudge, -3.80, 0.02);
 
   for (int i = 0; i < 4000; ++i) {  // let it settle at the new, now-frozen target
@@ -165,7 +164,7 @@ TEST(FsmStates, StateDepthHoldTracksSetpointAndTeleopNudgeWithin5mm)
     plant.step(kDt);
   }
   EXPECT_NEAR(plant.position().z(), target_after_nudge, 0.005);
-  EXPECT_NEAR(state.targetPose()[2], target_after_nudge, 1e-9);  // stays latched, no drift
+  EXPECT_NEAR(state.targetPose().pos.z(), target_after_nudge, 1e-9);  // stays latched, no drift
 }
 
 TEST(FsmStates, StateOpenLoopPureSwayProducesZeroParasiticMoment)
@@ -209,12 +208,12 @@ TEST(FsmStates, StatePidHoldMovesThenLocksAtReleasePointWithin5mm)
     state.run(t0, period);
     plant.step(kDt);
   }
-  EXPECT_GT(state.targetPose()[0], 0.5 + 0.3);  // setpoint actually advanced
+  EXPECT_GT(state.targetPose().pos.x(), 0.5 + 0.3);  // setpoint actually advanced
 
   // Release: sticks return to center.
   plant.ci.control_inputs_.teleop_active.store(false);
   plant.ci.control_inputs_.teleop_surge_x.store(0.0);
-  const double x_d_at_release = state.targetPose()[0];
+  const double x_d_at_release = state.targetPose().pos.x();
 
   for (int i = 0; i < 2000; ++i) {  // 8.0s settling budget
     state.run(t0, period);
@@ -222,7 +221,7 @@ TEST(FsmStates, StatePidHoldMovesThenLocksAtReleasePointWithin5mm)
   }
 
   EXPECT_NEAR(plant.position().x(), x_d_at_release, 0.005);
-  EXPECT_NEAR(state.targetPose()[0], x_d_at_release, 1e-9);  // frozen, no drift after release
+  EXPECT_NEAR(state.targetPose().pos.x(), x_d_at_release, 1e-9);  // frozen, no drift after release
 }
 
 int main(int argc, char ** argv)

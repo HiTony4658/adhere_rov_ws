@@ -17,9 +17,6 @@ namespace
 constexpr double kIntegralPosMax = 180.0;  // N, anti-windup clamp on ki_pos[i]*integral_pos_body_
 constexpr double kIntegralAttMax = 10.0;   // N*m, anti-windup clamp on ki_att[i]*integral_att_body_
 
-// Wraps an angle to (-pi, pi].
-double wrapToPi(double angle) { return std::remainder(angle, 2.0 * M_PI); }
-
 }  // namespace
 
 StatePidHold::StatePidHold(CtrlInterfaces & ctrl_interfaces, const ModelParams & model_params)
@@ -34,9 +31,7 @@ void StatePidHold::enter()
   // Phase 3.5 strict ground-truth isolation: reads ONLY ctrl_interfaces_.active_state.
   const auto & active = ctrl_interfaces_.active_state;
   p_d_world_ = Vec3(active.pos_w[0], active.pos_w[1], active.pos_w[2]);
-  phi_d_ = active.rpy[0];
-  theta_d_ = active.rpy[1];
-  psi_d_ = active.rpy[2];
+  q_d_ = Quat(active.quat_w[0], active.quat_w[1], active.quat_w[2], active.quat_w[3]);
 
   integral_pos_body_.setZero();
   integral_att_body_.setZero();
@@ -53,67 +48,76 @@ void StatePidHold::run(const rclcpp::Time & /*time*/, const rclcpp::Duration & p
   // estimation_mode -- this state has no way to tell which.
   const auto & active = ctrl_interfaces_.active_state;
   const Vec3 pos_world(active.pos_w[0], active.pos_w[1], active.pos_w[2]);
-  const Vec3 rpy(active.rpy[0], active.rpy[1], active.rpy[2]);
+  const Quat q_est(active.quat_w[0], active.quat_w[1], active.quat_w[2], active.quat_w[3]);
   const Vec3 vel_body(active.vel_body[0], active.vel_body[1], active.vel_body[2]);
   const Vec3 omega_body(active.omega_body[0], active.omega_body[1], active.omega_body[2]);
 
-  const RotMat r = rpyToRotMat(rpy);
-  const double psi = rpy(2);
+  const RotMat r = quatToRotMat(q_est);
 
-  // Discrete setpoint (CLAUDE.md Phase 3.2/3.5 Stage 2.1): edge-detected via setpoint_seq, same
-  // pattern as StateDepthHold, now carrying the full 6-DOF pose.
+  // Discrete setpoint (CLAUDE.md Phase 3.6 Sec.2.1): edge-detected via setpoint_seq, same
+  // pattern as StateDepthHold, now carrying the full 6-DOF pose as position + quaternion.
   const uint64_t seq = ci.setpoint_seq.load();
   if (seq != last_seen_setpoint_seq_) {
     last_seen_setpoint_seq_ = seq;
-    if (ci.setpoint_mode.load() == 4) {
-      if (ci.setpoint_lock_current_pose.load()) {
-        p_d_world_ = pos_world;
-        phi_d_ = rpy(0);
-        theta_d_ = rpy(1);
-        psi_d_ = psi;
-      } else {
-        p_d_world_ = Vec3(
-          ci.setpoint_target_x.load(), ci.setpoint_target_y.load(), ci.setpoint_target_z.load());
-        phi_d_ = ci.setpoint_target_roll.load();
-        theta_d_ = ci.setpoint_target_pitch.load();
-        psi_d_ = ci.setpoint_target_yaw.load();
-      }
+    const uint8_t cmd_type = ci.setpoint_command_type.load();
+    if (cmd_type == 2 /* MODE_FULL_POSE */) {
+      p_d_world_ = Vec3(
+        ci.setpoint_target_pos_x.load(), ci.setpoint_target_pos_y.load(),
+        ci.setpoint_target_pos_z.load());
+      q_d_ = normalizeQuat(Quat(
+        ci.setpoint_target_quat_w.load(), ci.setpoint_target_quat_x.load(),
+        ci.setpoint_target_quat_y.load(), ci.setpoint_target_quat_z.load()));
+    } else if (cmd_type == 3 /* MODE_LOCK_CURRENT */) {
+      p_d_world_ = pos_world;
+      q_d_ = q_est;
+    } else if (cmd_type == 4 /* MODE_LEVEL_ATTITUDE */) {
+      // Reset roll/pitch to 0, keep yaw & position (round-trip through RPY to isolate yaw).
+      const Vec3 cur_rpy = rotMatToRPY(quatToRotMat(q_d_));
+      q_d_ = quatFromRPY(Vec3(0.0, 0.0, cur_rpy(2)));
     }
   }
 
   // Stick-driven setpoint move / release-to-lock (CLAUDE.md Phase 3.2 Stage 2.2.4, extended to
-  // roll/pitch in Phase 3.5 via Xbox LT/RT). v_d_body and omega_{x,y,z}d stay exactly zero when
-  // teleop is inactive (including the watchdog-forced-zero case), so e_v_body/drag-feedforward
-  // below automatically target zero velocity and p_d_world_/phi_d_/theta_d_/psi_d_ are simply
-  // never advanced -- no separate "release" branch needed.
+  // roll/pitch in Phase 3.5 via Xbox LT/RT, quaternion-integrated in Phase 3.6). v_d_body and
+  // omega_cmd_body stay exactly zero when teleop is inactive (including the watchdog-forced-zero
+  // case), so e_v_body/drag-feedforward below automatically target zero velocity and
+  // p_d_world_/q_d_ are simply never advanced -- no separate "release" branch needed.
   Vec3 v_d_body = Vec3::Zero();
-  double omega_xd = 0.0;
-  double omega_yd = 0.0;
-  double omega_zd = 0.0;
+  Vec3 omega_cmd_body = Vec3::Zero();
   if (ci.teleop_active.load()) {
     v_d_body = Vec3(
       -gains.max_teleop_vel[0] * ci.teleop_surge_x.load(),
       -gains.max_teleop_vel[1] * ci.teleop_sway_y.load(),
       gains.max_teleop_vel[2] * ci.teleop_heave_z.load());
-    omega_xd = gains.max_teleop_vel[3] * ci.teleop_roll_rate.load();
-    omega_yd = gains.max_teleop_vel[4] * ci.teleop_pitch_rate.load();
-    omega_zd = gains.max_teleop_vel[5] * ci.teleop_yaw_rate.load();
+    omega_cmd_body = Vec3(
+      gains.max_teleop_vel[3] * ci.teleop_roll_rate.load(),
+      gains.max_teleop_vel[4] * ci.teleop_pitch_rate.load(),
+      gains.max_teleop_vel[5] * ci.teleop_yaw_rate.load());
 
     p_d_world_ += r * v_d_body * dt;
     p_d_world_.x() = std::max(p_d_world_.x(), model_params_.workspace_x_min);
     p_d_world_.z() =
       saturation(p_d_world_.z(), model_params_.workspace_z_min, model_params_.workspace_z_max);
+
+    // Quaternion kinematics integration (CLAUDE.md Phase 3.6 Sec.2.1): q_d <- normalize(q_d (x)
+    // dq), dq = smallAngleQuat(omega_cmd_body*dt) -- singularity-free setpoint advancement.
+    // Tilt clamp still goes through a cheap RPY round-trip (preserves the existing +-max_tilt_deg
+    // contract exactly; yaw is never clamped so it passes through unaffected).
+    q_d_ = normalizeQuat(quatMul(q_d_, smallAngleQuat(omega_cmd_body * dt)));
     const double max_tilt_rad = gains.max_tilt_deg * M_PI / 180.0;
-    phi_d_ = saturation(phi_d_ + omega_xd * dt, -max_tilt_rad, max_tilt_rad);
-    theta_d_ = saturation(theta_d_ + omega_yd * dt, -max_tilt_rad, max_tilt_rad);
-    psi_d_ = wrapToPi(psi_d_ + omega_zd * dt);
+    Vec3 q_d_rpy = rotMatToRPY(quatToRotMat(q_d_));
+    q_d_rpy(0) = saturation(q_d_rpy(0), -max_tilt_rad, max_tilt_rad);
+    q_d_rpy(1) = saturation(q_d_rpy(1), -max_tilt_rad, max_tilt_rad);
+    q_d_ = quatFromRPY(q_d_rpy);
   }
 
-  // Errors in the body frame.
+  // Errors in the body frame. e_r is the minimal-rotation SO(3) attitude error (mathTools.h's
+  // quatError()), replacing the Phase 3.5 Euler-difference vector -- singularity-free and valid
+  // for arbitrarily large attitude errors, not just small angles.
   const Vec3 e_p_body = r.transpose() * (p_d_world_ - pos_world);
   const Vec3 e_v_body = v_d_body - vel_body;
-  const Vec3 e_r(phi_d_ - rpy(0), theta_d_ - rpy(1), wrapToPi(psi_d_ - psi));
-  const Vec3 e_omega_body = Vec3(omega_xd, omega_yd, omega_zd) - omega_body;
+  const Vec3 e_r = quatError(q_est, q_d_);
+  const Vec3 e_omega_body = omega_cmd_body - omega_body;
 
   integral_pos_body_ += e_p_body * dt;
   integral_att_body_ += e_r * dt;
@@ -166,9 +170,12 @@ FSMStateName StatePidHold::checkChange()
   return checkFsmCommandChange();
 }
 
-std::array<double, 6> StatePidHold::targetPose() const
+PoseTarget StatePidHold::targetPose() const
 {
-  return {p_d_world_.x(), p_d_world_.y(), p_d_world_.z(), phi_d_, theta_d_, psi_d_};
+  PoseTarget t;
+  t.pos = p_d_world_;
+  t.quat = q_d_;
+  return t;
 }
 
 }  // namespace adhere_controller

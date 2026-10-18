@@ -25,22 +25,28 @@ struct ControlInputs
   // /rov/setpoint_cmd (SetpointCommand.msg): discrete numeric setpoints, orthogonal to state
   // switching. setpoint_seq increments once per received message so StateDepthHold/StatePidHold
   // can edge-detect "a new setpoint just arrived" instead of re-applying the same message every
-  // tick (which would fight the Xbox left-stick continuous nudge/move integration).
+  // tick (which would fight the Xbox left-stick continuous nudge/move integration). Phase 3.6:
+  // target pose is now carried as position + unit quaternion (matching SetpointCommand.msg's
+  // geometry_msgs/Pose target_pose), replacing the old discrete x/y/z/roll/pitch/yaw scalars.
   std::atomic<uint64_t> setpoint_seq{0};
-  std::atomic<uint8_t> setpoint_mode{0};         // 2 = DEPTH_HOLD, 4 = PID_HOLD
-  std::atomic<bool> setpoint_lock_current_pose{false};
-  std::atomic<double> setpoint_target_x{0.0};    // m, world frame
-  std::atomic<double> setpoint_target_y{0.0};    // m, world frame
-  std::atomic<double> setpoint_target_z{0.5};    // m, world frame
-  std::atomic<double> setpoint_target_roll{0.0};   // rad (Phase 3.5)
-  std::atomic<double> setpoint_target_pitch{0.0};  // rad (Phase 3.5)
-  std::atomic<double> setpoint_target_yaw{0.0};  // rad
+  // 1=MODE_DEPTH_ONLY, 2=MODE_FULL_POSE, 3=MODE_LOCK_CURRENT, 4=MODE_LEVEL_ATTITUDE
+  std::atomic<uint8_t> setpoint_command_type{0};
+  std::atomic<double> setpoint_target_pos_x{0.0};   // m, world frame
+  std::atomic<double> setpoint_target_pos_y{0.0};   // m, world frame
+  std::atomic<double> setpoint_target_pos_z{0.5};   // m, world frame
+  std::atomic<double> setpoint_target_quat_w{1.0};  // world-frame orientation, Hamilton (w,x,y,z)
+  std::atomic<double> setpoint_target_quat_x{0.0};
+  std::atomic<double> setpoint_target_quat_y{0.0};
+  std::atomic<double> setpoint_target_quat_z{0.0};
 
   // /rov/teleop_cmd (TeleopCommand.msg): continuous Mode-2 (美国手) joystick inputs in
-  // [-1.0, 1.0]. last_rx_time_sec is wall-clock seconds at last receipt, stamped by
-  // AdhereController's subscription callback and read by its own 0.25s watchdog (which
-  // forces teleop_active/the 4 axes to false/0.0 if the joystick has gone stale -- so FSMState
-  // implementations never need to know about watchdog timeouts themselves).
+  // [-1.0, 1.0]. Phase 3.6: the message's fields are now geometry_msgs/Vector3 linear/angular
+  // instead of 6 bare scalars, but the atomics here keep their original semantic names (fed
+  // from msg->linear.{x,y,z}/msg->angular.{x,y,z} in the subscription callback) so FSMState
+  // code reading e.g. teleop_surge_x is unaffected. last_rx_time_sec is wall-clock seconds at
+  // last receipt, stamped by AdhereController's subscription callback and read by its own
+  // 0.25s watchdog (which forces teleop_active/the 6 axes to false/0.0 if the joystick has gone
+  // stale -- so FSMState implementations never need to know about watchdog timeouts themselves).
   std::atomic<double> teleop_surge_x{0.0};
   std::atomic<double> teleop_sway_y{0.0};
   std::atomic<double> teleop_heave_z{0.0};
@@ -59,7 +65,9 @@ struct ControlInputs
 struct ActiveState
 {
   double pos_w[3] = {0.0, 0.0, 0.0};        // world-frame CoM position [x, y, z]
-  double rpy[3] = {0.0, 0.0, 0.0};          // [roll, pitch, yaw], rad
+  double quat_w[4] = {1.0, 0.0, 0.0, 0.0};  // world-frame orientation, Hamilton (w, x, y, z) (Phase 3.6)
+  double rpy[3] = {0.0, 0.0, 0.0};          // [roll, pitch, yaw], rad -- derived from quat_w, kept
+                                             // for StateDepthHold's small-angle Euler PD damping
   double vel_body[3] = {0.0, 0.0, 0.0};     // body-frame linear velocity
   double omega_body[3] = {0.0, 0.0, 0.0};   // body-frame angular velocity
   double pad_force[4] = {0.0, 0.0, 0.0, 0.0};  // TL, TR, BL, BR normal contact force

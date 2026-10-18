@@ -7,8 +7,8 @@
 
 #include "controller_interface/controller_interface.hpp"
 
+#include "adhere_control_msgs/msg/controller_state.hpp"
 #include "adhere_control_msgs/msg/fsm_command.hpp"
-#include "adhere_control_msgs/msg/fsm_state.hpp"
 #include "adhere_control_msgs/msg/setpoint_command.hpp"
 #include "adhere_control_msgs/msg/teleop_command.hpp"
 #include "adhere_controller/common/enumClass.h"
@@ -99,7 +99,9 @@ private:
     setpoint_command_subscription_;
   rclcpp::Subscription<adhere_control_msgs::msg::TeleopCommand>::SharedPtr
     teleop_command_subscription_;
-  rclcpp::Publisher<adhere_control_msgs::msg::FsmState>::SharedPtr fsm_state_publisher_;
+  // Phase 3.6: replaces FsmState.msg/fsm_state_publisher_ -- 100% Sim-to-Real pure, no ground
+  // truth field at all (that now only exists on adhere_mujoco_node's /rov/ground_truth_odom).
+  rclcpp::Publisher<adhere_control_msgs::msg::ControllerState>::SharedPtr controller_state_publisher_;
 
   // Phase 3.5 strict ground-truth isolation (CLAUDE.md Stage 2.3): these raw hardware state
   // interfaces are PRIVATE to AdhereController -- never exposed via CtrlInterfaces, never

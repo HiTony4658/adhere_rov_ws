@@ -1,8 +1,12 @@
 // state_cmd_console_node: dedicated DEPTH_HOLD/PID_HOLD setpoint terminal (CLAUDE.md Phase 3.2
-// Stage 2.2). Auto-spawned by fsm_console_node when the active state becomes DEPTH_HOLD/
-// PID_HOLD, or run manually. Subscribes /rov/fsm_state for live actual/target display and
-// publishes ONLY SetpointCommand on /rov/setpoint_cmd -- never FsmCommand (setpoint terminals
-// are orthogonal to state switching).
+// Stage 2.2, quaternion-ized in Phase 3.6). Auto-spawned by fsm_console_node when the active
+// state becomes DEPTH_HOLD/PID_HOLD, or run manually. Subscribes /rov/controller_state for live
+// actual/target display and publishes ONLY SetpointCommand on /rov/setpoint_cmd -- never
+// FsmCommand (setpoint terminals are orthogonal to state switching). The wire format
+// (SetpointCommand::target_pose) is a geometry_msgs/Pose quaternion, but the human prompt stays
+// RPY-friendly: this file owns its own small RPY<->quaternion helpers (no Eigen dependency, same
+// extrinsic-ZYX/Hamilton(w,x,y,z) convention as adhere_controller's mathTools.h) purely for
+// console input parsing and display.
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -14,18 +18,55 @@
 
 #include "rclcpp/rclcpp.hpp"
 
-#include "adhere_control_msgs/msg/fsm_state.hpp"
+#include "adhere_control_msgs/msg/controller_state.hpp"
 #include "adhere_control_msgs/msg/setpoint_command.hpp"
 
 namespace
 {
 
+struct Quat
+{
+  double w = 1.0, x = 0.0, y = 0.0, z = 0.0;
+};
+
+// Builds a unit quaternion from extrinsic-ZYX (roll, pitch, yaw) in radians: R = Rz(yaw)*Ry(pitch)*Rx(roll).
+Quat quatFromRpy(double roll, double pitch, double yaw)
+{
+  const double hr = 0.5 * roll, hp = 0.5 * pitch, hy = 0.5 * yaw;
+  const double cr = std::cos(hr), sr = std::sin(hr);
+  const double cp = std::cos(hp), sp = std::sin(hp);
+  const double cy = std::cos(hy), sy = std::sin(hy);
+  Quat q;
+  q.w = cr * cp * cy + sr * sp * sy;
+  q.x = sr * cp * cy - cr * sp * sy;
+  q.y = cr * sp * cy + sr * cp * sy;
+  q.z = cr * cp * sy - sr * sp * cy;
+  return q;
+}
+
+// Inverse of quatFromRpy() above: extracts (roll, pitch, yaw) in radians from a unit quaternion.
+std::array<double, 3> rpyFromQuat(const Quat & q)
+{
+  const double r00 = 1 - 2 * (q.y * q.y + q.z * q.z);
+  const double r10 = 2 * (q.x * q.y + q.w * q.z);
+  const double r20 = -2 * (q.x * q.z - q.w * q.y);
+  const double r21 = 2 * (q.y * q.z + q.w * q.x);
+  const double r22 = 1 - 2 * (q.x * q.x + q.y * q.y);
+  return {std::atan2(r21, r22), std::atan2(r20, std::sqrt(r00 * r00 + r10 * r10)), std::atan2(r10, r00)};
+}
+
 std::mutex g_pose_mutex;
-// [x, y, z, roll(rad), pitch(rad), yaw(rad)] (Phase 3.5: extended from 4 to 6 DOF).
-std::array<double, 6> g_target_pose{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-// "Actual" display uses FsmState::estimated_pose -- what the controller itself tracks (ground
-// truth in "ground_truth" mode, RovStateEstimator's fused output in "sensor_fusion" mode).
-std::array<double, 6> g_actual_pose{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+// Position [x, y, z] (m) + orientation quaternion [w, x, y, z] (Phase 3.6: replaces the old
+// Euler float64[6]).
+struct PoseDisplay
+{
+  std::array<double, 3> pos{0.0, 0.0, 0.0};
+  Quat quat{};
+};
+PoseDisplay g_target_pose;
+// "Actual" display uses ControllerState::estimated_pose -- what the controller itself tracks
+// (ground truth in "ground_truth" mode, RovStateEstimator's fused output in "sensor_fusion" mode).
+PoseDisplay g_actual_pose;
 
 constexpr double kRadToDeg = 180.0 / M_PI;
 constexpr double kDegToRad = M_PI / 180.0;
@@ -44,7 +85,7 @@ double depthInputToTargetZ(double input_val)
 
 void printDepthHoldPrompt()
 {
-  std::array<double, 6> target, actual;
+  PoseDisplay target, actual;
   {
     std::lock_guard<std::mutex> lock(g_pose_mutex);
     target = g_target_pose;
@@ -55,8 +96,8 @@ void printDepthHoldPrompt()
   std::cout << "============================================================\n"
             << "  [DEPTH_HOLD] Setpoint Console (定深设定终端)\n"
             << "============================================================\n"
-            << "  Current Depth: " << -actual[2] << " m (Z = " << actual[2] << " m)   |   "
-            << "Target Depth: " << -target[2] << " m (Z = " << target[2] << " m)\n"
+            << "  Current Depth: " << -actual.pos[2] << " m (Z = " << actual.pos[2] << " m)   |   "
+            << "Target Depth: " << -target.pos[2] << " m (Z = " << target.pos[2] << " m)\n"
             << "------------------------------------------------------------\n"
             << "[DEPTH_HOLD] Enter target depth in meters, positive or negative (float, e.g. "
                "2.50 or -2.50 -- both mean 2.50m below the surface), or 'h' to hold current "
@@ -65,22 +106,29 @@ void printDepthHoldPrompt()
 
 void printPidHoldPrompt()
 {
-  std::array<double, 6> target, actual;
+  PoseDisplay target, actual;
   {
     std::lock_guard<std::mutex> lock(g_pose_mutex);
     target = g_target_pose;
     actual = g_actual_pose;
   }
-  // CLAUDE.md Phase 3.3 tank geometry: water surface at world Z=0.0m, so depth = -Z.
+  const auto actual_rpy = rpyFromQuat(actual.quat);
+  const auto target_rpy = rpyFromQuat(target.quat);
+  // CLAUDE.md Phase 3.3 tank geometry: water surface at world Z=0.0m, so depth = -Z. Phase 3.6:
+  // displays both the wire-format quaternion and the human-friendly RPY(deg) derived from it.
   std::cout << "============================================================\n"
             << "  [PID_HOLD] Setpoint Console (6DOF 位置+姿态保持设定终端)\n"
             << "============================================================\n"
-            << "  Actual [X, Y, Z, Roll, Pitch, Yaw]: [" << actual[0] << ", " << actual[1] << ", "
-            << actual[2] << ", " << actual[3] * kRadToDeg << ", " << actual[4] * kRadToDeg << ", "
-            << actual[5] * kRadToDeg << " deg]  (Depth: " << -actual[2] << " m)\n"
-            << "  Target [X, Y, Z, Roll, Pitch, Yaw]: [" << target[0] << ", " << target[1] << ", "
-            << target[2] << ", " << target[3] * kRadToDeg << ", " << target[4] * kRadToDeg << ", "
-            << target[5] * kRadToDeg << " deg]  (Depth: " << -target[2] << " m)\n"
+            << "  Actual  [X, Y, Z] = [" << actual.pos[0] << ", " << actual.pos[1] << ", "
+            << actual.pos[2] << "] m  (Depth: " << -actual.pos[2] << " m)\n"
+            << "  Actual  Quat [qw,qx,qy,qz] = [" << actual.quat.w << ", " << actual.quat.x << ", "
+            << actual.quat.y << ", " << actual.quat.z << "]  RPY(deg) = [" << actual_rpy[0] * kRadToDeg
+            << ", " << actual_rpy[1] * kRadToDeg << ", " << actual_rpy[2] * kRadToDeg << "]\n"
+            << "  Target  [X, Y, Z] = [" << target.pos[0] << ", " << target.pos[1] << ", "
+            << target.pos[2] << "] m  (Depth: " << -target.pos[2] << " m)\n"
+            << "  Target  Quat [qw,qx,qy,qz] = [" << target.quat.w << ", " << target.quat.x << ", "
+            << target.quat.y << ", " << target.quat.z << "]  RPY(deg) = [" << target_rpy[0] * kRadToDeg
+            << ", " << target_rpy[1] * kRadToDeg << ", " << target_rpy[2] * kRadToDeg << "]\n"
             << "------------------------------------------------------------\n"
             << "[PID_HOLD] Enter 'z <val>' (depth), 'y <val>' (lateral), 'x <val>' (wall dist), "
                "'roll <deg>', 'pitch <deg>', 'yaw <deg>', 'all <x> <y> <z> <yaw_deg>', "
@@ -104,11 +152,21 @@ int main(int argc, char ** argv)
 
   auto setpoint_pub = node->create_publisher<adhere_control_msgs::msg::SetpointCommand>(
     "/rov/setpoint_cmd", 10);
-  auto fsm_state_sub = node->create_subscription<adhere_control_msgs::msg::FsmState>(
-    "/rov/fsm_state", 10, [](const adhere_control_msgs::msg::FsmState::SharedPtr msg) {
+  auto controller_state_sub = node->create_subscription<adhere_control_msgs::msg::ControllerState>(
+    "/rov/controller_state", 10,
+    [](const adhere_control_msgs::msg::ControllerState::SharedPtr msg) {
       std::lock_guard<std::mutex> lock(g_pose_mutex);
-      std::copy(msg->target_pose.begin(), msg->target_pose.end(), g_target_pose.begin());
-      std::copy(msg->estimated_pose.begin(), msg->estimated_pose.end(), g_actual_pose.begin());
+      g_target_pose.pos = {
+        msg->target_pose.position.x, msg->target_pose.position.y, msg->target_pose.position.z};
+      g_target_pose.quat = {
+        msg->target_pose.orientation.w, msg->target_pose.orientation.x,
+        msg->target_pose.orientation.y, msg->target_pose.orientation.z};
+      g_actual_pose.pos = {
+        msg->estimated_pose.position.x, msg->estimated_pose.position.y,
+        msg->estimated_pose.position.z};
+      g_actual_pose.quat = {
+        msg->estimated_pose.orientation.w, msg->estimated_pose.orientation.x,
+        msg->estimated_pose.orientation.y, msg->estimated_pose.orientation.z};
     });
 
   auto executor = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
@@ -135,15 +193,16 @@ int main(int argc, char ** argv)
 
     adhere_control_msgs::msg::SetpointCommand cmd;
     cmd.header.stamp = node->now();
-    cmd.mode = static_cast<uint8_t>(mode);
+    cmd.target_pose.orientation.w = 1.0;  // identity default, overwritten below where relevant
 
     bool valid = true;
     if (mode == 2) {
       if (line == "h" || line == "H") {
-        cmd.lock_current_pose = true;
+        cmd.command_type = adhere_control_msgs::msg::SetpointCommand::MODE_LOCK_CURRENT;
       } else {
         try {
-          cmd.target_z = depthInputToTargetZ(std::stod(line));
+          cmd.command_type = adhere_control_msgs::msg::SetpointCommand::MODE_DEPTH_ONLY;
+          cmd.target_pose.position.z = depthInputToTargetZ(std::stod(line));
         } catch (const std::exception &) {
           valid = false;
         }
@@ -151,62 +210,52 @@ int main(int argc, char ** argv)
     } else {
       // mode == 4: parse 'z <val>' / 'y <val>' / 'x <val>' / 'roll <deg>' / 'pitch <deg>' /
       // 'yaw <deg>' / 'all <x> <y> <z> <yaw_deg>' / 'reset' / 'h'. Partial updates carry the
-      // CURRENTLY known target_pose for the other axes forward, so e.g. 'z 0.4' never silently
-      // resets x/y/roll/pitch/yaw to 0.
-      std::array<double, 6> target;
+      // CURRENTLY known target pose forward (decomposed to x/y/z/roll/pitch/yaw), so e.g.
+      // 'z 0.4' never silently resets x/y/roll/pitch/yaw to 0.
+      PoseDisplay target;
       {
         std::lock_guard<std::mutex> lock(g_pose_mutex);
         target = g_target_pose;
       }
-      cmd.target_x = target[0];
-      cmd.target_y = target[1];
-      cmd.target_z = target[2];
-      cmd.target_roll = target[3];
-      cmd.target_pitch = target[4];
-      cmd.target_yaw = target[5];
+      double x = target.pos[0], y = target.pos[1], z = target.pos[2];
+      auto rpy = rpyFromQuat(target.quat);
+      double roll = rpy[0], pitch = rpy[1], yaw = rpy[2];
 
       if (line == "h" || line == "H") {
-        cmd.lock_current_pose = true;
+        cmd.command_type = adhere_control_msgs::msg::SetpointCommand::MODE_LOCK_CURRENT;
       } else if (line == "reset" || line == "RESET") {
-        // Phase 3.5: reset roll/pitch to 0 while carrying x/y/z/yaw forward unchanged.
-        cmd.target_roll = 0.0;
-        cmd.target_pitch = 0.0;
+        // Server-side re-derives this from its own live target, keeping yaw & position --
+        // no payload fields are consulted for this command_type.
+        cmd.command_type = adhere_control_msgs::msg::SetpointCommand::MODE_LEVEL_ATTITUDE;
       } else {
         std::istringstream iss(line);
         std::string token;
         iss >> token;
         try {
           if (token == "z") {
-            double v;
-            iss >> v;
-            cmd.target_z = depthInputToTargetZ(v);
+            iss >> z;
+            z = depthInputToTargetZ(z);
           } else if (token == "y") {
-            double v;
-            iss >> v;
-            cmd.target_y = v;
+            iss >> y;
           } else if (token == "x") {
-            double v;
-            iss >> v;
-            cmd.target_x = v;
+            iss >> x;
           } else if (token == "roll") {
             double v_deg;
             iss >> v_deg;
-            cmd.target_roll = v_deg * kDegToRad;
+            roll = v_deg * kDegToRad;
           } else if (token == "pitch") {
             double v_deg;
             iss >> v_deg;
-            cmd.target_pitch = v_deg * kDegToRad;
+            pitch = v_deg * kDegToRad;
           } else if (token == "yaw") {
             double v_deg;
             iss >> v_deg;
-            cmd.target_yaw = v_deg * kDegToRad;
+            yaw = v_deg * kDegToRad;
           } else if (token == "all") {
-            double x, y, z, yaw_deg;
+            double yaw_deg;
             iss >> x >> y >> z >> yaw_deg;
-            cmd.target_x = x;
-            cmd.target_y = y;
-            cmd.target_z = depthInputToTargetZ(z);
-            cmd.target_yaw = yaw_deg * kDegToRad;
+            z = depthInputToTargetZ(z);
+            yaw = yaw_deg * kDegToRad;
           } else {
             valid = false;
           }
@@ -215,6 +264,18 @@ int main(int argc, char ** argv)
           }
         } catch (const std::exception &) {
           valid = false;
+        }
+
+        if (valid) {
+          cmd.command_type = adhere_control_msgs::msg::SetpointCommand::MODE_FULL_POSE;
+          cmd.target_pose.position.x = x;
+          cmd.target_pose.position.y = y;
+          cmd.target_pose.position.z = z;
+          const Quat q = quatFromRpy(roll, pitch, yaw);
+          cmd.target_pose.orientation.w = q.w;
+          cmd.target_pose.orientation.x = q.x;
+          cmd.target_pose.orientation.y = q.y;
+          cmd.target_pose.orientation.z = q.z;
         }
       }
     }

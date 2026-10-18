@@ -1,10 +1,11 @@
 // fsm_console_node: master FSM state-switcher terminal (CLAUDE.md Phase 3.2 Stage 2.2).
-// Subscribes ONLY to /rov/fsm_state (never raw hardware/odom topics) and publishes ONLY
+// Subscribes ONLY to /rov/controller_state (never raw hardware/odom topics) and publishes ONLY
 // FsmCommand on /rov/fsm_command -- all state-specific numeric setpoints live on
 // state_cmd_console_node instead. Dynamically spawns/kills that per-state console as a
 // dedicated gnome-terminal/xterm window whenever the ACTIVE state changes, regardless of
 // whether the switch came from this console's own keyboard input or an Xbox gamepad button
-// (the /rov/fsm_state subscription is the only source of truth for "what state is active").
+// (the /rov/controller_state subscription is the only source of truth for "what state is
+// active").
 #include <array>
 #include <atomic>
 #include <cstdlib>
@@ -18,8 +19,8 @@
 
 #include "rclcpp/rclcpp.hpp"
 
+#include "adhere_control_msgs/msg/controller_state.hpp"
 #include "adhere_control_msgs/msg/fsm_command.hpp"
-#include "adhere_control_msgs/msg/fsm_state.hpp"
 
 namespace
 {
@@ -122,8 +123,8 @@ int main(int argc, char ** argv)
   auto fsm_command_pub =
     node->create_publisher<adhere_control_msgs::msg::FsmCommand>("/rov/fsm_command", 10);
 
-  auto fsm_state_sub = node->create_subscription<adhere_control_msgs::msg::FsmState>(
-    "/rov/fsm_state", 10, [](const adhere_control_msgs::msg::FsmState::SharedPtr msg) {
+  auto controller_state_sub = node->create_subscription<adhere_control_msgs::msg::ControllerState>(
+    "/rov/controller_state", 10, [](const adhere_control_msgs::msg::ControllerState::SharedPtr msg) {
       {
         std::lock_guard<std::mutex> lock(g_state_name_mutex);
         g_state_name = msg->state_name;
