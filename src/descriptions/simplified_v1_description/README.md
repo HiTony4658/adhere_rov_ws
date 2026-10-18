@@ -31,8 +31,12 @@ mjcf/
   └── rov_wall.xml                  # MuJoCo 物理描述（与原型仓库数值对齐，只读复制）
 config/
   ├── visualize.rviz                # RViz2 几何检视配置（RobotModel + TF + Grid）
+  ├── mujoco_sim.rviz               # RViz2 闭环仿真显示配置（Odometry + EnvironmentMarkers，TF 缩放
+                                     # 0.12）；Phase 3.7 从 adhere_mujoco_hardware 迁移至此，由
+                                     # launch/mujoco.launch.py 统一解析，使硬件包零模型/可视化配置文件
   └── robot_control.yaml            # 模型解耦参数：推力器/接触垫几何、Fossen 水动力参数、
-                                     # 工作空间安全边界、各 FSM 状态增益（CLAUDE.md §3.3）
+                                     # 工作空间安全边界、各 FSM 状态增益（CLAUDE.md §3.3，Phase 3.7 新增
+                                     # dynamics.*/contact_force_thresh）
 launch/
   ├── visualize.launch.py           # 一行命令启动 robot_state_publisher + RViz2（纯几何检视，无物理仿真）
   └── mujoco.launch.py              # 模型中心化主入口（CLAUDE.md Phase 3.4）：robot_state_publisher +

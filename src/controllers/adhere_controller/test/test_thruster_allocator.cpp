@@ -1,5 +1,5 @@
-#include "adhere_controller/common/ModelParams.h"
-#include "adhere_controller/common/ThrusterAllocator.h"
+#include "adhere_controller/allocation/ThrusterAllocator.h"
+#include "adhere_controller/dynamics/ModelParams.h"
 
 #include <gtest/gtest.h>
 

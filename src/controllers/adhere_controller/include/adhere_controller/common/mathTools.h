@@ -119,6 +119,44 @@ inline Vec3 quatError(const Quat & q_est, const Quat & q_d)
   return Vec3(2.0 * sign * q_e(1), 2.0 * sign * q_e(2), 2.0 * sign * q_e(3));
 }
 
+// Hemisphere alignment (CLAUDE.md Phase 3.7): quaternions q and -q represent the same rotation,
+// so any blend/interpolation between two quaternions must first ensure they lie in the same
+// hemisphere (q_ref . q >= 0), or the blend takes the long way around SO(3). Used by
+// algorithms::pid::SixDofPidController before computing quatError(), and by
+// RovStateEstimator::correctAttitude()'s nlerp blend (a latent bug fixed in Phase 3.7: that
+// blend previously had its own inline sign check, now routed through this shared primitive).
+inline Quat alignQuaternionHemisphere(const Quat & q_ref, const Quat & q)
+{
+  return q_ref.dot(q) < 0.0 ? Quat(-q) : q;
+}
+
+// Generic 3D position slew-rate/step clamp (CLAUDE.md Phase 3.7): limits how far `target` may
+// move from `prev` in a single call, clamping the step vector's magnitude to max_step (not
+// per-axis), so a large instantaneous setpoint jump is spread over multiple calls instead of
+// commanding a step discontinuity.
+inline Vec3 clampStepVec3(const Vec3 & prev, const Vec3 & target, double max_step)
+{
+  const Vec3 delta = target - prev;
+  const double dist = delta.norm();
+  if (dist <= max_step || dist < 1e-12) {
+    return target;
+  }
+  return prev + delta * (max_step / dist);
+}
+
+// Generic attitude slew-rate/step clamp (CLAUDE.md Phase 3.7): limits the minimal-rotation angle
+// between `prev` and `target` to max_angle_step (rad), built from quatError()/smallAngleQuat()
+// so it is singularity-free for arbitrarily large attitude steps, not just small angles.
+inline Quat clampSlewQuat(const Quat & prev, const Quat & target, double max_angle_step)
+{
+  const Vec3 e = quatError(prev, target);
+  const double angle = e.norm();
+  if (angle <= max_angle_step || angle < 1e-12) {
+    return target;
+  }
+  return normalizeQuat(quatMul(prev, smallAngleQuat(e * (max_angle_step / angle))));
+}
+
 }  // namespace adhere_controller
 
 #endif  // ADHERE_CONTROLLER__COMMON__MATHTOOLS_H_

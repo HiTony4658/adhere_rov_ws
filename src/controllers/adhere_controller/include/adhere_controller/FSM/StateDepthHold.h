@@ -4,7 +4,9 @@
 #include <array>
 #include <cstdint>
 
+#include "adhere_controller/algorithms/pid/SixDofPidController.h"
 #include "adhere_controller/common/mathTypes.h"
+#include "adhere_controller/dynamics/FossenDynamics.h"
 #include "adhere_controller/FSM/FSMState.h"
 
 namespace adhere_controller
@@ -15,10 +17,16 @@ namespace adhere_controller
 // detected via setpoint_seq so the same message is never re-applied every tick) or continuously
 // (the Xbox left-stick heave_z nudge, integrated every tick and left latched when the stick
 // returns to center -- CLAUDE.md Phase 3.2 Stage 2.2.2). The integrator is only ever cleared in
-// enter(), which runs exactly once per transition INTO this state. Also applies gentle PD
-// attitude damping on roll/pitch/yaw so the hull does not tumble while thrusting, and maps the
-// resulting 6-DOF body-frame wrench onto the 8 thruster commands through the shared
-// ThrusterAllocator's damped pseudoinverse of rov_wall.xml's exact thruster allocation matrix B.
+// enter(), which runs exactly once per transition INTO this state.
+//
+// Phase 3.7: the error->wrench law (gentle PD attitude damping included) is delegated to the
+// shared algorithms::pid::SixDofPidController, driven in a reduced "depth-only" mode: the
+// lateral (X/Y) position setpoint is re-latched to the current estimate every tick (zero
+// lateral authority, preserving the pre-3.7 contract exactly), the attitude setpoint is the
+// identity quaternion (equivalent to the old `-kp_att*rpy` damping law at the small attitudes
+// this state operates at -- see StateDepthHold.cpp's constructor comment), and this also adds
+// hydrostatic buoyancy feedforward via FossenDynamics, which the pre-3.7 law never had (an
+// intentional improvement, not a regression -- see PROGRESS.md Phase 3.7).
 class StateDepthHold final : public FSMState
 {
 public:
@@ -37,12 +45,14 @@ public:
 
 private:
   // Damped Moore-Penrose pseudoinverse of the 6x8 thruster allocation matrix B (shared
-  // ThrusterAllocator.h geometry), computed once at construction (rov_wall.xml's thruster
-  // geometry is static for the lifetime of the process).
+  // allocation::ThrusterAllocator.h geometry), computed once at construction (rov_wall.xml's
+  // thruster geometry is static for the lifetime of the process).
   Mat86 b_pinv_;
 
+  FossenDynamics dynamics_;
+  SixDofPidController pid_;
+
   double target_z_ = 0.5;
-  double integral_z_ = 0.0;
 
   // Last setpoint_seq value this state has already applied (CLAUDE.md Phase 3.2 Stage 2.1's
   // edge-detection pattern); starts at 0 and only ever moves forward.

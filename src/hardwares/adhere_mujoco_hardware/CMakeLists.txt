@@ -118,9 +118,6 @@ install(TARGETS adhere_mujoco_node
 install(DIRECTORY include/
   DESTINATION include
 )
-install(DIRECTORY config
-  DESTINATION share/${PROJECT_NAME}
-)
 install(FILES adhere_mujoco_hardware.xml
   DESTINATION share/${PROJECT_NAME}
 )

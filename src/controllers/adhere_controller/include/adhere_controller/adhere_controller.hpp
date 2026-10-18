@@ -19,9 +19,9 @@
 #include "adhere_control_msgs/msg/teleop_command.hpp"
 #include "adhere_controller/common/enumClass.h"
 #include "adhere_controller/common/LoopProfiler.h"
-#include "adhere_controller/common/ModelParams.h"
 #include "adhere_controller/common/MultiRateDecimator.h"
 #include "adhere_controller/CtrlInterfaces.h"
+#include "adhere_controller/dynamics/ModelParams.h"
 #include "adhere_controller/estimator/RovStateEstimator.h"
 #include "adhere_controller/FSM/FSMState.h"
 #include "adhere_controller/FSM/StateDepthHold.h"
@@ -161,6 +161,11 @@ private:
   // when model_params_.estimation_mode == "sensor_fusion".
   RovStateEstimator estimator_;
   bool estimator_initialized_ = false;
+
+  // Phase 3.7 output safety gate (common/OutputSafety.h): counts how many inner-loop ticks had
+  // to be zeroed because of a NaN/Inf thruster command. Logged (throttled) from update(), not
+  // published on any topic yet -- see CLAUDE.md Phase 3.7.
+  uint64_t output_safety_violation_count_ = 0;
 
   // Real-time instrumentation (CLAUDE.md Phase 3.6 Stage 1.2/3.2): budgets match
   // RuntimeDiagnostics.msg's documented inner_loop_budget_ms/outer_loop_budget_ms (4.0ms for

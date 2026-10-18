@@ -38,6 +38,11 @@ include_directories(include)
 # package split added pure linking overhead with no decoupling benefit.
 add_library(${PROJECT_NAME} SHARED
   src/adhere_controller.cpp
+  src/algorithms/pid/SixDofPidController.cpp
+  src/allocation/ThrusterAllocator.cpp
+  src/dynamics/FossenDynamics.cpp
+  src/dynamics/ModelParams.cpp
+  src/estimator/RovStateEstimator.cpp
   src/FSM/StatePassive.cpp
   src/FSM/StateDepthHold.cpp
   src/FSM/StateOpenLoop.cpp
@@ -71,9 +76,6 @@ ament_export_libraries(${PROJECT_NAME})
 
 install(DIRECTORY include/
   DESTINATION include
-)
-install(DIRECTORY config
-  DESTINATION share/${PROJECT_NAME}
 )
 install(FILES adhere_controller.xml
   DESTINATION share/${PROJECT_NAME}
@@ -111,7 +113,7 @@ if(BUILD_TESTING)
     test/test_thruster_allocator.cpp
   )
   target_include_directories(test_thruster_allocator PRIVATE include)
-  target_link_libraries(test_thruster_allocator Eigen3::Eigen)
+  target_link_libraries(test_thruster_allocator ${PROJECT_NAME} Eigen3::Eigen)
   ament_target_dependencies(test_thruster_allocator rclcpp)
 
   # Closed-loop FSM state contract (CLAUDE.md Phase 3.2/3.3 Stage 3.2): fakes CtrlInterfaces
@@ -141,6 +143,17 @@ if(BUILD_TESTING)
     test/test_loop_profiler.cpp
   )
   target_include_directories(test_loop_profiler PRIVATE include)
+
+  # Phase 3.7 verification: FossenDynamics (M symmetry/PD, skew-symmetric Coriolis, dissipative
+  # damping, exact buoyancy restoring force), SixDofPidController (quaternion hemisphere
+  # invariance, conditional anti-windup), RovStateEstimator's contact-aided wall-constraint
+  # update, and the common/OutputSafety.h NaN/Inf sanitization gate.
+  ament_add_gtest(test_dynamics_and_pid
+    test/test_dynamics_and_pid.cpp
+  )
+  target_include_directories(test_dynamics_and_pid PRIVATE include)
+  target_link_libraries(test_dynamics_and_pid ${PROJECT_NAME} Eigen3::Eigen)
+  ament_target_dependencies(test_dynamics_and_pid rclcpp hardware_interface)
 endif()
 
 ament_package()

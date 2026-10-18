@@ -7,8 +7,9 @@
 #include <string>
 #include <vector>
 
+#include "adhere_controller/allocation/ThrusterAllocator.h"
 #include "adhere_controller/common/mathTools.h"
-#include "adhere_controller/common/ThrusterAllocator.h"
+#include "adhere_controller/common/OutputSafety.h"
 
 namespace adhere_controller
 {
@@ -459,6 +460,15 @@ controller_interface::return_type AdhereController::update()
     estimator_.correctDvl(
       dvl_vel, noisy_dvl_state_interface_[3].get().get_value(), model_params_.sensor_mount.r_dvl);
 
+    // Phase 3.7 contact-aided wall-constraint pseudo-measurement (CLAUDE.md Stage 1.4):
+    // arrests normal-axis drift once all 4 raw pad load cells confirm stable wall contact.
+    std::array<double, 4> pad_force_raw;
+    for (size_t i = 0; i < kPadNames.size(); ++i) {
+      pad_force_raw[i] = noisy_loadcell_state_interface_[i].get().get_value();
+    }
+    estimator_.correctContact(
+      pad_force_raw, model_params_.contact_force_thresh, model_params_.workspace_x_min);
+
     const Vec3 est_pos = estimator_.positionWorld();
     const Vec3 est_vel = estimator_.velocityBody();
     const Vec3 est_omega = estimator_.angularVelocityBody();
@@ -518,6 +528,19 @@ controller_interface::return_type AdhereController::update()
 
     if (mode_ == FSMMode::NORMAL) {
       current_state_->run(time, inner_period_);
+      // Centralized output safety gate (CLAUDE.md Phase 3.7): the single place
+      // ci.pending_thruster_cmd[0..7] (written by FSMState::run() above) is sanitized and
+      // actually reaches hardware -- never a direct FSMState -> hw_commands_ write anymore.
+      const uint64_t violations_before = output_safety_violation_count_;
+      sanitizeAndWriteThrusterCommands(
+        ctrl_interfaces_, model_params_, output_safety_violation_count_);
+      if (output_safety_violation_count_ != violations_before) {
+        RCLCPP_ERROR_THROTTLE(
+          get_node()->get_logger(), *get_node()->get_clock(), 1000,
+          "Output safety gate: NaN/Inf thruster command detected, zeroing all 8 thrusters "
+          "(total violations: %lu)",
+          static_cast<unsigned long>(output_safety_violation_count_));
+      }
       next_state_name_ = current_state_->checkChange();
       if (next_state_name_ != current_state_->state_name) {
         mode_ = FSMMode::CHANGE;

@@ -8,9 +8,9 @@
 #include "rclcpp/rclcpp.hpp"
 
 #include "adhere_controller/common/enumClass.h"
-#include "adhere_controller/common/ModelParams.h"
 #include "adhere_controller/common/mathTypes.h"
 #include "adhere_controller/CtrlInterfaces.h"
+#include "adhere_controller/dynamics/ModelParams.h"
 
 namespace adhere_controller
 {

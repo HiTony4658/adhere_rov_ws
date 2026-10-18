@@ -16,9 +16,10 @@
 #include "hardware_interface/loaned_command_interface.hpp"
 #include "hardware_interface/loaned_state_interface.hpp"
 
-#include "adhere_controller/common/ModelParams.h"
-#include "adhere_controller/common/ThrusterAllocator.h"
+#include "adhere_controller/allocation/ThrusterAllocator.h"
+#include "adhere_controller/common/OutputSafety.h"
 #include "adhere_controller/CtrlInterfaces.h"
+#include "adhere_controller/dynamics/ModelParams.h"
 #include "adhere_controller/FSM/StateDepthHold.h"
 #include "adhere_controller/FSM/StateOpenLoop.h"
 #include "adhere_controller/FSM/StatePidHold.h"
@@ -29,6 +30,7 @@ namespace
 using adhere_controller::CtrlInterfaces;
 using adhere_controller::Mat68;
 using adhere_controller::ModelParams;
+using adhere_controller::sanitizeAndWriteThrusterCommands;
 using adhere_controller::Vec3;
 using adhere_controller::Vec8;
 
@@ -107,9 +109,15 @@ public:
 
   const Vec3 & position() const { return pos_; }
 
+  // Phase 3.7: FSMState::run() now writes ci.pending_thruster_cmd instead of calling
+  // set_value() directly -- mirrors AdhereController::update()'s centralized output safety
+  // gate call site, so this fixture exercises the exact same production code path.
+  void writeCommands() { sanitizeAndWriteThrusterCommands(ci, kModelParams, violations_); }
+
   CtrlInterfaces ci;
 
 private:
+  uint64_t violations_ = 0;
   std::array<double, 8> thr_cmd_{};
 
   std::deque<CommandInterface> cmd_handles_;
@@ -142,6 +150,7 @@ TEST(FsmStates, StateDepthHoldTracksSetpointAndTeleopNudgeWithin5mm)
   const rclcpp::Duration period = rclcpp::Duration::from_seconds(kDt);
   for (int i = 0; i < 4000; ++i) {  // 16s settling budget
     state.run(t0, period);
+    plant.writeCommands();
     plant.step(kDt);
   }
   EXPECT_NEAR(plant.position().z(), -3.50, 0.005);
@@ -152,6 +161,7 @@ TEST(FsmStates, StateDepthHoldTracksSetpointAndTeleopNudgeWithin5mm)
   plant.ci.control_inputs_.teleop_heave_z.store(-1.0);
   for (int i = 0; i < 250; ++i) {  // 1.0s at 250Hz
     state.run(t0, period);
+    plant.writeCommands();
     plant.step(kDt);
   }
   plant.ci.control_inputs_.teleop_active.store(false);
@@ -161,6 +171,7 @@ TEST(FsmStates, StateDepthHoldTracksSetpointAndTeleopNudgeWithin5mm)
 
   for (int i = 0; i < 4000; ++i) {  // let it settle at the new, now-frozen target
     state.run(t0, period);
+    plant.writeCommands();
     plant.step(kDt);
   }
   EXPECT_NEAR(plant.position().z(), target_after_nudge, 0.005);
@@ -177,6 +188,7 @@ TEST(FsmStates, StateOpenLoopPureSwayProducesZeroParasiticMoment)
   const rclcpp::Time t0(0, 0, RCL_ROS_TIME);
   const rclcpp::Duration period = rclcpp::Duration::from_seconds(kDt);
   state.run(t0, period);
+  plant.writeCommands();
 
   static const Mat68 b = adhere_controller::buildThrusterAllocationMatrix(kModelParams.thruster_pos, kModelParams.thruster_dir);
   Vec8 u;
@@ -206,6 +218,7 @@ TEST(FsmStates, StatePidHoldMovesThenLocksAtReleasePointWithin5mm)
   plant.ci.control_inputs_.teleop_surge_x.store(-1.0);
   for (int i = 0; i < 750; ++i) {  // 3.0s at 250Hz
     state.run(t0, period);
+    plant.writeCommands();
     plant.step(kDt);
   }
   EXPECT_GT(state.targetPose().pos.x(), 0.5 + 0.3);  // setpoint actually advanced
@@ -217,6 +230,7 @@ TEST(FsmStates, StatePidHoldMovesThenLocksAtReleasePointWithin5mm)
 
   for (int i = 0; i < 2000; ++i) {  // 8.0s settling budget
     state.run(t0, period);
+    plant.writeCommands();
     plant.step(kDt);
   }
 

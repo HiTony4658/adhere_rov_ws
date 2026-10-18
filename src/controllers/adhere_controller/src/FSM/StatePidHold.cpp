@@ -3,8 +3,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include "adhere_controller/allocation/ThrusterAllocator.h"
 #include "adhere_controller/common/mathTools.h"
-#include "adhere_controller/common/ThrusterAllocator.h"
 
 namespace adhere_controller
 {
@@ -17,10 +17,24 @@ namespace
 constexpr double kIntegralPosMax = 180.0;  // N, anti-windup clamp on ki_pos[i]*integral_pos_body_
 constexpr double kIntegralAttMax = 10.0;   // N*m, anti-windup clamp on ki_att[i]*integral_att_body_
 
+SixDofPidController::Gains pidHoldGainsToSixDof(const ModelParams::PidHoldGains & g)
+{
+  SixDofPidController::Gains out;
+  out.kp_pos = g.kp_pos;
+  out.ki_pos = g.ki_pos;
+  out.kd_vel = g.kd_vel;
+  out.kp_att = g.kp_att;
+  out.ki_att = g.ki_att;
+  out.kd_att = g.kd_att;
+  return out;
+}
+
 }  // namespace
 
 StatePidHold::StatePidHold(CtrlInterfaces & ctrl_interfaces, const ModelParams & model_params)
-: FSMState(FSMStateName::PID_HOLD, "state_pid_hold", ctrl_interfaces, model_params)
+: FSMState(FSMStateName::PID_HOLD, "state_pid_hold", ctrl_interfaces, model_params),
+  dynamics_(model_params),
+  pid_(pidHoldGainsToSixDof(model_params.pid_hold), dynamics_, kIntegralPosMax, kIntegralAttMax)
 {
   b_pinv_ = buildThrusterAllocationPseudoInverse(
     buildThrusterAllocationMatrix(model_params_.thruster_pos, model_params_.thruster_dir));
@@ -33,8 +47,7 @@ void StatePidHold::enter()
   p_d_world_ = Vec3(active.pos_w[0], active.pos_w[1], active.pos_w[2]);
   q_d_ = Quat(active.quat_w[0], active.quat_w[1], active.quat_w[2], active.quat_w[3]);
 
-  integral_pos_body_.setZero();
-  integral_att_body_.setZero();
+  pid_.resetIntegrators();
 }
 
 void StatePidHold::run(const rclcpp::Time & /*time*/, const rclcpp::Duration & period)
@@ -111,53 +124,20 @@ void StatePidHold::run(const rclcpp::Time & /*time*/, const rclcpp::Duration & p
     q_d_ = quatFromRPY(q_d_rpy);
   }
 
-  // Errors in the body frame. e_r is the minimal-rotation SO(3) attitude error (mathTools.h's
-  // quatError()), replacing the Phase 3.5 Euler-difference vector -- singularity-free and valid
-  // for arbitrarily large attitude errors, not just small angles.
-  const Vec3 e_p_body = r.transpose() * (p_d_world_ - pos_world);
-  const Vec3 e_v_body = v_d_body - vel_body;
-  const Vec3 e_r = quatError(q_est, q_d_);
-  const Vec3 e_omega_body = omega_cmd_body - omega_body;
+  SixDofPidController::Inputs in;
+  in.p_d_world = p_d_world_;
+  in.q_d = q_d_;
+  in.p_est_world = pos_world;
+  in.q_est = q_est;
+  in.v_d_body = v_d_body;
+  in.omega_cmd_body = omega_cmd_body;
+  in.v_est_body = vel_body;
+  in.omega_est_body = omega_body;
 
-  integral_pos_body_ += e_p_body * dt;
-  integral_att_body_ += e_r * dt;
-  for (int i = 0; i < 3; ++i) {
-    integral_pos_body_(i) = saturation(
-      integral_pos_body_(i), -kIntegralPosMax / gains.ki_pos(i), kIntegralPosMax / gains.ki_pos(i));
-    integral_att_body_(i) = saturation(
-      integral_att_body_(i), -kIntegralAttMax / gains.ki_att(i), kIntegralAttMax / gains.ki_att(i));
-  }
-
-  // Hydrostatic/drag dynamics feedforward (CLAUDE.md Phase 3.2 Stage 2.2.4), sourced from
-  // ModelParams rather than depending on adhere_mujoco_hardware's FossenHydrodynamics (CLAUDE.md
-  // Sec.3's package-decoupling rule). Default ModelParams values reproduce the same
-  // ~+1.962N net buoyancy figure: rho*g*V - m_dry*g = 1000*9.81*0.0202 - 20.0*9.81
-  // = 198.162 - 196.2 = +1.962N (gravity acts on the real dry mass, not the MJCF <inertial>
-  // mass, which is dry mass + hydrodynamic added mass -- an inertial reaction effect, not real
-  // weight).
-  const double buoyancy_full = model_params_.rho_water * model_params_.gravity *
-    model_params_.displaced_volume;
-  const Vec3 f_buoy_net_world(0.0, 0.0, buoyancy_full - model_params_.vehicle_mass * model_params_.gravity);
-  const Vec3 f_buoy_full_world(0.0, 0.0, buoyancy_full);
-  const Vec3 f_buoy_ff_body = -(r.transpose() * f_buoy_net_world);
-  const Vec3 tau_cob_ff_body =
-    -model_params_.cob_offset_body.cross(r.transpose() * f_buoy_full_world);
-  const Vec3 f_drag_ff_body = model_params_.D_lin.cwiseProduct(v_d_body) +
-    model_params_.D_quad.cwiseProduct(v_d_body.cwiseProduct(v_d_body.cwiseAbs()));
-
-  const Vec3 w_lin = gains.kp_pos.cwiseProduct(e_p_body) +
-    gains.ki_pos.cwiseProduct(integral_pos_body_) + gains.kd_vel.cwiseProduct(e_v_body) +
-    f_buoy_ff_body + f_drag_ff_body;
-  const Vec3 w_ang = gains.kp_att.cwiseProduct(e_r) + gains.ki_att.cwiseProduct(integral_att_body_) +
-    gains.kd_att.cwiseProduct(e_omega_body) + tau_cob_ff_body;
-
-  Vec6 wrench_des;
-  wrench_des << w_lin, w_ang;
-
+  const Vec6 wrench_des = pid_.computeWrench(in, dt);
   const Vec8 u = b_pinv_ * wrench_des;
   for (int i = 0; i < 8; ++i) {
-    ctrl_interfaces_.thruster_command_interface_[i].get().set_value(
-      saturation(u(i), model_params_.thruster_min[i], model_params_.thruster_max[i]));
+    ctrl_interfaces_.pending_thruster_cmd[i] = u(i);
   }
 }
 

@@ -1,7 +1,8 @@
 #ifndef ADHERE_CONTROLLER__ESTIMATOR__ROVSTATEESTIMATOR_H_
 #define ADHERE_CONTROLLER__ESTIMATOR__ROVSTATEESTIMATOR_H_
 
-#include "adhere_controller/common/mathTools.h"
+#include <array>
+
 #include "adhere_controller/common/mathTypes.h"
 
 namespace adhere_controller
@@ -10,8 +11,8 @@ namespace adhere_controller
 // RovStateEstimator (CLAUDE.md Phase 3.5 Stage 2.2): fuses the noisy multi-rate sensors
 // (500Hz IMU, 50Hz Depth, 20Hz DVL) into a single pose/velocity/attitude estimate, running at
 // 500Hz inside AdhereController::update() ahead of the inner-loop gate. Pure math, no ROS/
-// MuJoCo dependency (same header-only style as MultiRateDecimator.h/ThrusterAllocator.h) --
-// testable in isolation.
+// MuJoCo dependency (same style as MultiRateDecimator.h/ThrusterAllocator.h) -- testable in
+// isolation. Implementation lives in src/estimator/RovStateEstimator.cpp (CLAUDE.md Phase 3.7).
 //
 // Design note: this is a DECOUPLED, fixed-gain (steady-state exponential-moving-average)
 // Kalman/complementary filter per channel, not a single joint-covariance EKF. Each correction
@@ -22,106 +23,56 @@ namespace adhere_controller
 // Attitude is tracked directly in quaternion form (gyro-integrated prediction blended with the
 // noisy IMU/AHRS quaternion measurement every tick, since that measurement arrives at the full
 // 500Hz rate); position/velocity use IMU-accel dead-reckoning corrected by DVL (lever-arm
-// compensated) at 20Hz and by Depth at 50Hz.
+// compensated) at 20Hz and by Depth at 50Hz. Phase 3.7 adds a contact-aided pseudo-measurement
+// (correctContact()) that arrests normal-axis drift once the hull is confirmed pressing on the
+// wall by all 4 pad load cells.
 class RovStateEstimator
 {
 public:
   // Re-latches the estimate to a known pose (e.g. ground truth at FSM-state enter()) and clears
   // all "have I seen this sample yet" edge-detection state. Called whenever estimation_mode
   // transitions into "sensor_fusion" so the filter does not have to converge from zero.
-  void reset(const Vec3 & p0_world, const Vec3 & v0_body, const Quat & q0)
-  {
-    p_hat_world_ = p0_world;
-    v_hat_body_ = v0_body;
-    q_hat_ = q0;
-    omega_hat_body_.setZero();
-    have_last_depth_ = false;
-    have_last_dvl_ = false;
-  }
+  void reset(const Vec3 & p0_world, const Vec3 & v0_body, const Quat & q0);
 
   // 500Hz prediction step. gyro_meas/accel_meas are the raw noisy IMU readings (bias/noise
   // already baked in by the sensor model -- the estimator does not need to know them
   // separately, exactly like a real AHRS/INS front end).
-  void predict(const Vec3 & gyro_meas, const Vec3 & accel_meas, double dt)
-  {
-    omega_hat_body_ = gyro_meas;
-
-    // Quaternion kinematics: q_dot = 0.5 * q (x) [0, omega]. Small-angle exponential-map
-    // increment, renormalized every tick (cheap and accurate at 500Hz/2ms steps).
-    const Quat dq = smallAngleQuat(gyro_meas * dt);
-    q_hat_ = normalizeQuat(quatMul(q_hat_, dq));
-
-    // Body-frame velocity dead-reckoning from specific force/linear acceleration (already
-    // gravity-free kinematic acceleration, matching AdhereMujocoHardware's IMU model).
-    v_hat_body_ += accel_meas * dt;
-
-    // World-frame position integration using the current attitude estimate.
-    p_hat_world_ += quatToRotMat(q_hat_) * v_hat_body_ * dt;
-  }
+  void predict(const Vec3 & gyro_meas, const Vec3 & accel_meas, double dt);
 
   // 500Hz attitude correction: blends the gyro-integrated prediction with the noisy IMU/AHRS
-  // orientation measurement (nlerp with sign-alignment, cheap and accurate for the small
+  // orientation measurement (nlerp with hemisphere-alignment, cheap and accurate for the small
   // per-tick corrections this filter makes). Called every tick right after predict().
-  void correctAttitude(const Quat & q_meas)
-  {
-    const double dot = q_hat_.dot(q_meas);
-    const Quat q_meas_aligned = dot < 0.0 ? -q_meas : q_meas;
-    q_hat_ = normalizeQuat((1.0 - kAttGain) * q_hat_ + kAttGain * q_meas_aligned);
-  }
+  void correctAttitude(const Quat & q_meas);
 
   // 50Hz Depth correction (CLAUDE.md Stage 2.2): call every tick with the latest noisy depth
   // reading -- internally no-ops unless the sample-and-hold value has actually changed (new
   // sample arrived), so the caller does not need to track the hardware's own decimation phase.
-  void correctDepth(double z_meas, const Vec3 & r_depth_body)
-  {
-    if (have_last_depth_ && z_meas == last_depth_meas_) {
-      return;
-    }
-    have_last_depth_ = true;
-    last_depth_meas_ = z_meas;
-
-    const RotMat r = quatToRotMat(q_hat_);
-    const double z_pred = p_hat_world_.z() + (r * r_depth_body).z();
-    const double residual = z_meas - z_pred;
-    p_hat_world_.z() += kDepthPosGain * residual;
-
-    // Secondary vertical-velocity correction: nudge the world-Z component of the current
-    // velocity estimate toward the residual rate, then re-project into body frame.
-    Vec3 v_world = r * v_hat_body_;
-    v_world.z() += kDepthVelGain * residual;
-    v_hat_body_ = r.transpose() * v_world;
-  }
+  void correctDepth(double z_meas, const Vec3 & r_depth_body);
 
   // 20Hz DVL correction with exact lever-arm compensation (CLAUDE.md Stage 2.2):
   // y_v_com = v_dvl_meas - omega_hat x r_dvl, then a steady-state Kalman update on v_hat_body_.
   // range_meas (acoustic wall distance, world X at the DVL site) additionally anchors position
   // drift along the wall-normal axis. Edge-detected exactly like correctDepth().
-  void correctDvl(const Vec3 & v_dvl_meas_body, double range_meas, const Vec3 & r_dvl_body)
-  {
-    if (have_last_dvl_ && v_dvl_meas_body == last_dvl_meas_) {
-      return;
-    }
-    have_last_dvl_ = true;
-    last_dvl_meas_ = v_dvl_meas_body;
+  void correctDvl(const Vec3 & v_dvl_meas_body, double range_meas, const Vec3 & r_dvl_body);
 
-    const Vec3 y_v_com = v_dvl_meas_body - omega_hat_body_.cross(r_dvl_body);
-    v_hat_body_ += kDvlVelGain * (y_v_com - v_hat_body_);
-
-    const RotMat r = quatToRotMat(q_hat_);
-    const double x_pred = p_hat_world_.x() + (r * r_dvl_body).x();
-    p_hat_world_.x() += kDvlRangeGain * (range_meas - x_pred);
-  }
+  // Phase 3.7 contact-aided wall-constraint pseudo-measurement update: call every 500Hz tick
+  // with the 4 raw (unfiltered) loadcell_noisy readings. Internally EMA-filters them, and only
+  // once ALL 4 filtered pad forces exceed `thresh` does it blend v_hat_body_.x() -> 0 and
+  // p_hat_world_.x() -> x_wall_contact (eliminating low-frequency DVL integration drift during
+  // prolonged wall adhesion, CLAUDE.md Phase 3.7 Stage 1.3).
+  void correctContact(
+    const std::array<double, 4> & pad_force_meas, double thresh, double x_wall_contact);
 
   const Vec3 & positionWorld() const { return p_hat_world_; }
   const Vec3 & velocityBody() const { return v_hat_body_; }
   const Vec3 & angularVelocityBody() const { return omega_hat_body_; }
   const Quat & orientation() const { return q_hat_; }
-  Vec3 rpy() const { return rotMatToRPY(quatToRotMat(q_hat_)); }
+  Vec3 rpy() const;
 
 private:
-  // quatMul/normalizeQuat/smallAngleQuat now live in mathTools.h (Phase 3.6: hoisted out of here
-  // so StatePidHold's quaternion setpoint integration can reuse the exact same math instead of
-  // duplicating it).
+  // quatMul/normalizeQuat/smallAngleQuat/alignQuaternionHemisphere now live in mathTools.h
+  // (Phase 3.6/3.7: hoisted out of here so StatePidHold's/SixDofPidController's quaternion math
+  // reuses the exact same implementations instead of duplicating them).
 
   // Fixed correction gains (see class-level design note): analytically chosen from the
   // CLAUDE.md Stage 2.1 noise std values via the EMA steady-state-variance formula, verified
@@ -132,6 +83,11 @@ private:
   static constexpr double kDepthVelGain = 0.10;
   static constexpr double kDvlVelGain = 0.50;
   static constexpr double kDvlRangeGain = 0.30;
+  // Phase 3.7 contact-aided update gains: EMA filter on the 4 raw loadcell channels, and the
+  // pseudo-measurement blend gains on v_x/p_x once contact is confirmed.
+  static constexpr double kContactForceFilterGain = 0.20;
+  static constexpr double kContactVelGain = 0.50;
+  static constexpr double kContactPosGain = 0.20;
 
   Vec3 p_hat_world_ = Vec3::Zero();
   Vec3 v_hat_body_ = Vec3::Zero();
@@ -142,6 +98,9 @@ private:
   double last_depth_meas_ = 0.0;
   bool have_last_dvl_ = false;
   Vec3 last_dvl_meas_ = Vec3::Zero();
+
+  bool have_pad_force_filtered_ = false;
+  std::array<double, 4> pad_force_filtered_ = {0.0, 0.0, 0.0, 0.0};
 };
 
 }  // namespace adhere_controller

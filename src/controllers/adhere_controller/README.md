@@ -17,34 +17,56 @@ MPPI 外环。
 ```text
 include/adhere_controller/
 ├── adhere_controller.hpp        # AdhereController 声明
-├── CtrlInterfaces.h             # 零拷贝命令包装 + ActiveState（唯一的 FSM 可见状态） + ControlInputs
+├── CtrlInterfaces.h             # 零拷贝命令包装 + ActiveState（唯一的 FSM 可见状态） + ControlInputs +
+│                                # pending_thruster_cmd（输出安全闸门写入点，Phase 3.7）
+├── dynamics/
+│   ├── ModelParams.h            # 运行时加载的模型解耦物理/增益/传感器安装参数（CLAUDE.md Phase 3.3/3.5/3.7）
+│   └── FossenDynamics.h         # 标称 Fossen 刚体+附加质量模型：M/C(ν)/D(ν)/g(q)/正向动力学（Phase 3.7）
+├── allocation/
+│   └── ThrusterAllocator.h      # 6x8 推力分配矩阵 B/B^+ + Pre-MPPI 的 G/G^+/A_contact/C_kern（Phase 3.6）
 ├── estimator/
-│   └── RovStateEstimator.h     # 500Hz 多速率传感器融合（CLAUDE.md Phase 3.5）
+│   └── RovStateEstimator.h      # 500Hz 多速率传感器融合 + 接触辅助墙面约束更新（Phase 3.5/3.7）
+├── algorithms/
+│   ├── pid/
+│   │   └── SixDofPidController.h  # 解耦 6-DOF 位置 + SO(3) 姿态 PID（从 StatePidHold 抽取，Phase 3.7）
+│   ├── wbc/
+│   │   └── WbcAllocatorBase.h     # Phase 4 12D OSQP 分配器的纯数据契约抽象基类（Phase 3.7）
+│   └── mppi/
+│       └── MppiPlannerBase.h      # Phase 4 异步 CUDA MPPI 外环规划器的纯数据契约抽象基类（Phase 3.7）
 ├── FSM/
 │   ├── FSMState.h               # 抽象基类（checkFsmCommandChange()/targetPose() 共享实现）
 │   ├── StatePassive.h
-│   ├── StateDepthHold.h
+│   ├── StateDepthHold.h         # 委托给 SixDofPidController 的"仅深度"简化模式（Phase 3.7）
 │   ├── StateOpenLoop.h
-│   └── StatePidHold.h
+│   └── StatePidHold.h           # 仅保留设定点积分，误差->力矩律委托给 SixDofPidController（Phase 3.7）
 └── common/
     ├── enumClass.h              # FSMStateName（PASSIVE/DEPTH_HOLD/OPEN_LOOP/PID_HOLD）/ FSMMode
     ├── mathTypes.h              # Eigen 类型别名（Vec3/Vec6/Vec8/Mat68/Mat86/Mat34/Mat43/Mat48/RotMat）
     ├── mathTools.h              # quatToRotMat / rpyToRotMat / rotMatToRPY / quatMul / quatInverse /
-    │                            # quatFromRPY / quatError / smallAngleQuat / saturation（Phase 3.6）
+    │                            # quatFromRPY / quatError / smallAngleQuat / saturation /
+    │                            # alignQuaternionHemisphere / clampStepVec3 / clampSlewQuat（Phase 3.7）
     ├── MultiRateDecimator.h     # 均匀整数抽取多速率调度（CLAUDE.md Phase 3.1.1）
     ├── LoopProfiler.h           # 频率(Hz)/执行延迟(ms)/超时计数实时观测（CLAUDE.md Phase 3.6）
-    ├── ModelParams.h            # 运行时加载的模型解耦物理/增益/传感器安装参数（CLAUDE.md Phase 3.3/3.5）
-    └── ThrusterAllocator.h      # 6x8 推力分配矩阵 B/B^+ + Pre-MPPI 的 G/G^+/A_contact/C_kern（Phase 3.6）
+    └── OutputSafety.h           # sanitizeAndWriteThrusterCommands()：NaN/Inf 全零 + 饱和写出闸门（Phase 3.7）
 
 src/
-├── adhere_controller.cpp        # 生命周期方法 + 均匀多速率调度 + 500Hz 状态估计/融合 + 4 话题订阅/发布 + FSM 切换逻辑 + pluginlib 导出
+├── adhere_controller.cpp        # 生命周期方法 + 均匀多速率调度 + 500Hz 状态估计/融合 + 4 话题订阅/发布 +
+│                                # FSM 切换逻辑 + 集中式输出安全闸门调用点 + pluginlib 导出
+├── dynamics/
+│   ├── ModelParams.cpp
+│   └── FossenDynamics.cpp
+├── allocation/
+│   └── ThrusterAllocator.cpp
+├── estimator/
+│   └── RovStateEstimator.cpp
+├── algorithms/pid/
+│   └── SixDofPidController.cpp
 └── FSM/
     ├── StatePassive.cpp
     ├── StateDepthHold.cpp
     ├── StateOpenLoop.cpp
     └── StatePidHold.cpp
 
-config/controllers.yaml          # controller_manager 参数服务器文档（历史参考，见下）
 launch/mujoco.launch.py          # 闭环启动文件：robot_state_publisher + adhere_mujoco_node
                                   # (autostart_controllers=['adhere_controller']) + RViz2
                                   # + launch_teleop:=true 时自动包含 adhere_keyboard_input 的
@@ -55,8 +77,16 @@ test/
 ├── test_thruster_allocator.cpp       # 纯 Eigen gtest：B*B^+ ~= I_6，零寄生力矩，A_contact/C_kern（Phase 3.6）
 ├── test_fsm_states.cpp               # 闭环 gtest：假 CtrlInterfaces + 质点平面"虚拟物理"验证 3 态收敛性
 ├── test_sensor_fusion_and_teleop.cpp # DVL 杠杆臂补偿收敛性 + sensor_fusion 闭环跟踪 + LT/RT 映射（CLAUDE.md Phase 3.5）
-└── test_loop_profiler.cpp            # 纯逻辑 gtest：Hz EMA 收敛性 + 执行延迟/超时计数（CLAUDE.md Phase 3.6）
+├── test_loop_profiler.cpp            # 纯逻辑 gtest：Hz EMA 收敛性 + 执行延迟/超时计数（CLAUDE.md Phase 3.6）
+└── test_dynamics_and_pid.cpp         # FossenDynamics/SixDofPidController/接触辅助估计/输出安全闸门（Phase 3.7）
 ```
+
+注：`config/controllers.yaml`（历史上的 `controller_manager` 参数文档）与
+`adhere_mujoco_hardware/config/mujoco_sim.rviz` 均已在 Phase 3.7 移除/迁移——
+前者确认从未被 `launch/mujoco.launch.py` 实际加载，所有真实参数唯一来源于
+`simplified_v1_description/config/robot_control.yaml`；后者迁移到
+`simplified_v1_description/config/mujoco_sim.rviz`，使 `adhere_mujoco_hardware`
+真正做到零模型/可视化配置文件。
 
 ## 模型解耦：`ModelParams` + 动态 `ThrusterAllocator`（CLAUDE.md 第 3 节）
 

@@ -1,7 +1,7 @@
 #include "adhere_controller/FSM/StateOpenLoop.h"
 
+#include "adhere_controller/allocation/ThrusterAllocator.h"
 #include "adhere_controller/common/mathTools.h"
-#include "adhere_controller/common/ThrusterAllocator.h"
 
 namespace adhere_controller
 {
@@ -15,6 +15,7 @@ StateOpenLoop::StateOpenLoop(CtrlInterfaces & ctrl_interfaces, const ModelParams
 
 void StateOpenLoop::enter()
 {
+  ctrl_interfaces_.pending_thruster_cmd.fill(0.0);
   for (auto & cmd : ctrl_interfaces_.thruster_command_interface_) {
     cmd.get().set_value(0.0);
   }
@@ -39,13 +40,13 @@ void StateOpenLoop::run(const rclcpp::Time & /*time*/, const rclcpp::Duration & 
 
   const Vec8 u = b_pinv_ * wrench_des;
   for (int i = 0; i < 8; ++i) {
-    ctrl_interfaces_.thruster_command_interface_[i].get().set_value(
-      saturation(u(i), model_params_.thruster_min[i], model_params_.thruster_max[i]));
+    ctrl_interfaces_.pending_thruster_cmd[i] = u(i);
   }
 }
 
 void StateOpenLoop::exit()
 {
+  ctrl_interfaces_.pending_thruster_cmd.fill(0.0);
   for (auto & cmd : ctrl_interfaces_.thruster_command_interface_) {
     cmd.get().set_value(0.0);
   }

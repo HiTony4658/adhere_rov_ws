@@ -1935,3 +1935,148 @@ test --packages-select adhere_controller`：24/24 gtest 用例全部通过
 启动未报错）、`/rov/controller_state`/`/rov/runtime_diagnostics` 均正常
 发布、`kill -INT` 后进程在 3s 内全部干净退出（`outer_worker_thread_`
 无死锁）。
+
+## Phase 3.7（2026-10-18）：`adhere_controller` 目录模块化、单一配置源、
+估计器/输出安全硬化
+
+### 动机
+
+Phase 4（`Baseline MPPI`/`KAMR-MPPI`）落地前，`adhere_controller` 的
+`include/.../common/` 已经变成一个大杂烩——动力学参数（`ModelParams.h`）、
+控制分配矩阵（`ThrusterAllocator.h`）、计时工具（`LoopProfiler.h`/
+`MultiRateDecimator.h`）、数学工具（`mathTools.h`）全混在一起，且
+`RovStateEstimator`/`ThrusterAllocator`/`ModelParams` 全部以内联头文件实现，
+PID 控制律直接写死在 `StateDepthHold.cpp`/`StatePidHold.cpp` 里。随着后续要
+陆续加入 `pid`/`wbc`/`mppi` 等多种控制/规划算法，必须先把 `include/` 与
+`src/` 拆成干净、可扩展的子目录层级，让 `.cpp` 编译单元与头文件分离。同时
+发现两处重复/错放的配置文件（`adhere_controller/config/controllers.yaml`、
+`adhere_mujoco_hardware/config/mujoco_sim.rviz`）需要清理，以及三处
+缺失的硬化点：控制器侧缺一个可调用的标称 `FossenDynamics` 算子、
+`RovStateEstimator` 缺少接触辅助的伪测量更新、四元数插值/误差缺少显式的
+半球对齐、`AdhereController::update()` 写出推力器指令前缺少最终的
+NaN/Inf 安全闸门。
+
+### 目录重组（`include/adhere_controller/` 与 `src/`）
+
+新增 `dynamics/`（`ModelParams.h`/`FossenDynamics.h` + 对应 `.cpp`）、
+`allocation/`（`ThrusterAllocator.h` + `.cpp`）、`estimator/`
+（`RovStateEstimator.h` + `.cpp`）、`algorithms/pid/`
+（`SixDofPidController.h` + `.cpp`）、`algorithms/wbc/`
+（`WbcAllocatorBase.h`，纯抽象数据契约，无实现）、`algorithms/mppi/`
+（`MppiPlannerBase.h`，同样纯抽象）五个新子目录；`ModelParams.h`/
+`ThrusterAllocator.h` 从纯头文件内联实现改为"声明头文件 + `.cpp`
+实现"，机械搬移原有逻辑，数值行为不变（`colcon test` 全部既有 gtest 回归
+验证零差异）。`common/` 收敛为真正轻量、无状态的工具集：`enumClass.h`/
+`mathTypes.h`/`mathTools.h`/`LoopProfiler.h`/`MultiRateDecimator.h`，新增
+`OutputSafety.h`（见下）。`CMakeLists.txt` 的 `add_library()` 源文件列表、
+所有 `#include` 路径同步更新。
+
+### `FossenDynamics`（新增，`dynamics/FossenDynamics.h`+`.cpp`）
+
+标称 Fossen 6-DOF 刚体+附加质量模型，CoM 位于 body 原点、惯量主轴对齐的
+对角质量矩阵假设（与只读参考仓库 `~/Research/mujoco_mppi_ws/src/env/
+hydrodynamics.py` 同样不建模离轴耦合一致）：`M=diag(m,m,m,Ixx,Iyy,Izz)+
+diag(added_mass_lin,added_mass_ang)`（`ModelParams` 新增
+`dynamics.{inertia_diag,added_mass_lin,added_mass_ang}` 三个 YAML 字段）；
+`coriolisWrench(ν)` 用对角质量矩阵的闭式反对称 Coriolis-离心矩阵
+（Fossen《Handbook of Marine Craft Hydrodynamics and Motion Control》
+式 6.43），反对称性由构造保证，`ν^T C(ν)ν≡0` 恒成立；`dampingWrench(ν)`
+直接复用既有的 `D_lin/D_quad/D_ang_lin/D_ang_quad`；`computeRestoringWrench
+(q)` 把原先写死在 `StatePidHold.cpp` 里的浮力/重力恢复力矩公式原样搬出
+（真实验证：`rho_water*gravity*displaced_volume-vehicle_mass*gravity`
+在默认参数下算出 `+1.962N`，与 `StatePidHold.cpp` 旧注释记录的数值吻合，
+新增 gtest 直接断言这个真实计算值，而非盲目断言任务描述里给出的占位
+示例数字）；`forwardDynamics(ν,q,τ)=M^-1(τ-C(ν)ν-D(ν)ν-g(q))`。
+
+### `algorithms/pid/SixDofPidController`（新增）
+
+从 `StatePidHold.cpp` 里抽取出误差→力矩律：半球对齐
+（`mathTools.h::alignQuaternionHemisphere()`）后再调用 `quatError()`
+求 SO(3) 姿态误差、条件积分抗饱和（某轴积分已达到其限幅且新误差会继续
+把它推得更远时，直接冻结该轴积分，而不是事后硬限幅）、测量值微分
+（Kd 作用在估计速度/角速度上，从不对设定点做差分，杜杆设定点阶跃不会
+产生微分冲击）、通过注入的 `FossenDynamics` 做浮力/阻力前馈。
+`StateDepthHold`（Phase 3.7）改为用同一个 `SixDofPidController`
+跑一个精简的"仅深度"模式：每拍把横向 X/Y 目标重新锚定到当前估计位置
+（零横向控制权限，与原实现完全一致）、姿态目标设为单位四元数（等价于
+原来的 `-kp_att*rpy-kd_att*omega` 小角度阻尼律，因为 `quatError(q_est,
+identity)` 在小角度下约等于 `-rpy`），并额外获得了原来完全没有的浮力
+前馈——这是一处刻意的行为改进，不是回归，已在真实 MuJoCo 闭环中验证
+（`DEPTH_HOLD` 从 Z=-2.0m 收敛到目标 -3.0m，误差 <6mm）。`StatePidHold`
+保留设定点积分（摇杆驱动的推进、离散 `MODE_*` 处理）在 FSM 层，只把
+误差→力矩律本身委托出去（真实闭环验证：`PID_HOLD` 收敛到
+`[0.3,0.2,-2.5]` 设定点，三轴误差均 <5mm）。
+
+### `algorithms/wbc/WbcAllocatorBase.h` 与 `algorithms/mppi/MppiPlannerBase.h`（新增）
+
+纯抽象数据契约头文件，无实现，标记 Phase 4 的落地点：
+`NominalWrenchCmd`/`WbcAllocationResult`（12D OSQP 分配器契约）、
+`MppiPlannerBase::solve(ActiveState, PoseTarget)->NominalWrenchCmd`
+（异步 CUDA MPPI 外环契约，复用既有 `OuterLoopInput`/`OuterLoopOutput`
+握手架构里已有的快照字段，替换 `outerWorkerLoop()` 函数体即可接入，
+无需再改线程/握手架构本身）。
+
+### `mathTools.h` 新增半球对齐与阶跃限幅工具
+
+`alignQuaternionHemisphere(q_ref,q)`：`q_ref·q<0` 时翻转 `q` 的符号——
+除了供 `SixDofPidController` 在求姿态误差前显式对齐外，也修正了
+`RovStateEstimator::correctAttitude()` 的 nlerp 混合里原先手写符号检查
+的写法（改为复用这个共享原语，行为不变，但消除了重复实现）。新增通用
+`clampStepVec3()`/`clampSlewQuat()` 阶跃限幅原语（基于
+`quatError()`+`smallAngleQuat()`，奇异点自由），本阶段只在新增 gtest 里
+验证，未接入现有 FSM 设定点逻辑（避免引入行为漂移）。
+
+### `RovStateEstimator` 接触辅助墙面约束更新
+
+新增 `ModelParams.contact_force_thresh`（默认 `2.0N`，新 YAML 顶层键）。
+新增 `RovStateEstimator::correctContact(pad_force_meas[4], thresh,
+x_wall_contact)`，由 `AdhereController::update()` 在 `sensor_fusion`
+模式下每拍传入 4 路原始 `loadcell_noisy` 读数调用：内部对 4 路做 EMA
+滤波，仅当 4 路滤波后力值全部超过阈值时，才把 `v_hat_body_.x()→0`、
+`p_hat_world_.x()→workspace_x_min`（复用既有的墙面最小站位参数作为接触
+平面代理，不引入新几何参数）做伪测量混合更新，消除长时间贴墙吸附时
+DVL 积分漂移。
+
+### 输出安全闸门
+
+`FSMState::run()` 不再直接调用 `.set_value()` 写推力器——改为写入
+`CtrlInterfaces` 新增的 `pending_thruster_cmd[8]`。新增头文件式
+`common/OutputSafety.h::sanitizeAndWriteThrusterCommands()`：检测到任意
+一路 NaN/Inf，8 路全部清零并自增违规计数；否则逐路饱和到
+`[thruster_min,thruster_max]`。`AdhereController::update()` 在
+`tick.inner_due` 内、`state.run()` 之后唯一调用一次，是推力器指令写出
+硬件前的集中式闸门；违规时节流 `RCLCPP_ERROR`。全部 4 个 FSM 状态 `.cpp`
+与测试用例的假 `CtrlInterfaces` 夹具同步改为先调用这个闸门再读取写入
+的推力器值。
+
+### 配置文件去重
+
+`git rm adhere_controller/config/controllers.yaml`——确认是死文件：只装载
+`mujoco.launch.py` 从未实际加载的 3 行 `controller_manager` 元信息，真实
+参数全部只存在于 `robot_control.yaml` 的 `adhere_mujoco_node` 键下；
+同步移除 `adhere_controller/CMakeLists.txt` 里对应的 `install(DIRECTORY
+config...)` 规则与空目录。`git mv adhere_mujoco_hardware/config/
+mujoco_sim.rviz` 到 `simplified_v1_description/config/mujoco_sim.rviz`，
+同步移除 `adhere_mujoco_hardware/CMakeLists.txt` 里的 `config` 安装规则
+与空目录，`mujoco.launch.py` 的 RViz 配置路径解析挪到已有的
+`pkg_description_share`（`OpaqueFunction` 内部），不再从
+`adhere_mujoco_hardware` 的 share 目录读取任何文件——该包现在零模型/
+可视化配置文件。
+
+### 验证结果
+
+`colcon build --symlink-install`（5 个包）零警告零错误；`colcon test
+--packages-select adhere_controller`：35/35 gtest 用例全部通过（既有
+24 个 + 新增 `test_dynamics_and_pid.cpp` 11 个：`FossenDynamics` 质量
+矩阵对称正定/Coriolis 反对称二次型恒零/阻尼耗散非负/浮力恢复力精确值，
+`SixDofPidController` 四元数半球不变性（`<1e-12`）与条件抗饱和限幅，
+`RovStateEstimator` 接触辅助更新的漂移约束 vs. 无接触时自由漂移对比，
+`OutputSafety` 的 NaN/Inf 全零化 vs. 有限越界值仅饱和不清零）；lint 结果
+与既有基线一致（仅剩全仓库预先存在的缺版权头、cppcheck 对 `.h` 文件误判
+为 C 代码等 Phase 2.14 起已记录的预先存在失败，新增文件本身零 uncrustify
+偏差）。真实 MuJoCo 闭环（`mujoco.launch.py headless:=true use_rviz:=
+false`）确认：`list_controllers` 显示 `adhere_controller` 正常 `active`；
+`DEPTH_HOLD`（`MODE_DEPTH_ONLY` 目标 Z=-3.0m）从 Z=-2.0m 收敛到
+`Z=-2.994m`（<6mm 误差）；`PID_HOLD`（`MODE_FULL_POSE` 目标
+`[0.3,0.2,-2.5]`）收敛到 `[0.300,0.200,-2.497]`（三轴误差均 <5mm）；
+进程 `SIGINT` 后干净退出，无残留。

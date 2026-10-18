@@ -31,11 +31,13 @@ src/
 ├── mujoco_viewer.cpp
 └── adhere_mujoco_node.cpp          # 500Hz ControllerManager 循环 + 100Hz TF/Odom/Marker 发布
 
-config/
-└── mujoco_sim.rviz                 # RViz2 显示配置（Odometry + EnvironmentMarkers，TF 坐标系缩放 0.12）
-
 adhere_mujoco_hardware.xml           # pluginlib 插件描述文件（hardware_interface 导出）
 ```
+
+注：本包不再拥有任何 `config/` 目录——RViz2 显示配置
+`mujoco_sim.rviz`（Odometry + EnvironmentMarkers，TF 坐标系缩放 0.12）已在
+Phase 3.7 迁移到 `simplified_v1_description/config/mujoco_sim.rviz`，由
+`launch/mujoco.launch.py` 统一解析，使本包真正做到零模型/可视化配置文件。
 
 ## ROS 2 Foxy 生命周期方法签名（严格遵守，无 `time, period` 参数）
 

@@ -33,8 +33,6 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    hardware_share = get_package_share_directory("adhere_mujoco_hardware")
-
     declare_headless = DeclareLaunchArgument(
         "headless", default_value="false",
         description="If true, AdhereMujocoHardware skips the embedded GLFW/OpenGL viewer window.")
@@ -62,7 +60,7 @@ def generate_launch_description():
                      "activate in-process (CLAUDE.md Phase 3.1.1 Stage 2.2). Pass '[]' for the "
                      "former open-loop-only behavior (u=0, no FSM).")
     declare_estimation_mode = DeclareLaunchArgument(
-        "estimation_mode", default_value="ground_truth",
+        "estimation_mode", default_value="sensor_fusion",
         description="Phase 3.5 dual state-acquisition mode for AdhereController's "
                      "CtrlInterfaces::active_state: 'ground_truth' (noise-free hardware "
                      "odometry) or 'sensor_fusion' (RovStateEstimator fusing the noisy "
@@ -107,6 +105,21 @@ def generate_launch_description():
         # default, so the parameter's effective value is unaffected either way.
         if autostart_controllers_value:
             adhere_mujoco_node_parameters["autostart_controllers"] = autostart_controllers_value
+
+        # RViz config now ships from pkg_description's own config/ (CLAUDE.md Phase 3.7: moved
+        # out of adhere_mujoco_hardware, which owns zero model/visualization config files),
+        # resolved here (not at module scope) since pkg_description_share already needs the
+        # launch-context substitution above.
+        rviz_config = os.path.join(pkg_description_share, "config", "mujoco_sim.rviz")
+        rviz = Node(
+            package="rviz2",
+            executable="rviz2",
+            name="rviz2",
+            output="screen",
+            arguments=["-d", rviz_config],
+            condition=IfCondition(LaunchConfiguration("use_rviz")),
+        )
+
         return [
             Node(
                 package="robot_state_publisher",
@@ -122,19 +135,10 @@ def generate_launch_description():
                 output="screen",
                 parameters=[robot_control_yaml, adhere_mujoco_node_parameters],
             ),
+            rviz,
         ]
 
     adhere_mujoco_node = OpaqueFunction(function=_make_robot_description)
-
-    rviz_config = os.path.join(hardware_share, "config", "mujoco_sim.rviz")
-    rviz = Node(
-        package="rviz2",
-        executable="rviz2",
-        name="rviz2",
-        output="screen",
-        arguments=["-d", rviz_config],
-        condition=IfCondition(LaunchConfiguration("use_rviz")),
-    )
 
     teleop_gcs_share = get_package_share_directory("adhere_keyboard_input")
     teleop_gcs = IncludeLaunchDescription(
@@ -155,7 +159,6 @@ def generate_launch_description():
             declare_estimation_mode,
             declare_launch_teleop,
             adhere_mujoco_node,
-            rviz,
             teleop_gcs,
         ]
     )

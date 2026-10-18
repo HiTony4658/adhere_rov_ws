@@ -15,10 +15,11 @@
 
 #include "hardware_interface/loaned_command_interface.hpp"
 
+#include "adhere_controller/allocation/ThrusterAllocator.h"
 #include "adhere_controller/common/mathTools.h"
-#include "adhere_controller/common/ModelParams.h"
-#include "adhere_controller/common/ThrusterAllocator.h"
+#include "adhere_controller/common/OutputSafety.h"
 #include "adhere_controller/CtrlInterfaces.h"
+#include "adhere_controller/dynamics/ModelParams.h"
 #include "adhere_controller/estimator/RovStateEstimator.h"
 #include "adhere_controller/FSM/StateDepthHold.h"
 #include "adhere_controller/FSM/StateOpenLoop.h"
@@ -32,6 +33,7 @@ using adhere_controller::CtrlInterfaces;
 using adhere_controller::Mat68;
 using adhere_controller::ModelParams;
 using adhere_controller::RovStateEstimator;
+using adhere_controller::sanitizeAndWriteThrusterCommands;
 using adhere_controller::Vec3;
 using adhere_controller::Vec8;
 
@@ -188,9 +190,15 @@ public:
 
   const Vec3 & truePosition() const { return true_pos_; }
 
+  // Phase 3.7: FSMState::run() now writes ci.pending_thruster_cmd instead of calling
+  // set_value() directly -- mirrors AdhereController::update()'s centralized output safety
+  // gate call site, so this fixture exercises the exact same production code path.
+  void writeCommands() { sanitizeAndWriteThrusterCommands(ci, kModelParams, violations_); }
+
   CtrlInterfaces ci;
 
 private:
+  uint64_t violations_ = 0;
   static constexpr std::array<const char *, 8> kThrusterNames = {
     "thr_N1", "thr_N2", "thr_N3", "thr_N4", "thr_T5", "thr_T6", "thr_T7", "thr_T8"};
 
@@ -253,6 +261,7 @@ TEST(SensorFusionClosedLoop, StateDepthHoldTracksWithin15mmUsingOnlyNoisySensors
 
   for (int i = 0; i < 6000; ++i) {  // 24s settling budget @ 250Hz
     state.run(t0, period);
+    plant.writeCommands();
     plant.stepInnerPeriod();
   }
 
@@ -283,6 +292,7 @@ TEST(SensorFusionClosedLoop, StatePidHoldLocksWithin15mmUsingOnlyNoisySensors)
 
   for (int i = 0; i < 6000; ++i) {  // 24s settling budget @ 250Hz
     state.run(t0, period);
+    plant.writeCommands();
     plant.stepInnerPeriod();
   }
 
@@ -334,6 +344,7 @@ TEST(RollPitchTeleopMapping, StateOpenLoopMapsRollAndPitchRateToTxTy)
   const rclcpp::Time t0(0, 0, RCL_ROS_TIME);
   const rclcpp::Duration period = rclcpp::Duration::from_seconds(kInnerDt);
   state.run(t0, period);
+  plant.writeCommands();
 
   static const Mat68 b =
     adhere_controller::buildThrusterAllocationMatrix(kModelParams.thruster_pos, kModelParams.thruster_dir);
@@ -362,6 +373,7 @@ TEST(RollPitchTeleopMapping, StatePidHoldIntegratesAndClampsTiltTargets)
   plant.ci.control_inputs_.teleop_roll_rate.store(1.0);
   for (int i = 0; i < 5000; ++i) {  // long enough to hit the +-45deg clamp
     state.run(t0, period);
+    plant.writeCommands();
     plant.stepInnerPeriod();
   }
 

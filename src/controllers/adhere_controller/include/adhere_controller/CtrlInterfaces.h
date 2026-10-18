@@ -1,6 +1,7 @@
 #ifndef ADHERE_CONTROLLER__CTRLINTERFACES_H_
 #define ADHERE_CONTROLLER__CTRLINTERFACES_H_
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <vector>
@@ -75,10 +76,9 @@ struct ActiveState
 };
 
 // Zero-copy FSM/hardware bridge, modeled after quadruped_ros2_control's CtrlInterfaces: holds
-// LoanedCommandInterface references bound by AdhereController's on_activate(), written
-// directly by FSMState::run() implementations with no DDS round-trip. Slot order within
-// thruster_command_interface_ matches adhere_mujoco_hardware's documented layout (CLAUDE.md
-// Sec.3/6): thr_N1..thr_N4, thr_T5..thr_T8. Ground-truth hardware state interfaces
+// LoanedCommandInterface references bound by AdhereController's on_activate(). Slot order
+// within thruster_command_interface_ matches adhere_mujoco_hardware's documented layout
+// (CLAUDE.md Sec.3/6): thr_N1..thr_N4, thr_T5..thr_T8. Ground-truth hardware state interfaces
 // (imu_state_interface_/odom_state_interface_/pad_contact_state_interface_) are deliberately
 // NOT members of this struct -- they are bound as private AdhereController members instead
 // (see adhere_controller.hpp) and never handed to any FSMState; active_state below is the sole
@@ -95,6 +95,13 @@ struct CtrlInterfaces
 
   ControlInputs control_inputs_;
   int frequency_ = 500;
+
+  // Phase 3.7 output safety gate: FSMState::run() implementations write their desired thruster
+  // command here instead of calling thruster_command_interface_[i].set_value() directly, so
+  // AdhereController::update() can run a single centralized NaN/Inf-sanitize + saturation pass
+  // (common/OutputSafety.h::sanitizeAndWriteThrusterCommands()) before the value ever reaches
+  // hardware.
+  std::array<double, 8> pending_thruster_cmd = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
 
   CtrlInterfaces() = default;
 
