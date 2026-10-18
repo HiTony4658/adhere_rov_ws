@@ -9,6 +9,7 @@
 #include <array>
 #include <atomic>
 #include <cstdlib>
+#include <iomanip>
 #include <iostream>
 #include <mutex>
 #include <sstream>
@@ -41,6 +42,11 @@ std::atomic<pid_t> g_child_pgid{-1};
 std::mutex g_timing_mutex;
 std::string g_timing_line = "Inner: --Hz  Outer: --Hz  Status: --";
 
+// Compact 1-line efficiency/safety summary (CLAUDE.md Phase 3.8), updated from
+// /rov/controller_state -- full detail also lives in rt_monitor_node.
+std::mutex g_metrics_mutex;
+std::string g_metrics_line = "||u||: --N  Power: --  Slew: --N/s  E: --N^2s  Sat: --/8  Pads: --/4  Kern: --";
+
 const char * stateLabel(int32_t state)
 {
   switch (state) {
@@ -52,6 +58,14 @@ const char * stateLabel(int32_t state)
       return "[3] state_open_loop";
     case adhere_control_msgs::msg::FsmCommand::PID_HOLD:
       return "[4] state_pid_hold";
+    case adhere_control_msgs::msg::FsmCommand::ADHERE_PID:
+      return "[5] state_adhere_pid";
+    case adhere_control_msgs::msg::FsmCommand::ADHERE_SMC:
+      return "[6] state_adhere_smc";
+    case adhere_control_msgs::msg::FsmCommand::BASELINE_MPPI:
+      return "[7] state_baseline_mppi";
+    case adhere_control_msgs::msg::FsmCommand::KAMR_MPPI:
+      return "[8] state_kamr_mppi";
     default:
       return "[?] unknown";
   }
@@ -75,9 +89,21 @@ void spawnStateConsole(int mode)
 {
   killChildConsole();
 
-  const std::string title =
-    (mode == adhere_control_msgs::msg::FsmCommand::DEPTH_HOLD) ? "ROV DEPTH_HOLD Setpoint Console"
-                                                                : "ROV PID_HOLD Setpoint Console";
+  std::string title;
+  switch (mode) {
+    case adhere_control_msgs::msg::FsmCommand::DEPTH_HOLD:
+      title = "ROV DEPTH_HOLD Setpoint Console";
+      break;
+    case adhere_control_msgs::msg::FsmCommand::ADHERE_PID:
+      title = "ROV ADHERE_PID Setpoint Console";
+      break;
+    case adhere_control_msgs::msg::FsmCommand::ADHERE_SMC:
+      title = "ROV ADHERE_SMC Setpoint Console";
+      break;
+    default:
+      title = "ROV PID_HOLD Setpoint Console";
+      break;
+  }
   const std::string inner_cmd =
     "ros2 run adhere_keyboard_input state_cmd_console_node --ros-args -p mode:=" +
     std::to_string(mode);
@@ -113,6 +139,8 @@ void printMenu()
             << "  [2] state_depth_hold (PID 定深控制，自动弹出深度设定终端)\n"
             << "  [3] state_open_loop  (Xbox 开环推力映射，B 伪逆分配)\n"
             << "  [4] state_pid_hold   (6DOF 位置+航向保持，自动弹出设定终端)\n"
+            << "  [5] state_adhere_pid (贴壁 PID 基线：两阶段靠壁+法向力 PI 保压)\n"
+            << "  [6] state_adhere_smc (贴壁 SMC 基线：6DOF 滑模控制+法向预压)\n"
             << "  [q] Quit Console     (退出控制台)\n"
             << "------------------------------------------------------------\n"
             << "Current State: " << stateLabel(g_current_state.load()) << " (" << state_name
@@ -121,7 +149,11 @@ void printMenu()
     std::lock_guard<std::mutex> lock(g_timing_mutex);
     std::cout << g_timing_line << "\n";
   }
-  std::cout << "Select state (1/2/3/4/q): " << std::flush;
+  {
+    std::lock_guard<std::mutex> lock(g_metrics_mutex);
+    std::cout << g_metrics_line << "\n";
+  }
+  std::cout << "Select state (1/2/3/4/5/6/q): " << std::flush;
 }
 
 }  // namespace
@@ -140,9 +172,23 @@ int main(int argc, char ** argv)
         std::lock_guard<std::mutex> lock(g_state_name_mutex);
         g_state_name = msg->state_name;
       }
+      {
+        std::ostringstream oss;
+        oss << "||u||: " << static_cast<int>(msg->thrust_l2_norm + 0.5) << "N  Power: "
+            << static_cast<int>(msg->thrust_power_proxy + 0.5) << "  Slew: "
+            << static_cast<int>(msg->thrust_slew_rate_l2 + 0.5) << "N/s  E: "
+            << static_cast<int>(msg->cumulative_energy_l2 + 0.5) << "N^2s  Sat: "
+            << static_cast<int>(msg->saturated_thruster_count) << "/8  Pads: "
+            << static_cast<int>(msg->active_contact_pad_count) << "/4  Kern: " << std::fixed
+            << std::setprecision(2) << msg->kern_margin;
+        std::lock_guard<std::mutex> lock(g_metrics_mutex);
+        g_metrics_line = oss.str();
+      }
       if (g_current_state.exchange(msg->current_state) != msg->current_state) {
         if (msg->current_state == adhere_control_msgs::msg::FsmCommand::DEPTH_HOLD ||
-            msg->current_state == adhere_control_msgs::msg::FsmCommand::PID_HOLD) {
+            msg->current_state == adhere_control_msgs::msg::FsmCommand::PID_HOLD ||
+            msg->current_state == adhere_control_msgs::msg::FsmCommand::ADHERE_PID ||
+            msg->current_state == adhere_control_msgs::msg::FsmCommand::ADHERE_SMC) {
           spawnStateConsole(msg->current_state);
         } else {
           killChildConsole();
@@ -190,8 +236,13 @@ int main(int argc, char ** argv)
       command = adhere_control_msgs::msg::FsmCommand::OPEN_LOOP;
     } else if (line == "4") {
       command = adhere_control_msgs::msg::FsmCommand::PID_HOLD;
+    } else if (line == "5") {
+      command = adhere_control_msgs::msg::FsmCommand::ADHERE_PID;
+    } else if (line == "6") {
+      command = adhere_control_msgs::msg::FsmCommand::ADHERE_SMC;
     } else {
-      std::cout << "Unrecognized selection \"" << line << "\", expected 1, 2, 3, 4, or q.\n\n";
+      std::cout << "Unrecognized selection \"" << line
+                << "\", expected 1, 2, 3, 4, 5, 6, or q.\n\n";
       continue;
     }
 

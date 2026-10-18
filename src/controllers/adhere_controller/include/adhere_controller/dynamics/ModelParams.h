@@ -52,6 +52,59 @@ struct ModelParams
     double max_tilt_deg = 45.0;  // Roll/pitch target clamp (CLAUDE.md Phase 3.5 Stage 2.3)
   };
 
+  // Phase 3.8 wall-adhesion PID baseline (algorithms::pid::AdherePidController +
+  // FSM::StateAdherePid): kp_pos/ki_pos/kd_vel/kp_att/ki_att/kd_att drive the Y/Z/attitude loop
+  // (via the shared SixDofPidController) in both APPROACH and ADHERED phases; the X components
+  // of kp_pos/ki_pos/kd_vel are used only during APPROACH (ADHERED phase re-latches p_d_world_.x
+  // every tick so the position loop's X contribution stays ~0, and the dedicated force PI law
+  // below drives Fx instead). approach_speed/dock_force_thresh/x_wall/x_dock_eps gate the
+  // APPROACH->ADHERED transition; kp_force/ki_force/kd_x/f_preload/f_des/integral_force_max are
+  // AdherePidController's own wall-normal force-regulation gains (see its header for the sign
+  // convention: positive magnitudes here, the minus sign that turns them into a pressing -- not
+  // receding -- commanded wrench lives in code).
+  struct AdherePidGains
+  {
+    Vec3 kp_pos = Vec3(120.0, 120.0, 0.0);
+    Vec3 ki_pos = Vec3(10.0, 10.0, 0.0);
+    Vec3 kd_vel = Vec3(60.0, 60.0, 0.0);
+    Vec3 kp_att = Vec3(40.0, 40.0, 25.0);
+    Vec3 ki_att = Vec3(2.0, 2.0, 2.0);
+    Vec3 kd_att = Vec3(15.0, 15.0, 12.0);
+    std::array<double, 6> max_teleop_vel = {0.25, 0.25, 0.25, 0.4, 0.4, 0.6};
+    double max_tilt_deg = 30.0;
+    double approach_speed = 0.15;       // m/s, x_d ramp rate toward x_wall while APPROACHing
+    double dock_force_thresh = 20.0;    // N, sum F_N,i required to leave APPROACH
+    double x_wall = 0.0;                // m, world X of the wall plane
+    double x_dock_eps = 0.02;           // m, position tolerance for the APPROACH->ADHERED gate
+    double kp_force = 2.0;
+    double ki_force = 0.5;
+    double kd_x = 20.0;
+    double f_preload = 30.0;            // N, baseline pressing magnitude
+    double f_des = 100.0;               // N, desired sum of the 4 pad normal forces
+    double integral_force_max = 80.0;   // N, anti-windup clamp on the force-loop integrator
+  };
+
+  // Phase 3.8 wall-adhesion SMC baseline (algorithms::smc::SixDofSmcController +
+  // FSM::StateAdhereSmc): lambda/kd/k_switch/phi are the 6-DOF sliding-surface slope/damping/
+  // switching-gain/boundary-layer vectors (order [x,y,z,roll,pitch,yaw], body frame).
+  // wall_preload_fx is a constant pressing bias (N magnitude; applied as a negative Fx wrench)
+  // added only once StateAdhereSmc has docked -- see its header for why a single
+  // SixDofSmcController instance drives both APPROACH and ADHERED phases.
+  struct AdhereSmcGains
+  {
+    Vec6 lambda = (Vec6() << 2.0, 2.0, 2.0, 1.5, 1.5, 1.5).finished();
+    Vec6 kd = (Vec6() << 80.0, 80.0, 80.0, 20.0, 20.0, 20.0).finished();
+    Vec6 k_switch = (Vec6() << 40.0, 40.0, 40.0, 10.0, 10.0, 10.0).finished();
+    Vec6 phi = (Vec6() << 0.05, 0.05, 0.05, 0.05, 0.05, 0.05).finished();
+    std::array<double, 6> max_teleop_vel = {0.25, 0.25, 0.25, 0.4, 0.4, 0.6};
+    double max_tilt_deg = 30.0;
+    double approach_speed = 0.15;
+    double dock_force_thresh = 20.0;
+    double x_wall = 0.0;
+    double x_dock_eps = 0.02;
+    double wall_preload_fx = 30.0;       // N magnitude; applied as -wall_preload_fx wrench
+  };
+
   // Phase 3.5 sensor mounting lever arms (body frame, relative to CoM), used by
   // RovStateEstimator's lever-arm compensation formulas. Must match mjcf/rov_wall.xml's
   // imu_site/depth_site/dvl_site positions.
@@ -128,6 +181,8 @@ struct ModelParams
   DepthHoldGains depth_hold;
   OpenLoopGains open_loop;
   PidHoldGains pid_hold;
+  AdherePidGains adhere_pid;
+  AdhereSmcGains adhere_smc;
   SensorMount sensor_mount;
   DynamicsParams dynamics;
 

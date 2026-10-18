@@ -84,6 +84,20 @@ ModelParams ModelParams::loadFromNode(const rclcpp::Node::SharedPtr & node)
       dest[i] = flat[i];
     }
   };
+  // Phase 3.8: 6-element Vec6 counterpart to declareVec3, for AdhereSmcGains' sliding-surface
+  // vectors (order [x,y,z,roll,pitch,yaw], body frame).
+  auto declareVec6 = [&autoDeclareVec](const std::string & name, Vec6 & dest) {
+    std::vector<double> def(6);
+    for (int i = 0; i < 6; ++i) {
+      def[i] = dest(i);
+    }
+    const auto flat = autoDeclareVec(name, def);
+    if (flat.size() == 6) {
+      for (int i = 0; i < 6; ++i) {
+        dest(i) = flat[i];
+      }
+    }
+  };
 
   declareVec3Array("thruster_pos_xyz", p.thruster_pos, p.thruster_pos);
   declareVec3Array("thruster_dir_xyz", p.thruster_dir, p.thruster_dir);
@@ -132,6 +146,45 @@ ModelParams ModelParams::loadFromNode(const rclcpp::Node::SharedPtr & node)
   declareVec3("pid_hold.kd_att", p.pid_hold.kd_att);
   declareDoubleArray("pid_hold.max_teleop_vel", p.pid_hold.max_teleop_vel);
   p.pid_hold.max_tilt_deg = autoDeclareDouble("pid_hold.max_tilt_deg", p.pid_hold.max_tilt_deg);
+
+  declareVec3("adhere_pid.kp_pos", p.adhere_pid.kp_pos);
+  declareVec3("adhere_pid.ki_pos", p.adhere_pid.ki_pos);
+  declareVec3("adhere_pid.kd_vel", p.adhere_pid.kd_vel);
+  declareVec3("adhere_pid.kp_att", p.adhere_pid.kp_att);
+  declareVec3("adhere_pid.ki_att", p.adhere_pid.ki_att);
+  declareVec3("adhere_pid.kd_att", p.adhere_pid.kd_att);
+  declareDoubleArray("adhere_pid.max_teleop_vel", p.adhere_pid.max_teleop_vel);
+  p.adhere_pid.max_tilt_deg =
+    autoDeclareDouble("adhere_pid.max_tilt_deg", p.adhere_pid.max_tilt_deg);
+  p.adhere_pid.approach_speed =
+    autoDeclareDouble("adhere_pid.approach_speed", p.adhere_pid.approach_speed);
+  p.adhere_pid.dock_force_thresh =
+    autoDeclareDouble("adhere_pid.dock_force_thresh", p.adhere_pid.dock_force_thresh);
+  p.adhere_pid.x_wall = autoDeclareDouble("adhere_pid.x_wall", p.adhere_pid.x_wall);
+  p.adhere_pid.x_dock_eps = autoDeclareDouble("adhere_pid.x_dock_eps", p.adhere_pid.x_dock_eps);
+  p.adhere_pid.kp_force = autoDeclareDouble("adhere_pid.kp_force", p.adhere_pid.kp_force);
+  p.adhere_pid.ki_force = autoDeclareDouble("adhere_pid.ki_force", p.adhere_pid.ki_force);
+  p.adhere_pid.kd_x = autoDeclareDouble("adhere_pid.kd_x", p.adhere_pid.kd_x);
+  p.adhere_pid.f_preload = autoDeclareDouble("adhere_pid.f_preload", p.adhere_pid.f_preload);
+  p.adhere_pid.f_des = autoDeclareDouble("adhere_pid.f_des", p.adhere_pid.f_des);
+  p.adhere_pid.integral_force_max =
+    autoDeclareDouble("adhere_pid.integral_force_max", p.adhere_pid.integral_force_max);
+
+  declareVec6("adhere_smc.lambda", p.adhere_smc.lambda);
+  declareVec6("adhere_smc.kd", p.adhere_smc.kd);
+  declareVec6("adhere_smc.k_switch", p.adhere_smc.k_switch);
+  declareVec6("adhere_smc.phi", p.adhere_smc.phi);
+  declareDoubleArray("adhere_smc.max_teleop_vel", p.adhere_smc.max_teleop_vel);
+  p.adhere_smc.max_tilt_deg =
+    autoDeclareDouble("adhere_smc.max_tilt_deg", p.adhere_smc.max_tilt_deg);
+  p.adhere_smc.approach_speed =
+    autoDeclareDouble("adhere_smc.approach_speed", p.adhere_smc.approach_speed);
+  p.adhere_smc.dock_force_thresh =
+    autoDeclareDouble("adhere_smc.dock_force_thresh", p.adhere_smc.dock_force_thresh);
+  p.adhere_smc.x_wall = autoDeclareDouble("adhere_smc.x_wall", p.adhere_smc.x_wall);
+  p.adhere_smc.x_dock_eps = autoDeclareDouble("adhere_smc.x_dock_eps", p.adhere_smc.x_dock_eps);
+  p.adhere_smc.wall_preload_fx =
+    autoDeclareDouble("adhere_smc.wall_preload_fx", p.adhere_smc.wall_preload_fx);
 
   p.estimation_mode = autoDeclareString("estimation_mode", p.estimation_mode);
   declareVec3("sensor_mount.r_imu_xyz", p.sensor_mount.r_imu);

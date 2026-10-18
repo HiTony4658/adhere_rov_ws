@@ -113,6 +113,10 @@ int32_t fsmStateNameToInt(FSMStateName name)
       return 3;
     case FSMStateName::PID_HOLD:
       return 4;
+    case FSMStateName::ADHERE_PID:
+      return 5;
+    case FSMStateName::ADHERE_SMC:
+      return 6;
     default:
       return 0;
   }
@@ -319,6 +323,8 @@ CallbackReturn AdhereController::on_activate(const rclcpp_lifecycle::State & /*p
   state_list_.depth_hold = std::make_shared<StateDepthHold>(ctrl_interfaces_, model_params_);
   state_list_.open_loop = std::make_shared<StateOpenLoop>(ctrl_interfaces_, model_params_);
   state_list_.pid_hold = std::make_shared<StatePidHold>(ctrl_interfaces_, model_params_);
+  state_list_.adhere_pid = std::make_shared<StateAdherePid>(ctrl_interfaces_, model_params_);
+  state_list_.adhere_smc = std::make_shared<StateAdhereSmc>(ctrl_interfaces_, model_params_);
 
   // Default-boots in PASSIVE (CLAUDE.md Phase 3.1 Stage 2.3): launching mujoco_sim.launch.py
   // immediately brings up the FSM in the safe zero-thrust state.
@@ -541,6 +547,24 @@ controller_interface::return_type AdhereController::update()
           "(total violations: %lu)",
           static_cast<unsigned long>(output_safety_violation_count_));
       }
+
+      // Centralized efficiency/chattering/safety telemetry (CLAUDE.md Phase 3.8): computed from
+      // the actually-sent (sanitized+saturated) thruster values, read back via the command
+      // interface itself (not ci.pending_thruster_cmd, which is pre-clamp) immediately after the
+      // output safety gate above.
+      std::array<double, 8> u_sent{};
+      Vec8 u_sent_vec;
+      for (int i = 0; i < 8; ++i) {
+        u_sent[i] = ctrl_interfaces_.thruster_command_interface_[i].get().get_value();
+        u_sent_vec(i) = u_sent[i];
+      }
+      const Vec4 contact_forces_est_vec = a_contact_ * u_sent_vec;
+      const std::array<double, 4> contact_forces_est = {
+        contact_forces_est_vec(0), contact_forces_est_vec(1), contact_forces_est_vec(2),
+        contact_forces_est_vec(3)};
+      latest_metrics_ = controller_metrics_.update(
+        u_sent, contact_forces_est, model_params_, inner_period_.seconds());
+
       next_state_name_ = current_state_->checkChange();
       if (next_state_name_ != current_state_->state_name) {
         mode_ = FSMMode::CHANGE;
@@ -550,6 +574,9 @@ controller_interface::return_type AdhereController::update()
       current_state_->exit();
       current_state_ = next_state_;
       current_state_->enter();
+      // Reset cumulative energy/impulse integrators on every FSM state transition (CLAUDE.md
+      // Phase 3.8), so each state's telemetry reflects only the time spent in that state.
+      controller_metrics_.reset();
       mode_ = FSMMode::NORMAL;
     }
 
@@ -652,6 +679,17 @@ controller_interface::return_type AdhereController::update()
       k_val = std::abs(p_y) / kern_l_y_ + std::abs(p_z) / kern_l_z_;
     }
     controller_state_msg.kern_margin = 1.0 - k_val;
+
+    // Phase 3.8 efficiency/chattering/safety telemetry: latest_metrics_ is computed at the
+    // 250Hz inner-loop rate (see tick.inner_due above) and simply carried forward here at the
+    // outer-loop publish rate.
+    controller_state_msg.thrust_l2_norm = latest_metrics_.thrust_l2_norm;
+    controller_state_msg.thrust_power_proxy = latest_metrics_.thrust_power_proxy;
+    controller_state_msg.thrust_slew_rate_l2 = latest_metrics_.thrust_slew_rate_l2;
+    controller_state_msg.cumulative_energy_l2 = latest_metrics_.cumulative_energy_l2;
+    controller_state_msg.cumulative_impulse_l1 = latest_metrics_.cumulative_impulse_l1;
+    controller_state_msg.saturated_thruster_count = latest_metrics_.saturated_thruster_count;
+    controller_state_msg.active_contact_pad_count = latest_metrics_.active_contact_pad_count;
 
     controller_state_publisher_->publish(controller_state_msg);
     outer_profiler_.endExec();
@@ -794,6 +832,10 @@ std::shared_ptr<FSMState> AdhereController::getNextState(
       return state_list_.open_loop;
     case FSMStateName::PID_HOLD:
       return state_list_.pid_hold;
+    case FSMStateName::ADHERE_PID:
+      return state_list_.adhere_pid;
+    case FSMStateName::ADHERE_SMC:
+      return state_list_.adhere_smc;
     default:
       return state_list_.passive;
   }

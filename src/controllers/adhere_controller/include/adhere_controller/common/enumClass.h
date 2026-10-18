@@ -10,7 +10,9 @@ enum class FSMStateName
   PASSIVE,
   DEPTH_HOLD,
   OPEN_LOOP,
-  PID_HOLD
+  PID_HOLD,
+  ADHERE_PID,
+  ADHERE_SMC
 };
 
 enum class FSMMode

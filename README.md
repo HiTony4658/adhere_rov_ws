@@ -193,7 +193,8 @@ ros2 launch simplified_v1_description visualize.launch.py
 
 # 3b. 完整 FSM 闭环仿真（默认行为）：adhere_controller 自动加载/配置/激活（默认
 # PASSIVE 态，250Hz 均匀内环 / 25Hz 均匀外环），MuJoCo 窗口 + RViz2 双可视化同步，
-# 并自动弹出 Xbox 手柄遥操作 + FSM 终端控制台（PASSIVE/DEPTH_HOLD/OPEN_LOOP/PID_HOLD 四态）
+# 并自动弹出 Xbox 手柄遥操作 + FSM 终端控制台
+# （PASSIVE/DEPTH_HOLD/OPEN_LOOP/PID_HOLD/ADHERE_PID/ADHERE_SMC 六态）
 ros2 launch simplified_v1_description mujoco.launch.py
 
 # 3c. 纯开环硬件仿真：覆盖为 0 个控制器加载（u=0 被动漂移验证场景），不弹出遥操作

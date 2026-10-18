@@ -17,6 +17,7 @@
 #include "adhere_control_msgs/msg/runtime_diagnostics.hpp"
 #include "adhere_control_msgs/msg/setpoint_command.hpp"
 #include "adhere_control_msgs/msg/teleop_command.hpp"
+#include "adhere_controller/common/ControllerMetrics.h"
 #include "adhere_controller/common/enumClass.h"
 #include "adhere_controller/common/LoopProfiler.h"
 #include "adhere_controller/common/MultiRateDecimator.h"
@@ -24,6 +25,8 @@
 #include "adhere_controller/dynamics/ModelParams.h"
 #include "adhere_controller/estimator/RovStateEstimator.h"
 #include "adhere_controller/FSM/FSMState.h"
+#include "adhere_controller/FSM/StateAdherePid.h"
+#include "adhere_controller/FSM/StateAdhereSmc.h"
 #include "adhere_controller/FSM/StateDepthHold.h"
 #include "adhere_controller/FSM/StateOpenLoop.h"
 #include "adhere_controller/FSM/StatePassive.h"
@@ -93,6 +96,8 @@ private:
     std::shared_ptr<StateDepthHold> depth_hold;
     std::shared_ptr<StateOpenLoop> open_loop;
     std::shared_ptr<StatePidHold> pid_hold;
+    std::shared_ptr<StateAdherePid> adhere_pid;
+    std::shared_ptr<StateAdhereSmc> adhere_smc;
   };
 
   std::shared_ptr<FSMState> getNextState(
@@ -217,6 +222,12 @@ private:
   Mat48 c_kern_ = Mat48::Zero();
   double kern_l_y_ = 1.0;
   double kern_l_z_ = 1.0;
+
+  // Phase 3.8 centralized efficiency/chattering/safety telemetry: updated at the 250Hz
+  // inner-loop rate from the actually-sent thruster commands, published on ControllerState.msg
+  // at the outer-loop rate; reset on every FSM state transition.
+  ControllerMetricsAccumulator controller_metrics_;
+  ControllerMetricsSample latest_metrics_;
 
   // Async outer-loop worker skeleton (CLAUDE.md Phase 3.6 Stage 2.2/Sec.5): non-blocking
   // hand-off to a dedicated thread, so the 500Hz update() never waits on outer-loop compute --

@@ -45,13 +45,13 @@ public:
 
   virtual void exit() = 0;
 
-  // Default implementation (CLAUDE.md Phase 3.2 Stage 2.2): maps the live
+  // Default implementation (CLAUDE.md Phase 3.2 Stage 2.2, extended Phase 3.8): maps the live
   // control_inputs_.command atomic (set by AdhereController's /rov/fsm_command
-  // subscription, 0=NO_CHANGE..4=PID_HOLD) onto the requested FSMStateName, or this state's own
-  // name if no change is requested. All 4 concrete states share this identical mapping, so each
+  // subscription, 0=NO_CHANGE..6=ADHERE_SMC) onto the requested FSMStateName, or this state's own
+  // name if no change is requested. All concrete states share this identical mapping, so each
   // one's checkChange() override is just `return checkFsmCommandChange();` -- replaces the
   // Phase 3.1 pattern of each state hardcoding its own `== 1`/`== 2` comparison, which does not
-  // scale cleanly to 4 states.
+  // scale cleanly to many states.
   FSMStateName checkFsmCommandChange() const
   {
     switch (ctrl_interfaces_.control_inputs_.command.load()) {
@@ -63,6 +63,10 @@ public:
         return FSMStateName::OPEN_LOOP;
       case 4:
         return FSMStateName::PID_HOLD;
+      case 5:
+        return FSMStateName::ADHERE_PID;
+      case 6:
+        return FSMStateName::ADHERE_SMC;
       default:
         return state_name;
     }

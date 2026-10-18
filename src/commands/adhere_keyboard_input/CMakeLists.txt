@@ -13,6 +13,8 @@ find_package(rclcpp REQUIRED)
 find_package(adhere_control_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 
 include_directories(include)
 
@@ -60,7 +62,20 @@ ament_target_dependencies(rt_monitor_node
   adhere_control_msgs
 )
 
+add_executable(benchmark_evaluator_node src/benchmark_evaluator_node.cpp)
+target_include_directories(benchmark_evaluator_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+ament_target_dependencies(benchmark_evaluator_node
+  rclcpp
+  adhere_control_msgs
+  nav_msgs
+  std_msgs
+)
+
 install(TARGETS fsm_console_node state_cmd_console_node xbox_teleop_node rt_monitor_node
+  benchmark_evaluator_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

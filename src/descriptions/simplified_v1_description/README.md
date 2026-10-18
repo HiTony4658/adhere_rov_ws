@@ -96,7 +96,8 @@ launch/
 `thruster_max`）、接触垫几何（`pad_pos_xyz`）、Fossen 水动力前馈参数
 （`rho_water`/`gravity`/`vehicle_mass`/`displaced_volume`/`D_lin`/`D_quad`/...）、
 工作空间安全边界（`workspace_z_min`/`workspace_z_max`/`workspace_x_min`）以及
-各 FSM 状态增益（`depth_hold.*`/`open_loop.*`/`pid_hold.*`）。切换到几何/质量
+各 FSM 状态增益（`depth_hold.*`/`open_loop.*`/`pid_hold.*`/`adhere_pid.*`/
+`adhere_smc.*`，后两者为 Phase 3.8 新增的贴壁 PID/SMC 基线增益）。切换到几何/质量
 不同的新机型只需改这一份 YAML，`adhere_controller` 零 C++ 改动、零重新编译。
 本文件通过本包自己的 `launch/mujoco.launch.py`（CLAUDE.md Phase 3.4：模型/
 描述包拥有自己的启动文件，`adhere_mujoco_hardware`/`adhere_controller` 均为

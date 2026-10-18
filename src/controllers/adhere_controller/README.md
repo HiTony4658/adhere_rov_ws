@@ -4,11 +4,12 @@
 
 `AdhereController` 是唯一的 `controller_interface::ControllerInterface`
 `pluginlib` 插件（`adhere_controller/AdhereController`，Phase 3.3 合并自此前的
-`adhere_controller_common` + `adhere_kamr_controller` 两个包）。当前（Phase
-3.3）承载 FSM 管理、生命周期管理、接口装配、均匀整数抽取多速率调度、4 话题
-订阅/发布、Xbox 手柄 `0.25s` 失联看门狗与状态切换，以及 `PASSIVE`/
-`DEPTH_HOLD`/`OPEN_LOOP`/`PID_HOLD` 四个 FSM 状态的完整实现。未来阶段将在本包
-内继续承载 `KAMR-MPPI`（`pr_wbc_mppi_v4`）算法的完整实现：250Hz 内环（Planar
+`adhere_controller_common` + `adhere_kamr_controller` 两个包）。承载 FSM 管理、
+生命周期管理、接口装配、均匀整数抽取多速率调度、4 话题订阅/发布、Xbox 手柄
+`0.25s` 失联看门狗与状态切换，以及 `PASSIVE`/`DEPTH_HOLD`/`OPEN_LOOP`/
+`PID_HOLD`/`ADHERE_PID`/`ADHERE_SMC` 六个 FSM 状态的完整实现，外加集中式
+推力器效率/啁啾/安全遥测（`ControllerMetrics.h`）。未来阶段将在本包内继续
+承载 `KAMR-MPPI`（`pr_wbc_mppi_v4`）算法的完整实现：250Hz 内环（Planar
 Impedance PD + Pad-Force DOB + 12D Elastic Rhombic-Kern OSQP）、25Hz 异步 CUDA
 MPPI 外环。
 
@@ -28,7 +29,10 @@ include/adhere_controller/
 │   └── RovStateEstimator.h      # 500Hz 多速率传感器融合 + 接触辅助墙面约束更新（Phase 3.5/3.7）
 ├── algorithms/
 │   ├── pid/
-│   │   └── SixDofPidController.h  # 解耦 6-DOF 位置 + SO(3) 姿态 PID（从 StatePidHold 抽取，Phase 3.7）
+│   │   ├── SixDofPidController.h    # 解耦 6-DOF 位置 + SO(3) 姿态 PID（从 StatePidHold 抽取，Phase 3.7）
+│   │   └── AdherePidController.h    # 贴壁法向力 PI 调节器，覆盖 Fx 分量（Phase 3.8）
+│   ├── smc/
+│   │   └── SixDofSmcController.h    # 贴壁 6-DOF 滑模控制器（Phase 3.8）
 │   ├── wbc/
 │   │   └── WbcAllocatorBase.h     # Phase 4 12D OSQP 分配器的纯数据契约抽象基类（Phase 3.7）
 │   └── mppi/
@@ -38,16 +42,19 @@ include/adhere_controller/
 │   ├── StatePassive.h
 │   ├── StateDepthHold.h         # 委托给 SixDofPidController 的"仅深度"简化模式（Phase 3.7）
 │   ├── StateOpenLoop.h
-│   └── StatePidHold.h           # 仅保留设定点积分，误差->力矩律委托给 SixDofPidController（Phase 3.7）
+│   ├── StatePidHold.h           # 仅保留设定点积分，误差->力矩律委托给 SixDofPidController（Phase 3.7）
+│   ├── StateAdherePid.h         # 两阶段贴壁 PID 基线：APPROACH 位置保持 + ADHERED 法向力 PI（Phase 3.8）
+│   └── StateAdhereSmc.h         # 两阶段贴壁 SMC 基线：全程单一滑模控制器 + 贴壁后压墙偏置（Phase 3.8）
 └── common/
-    ├── enumClass.h              # FSMStateName（PASSIVE/DEPTH_HOLD/OPEN_LOOP/PID_HOLD）/ FSMMode
+    ├── enumClass.h              # FSMStateName（PASSIVE/DEPTH_HOLD/OPEN_LOOP/PID_HOLD/ADHERE_PID/ADHERE_SMC）/ FSMMode
     ├── mathTypes.h              # Eigen 类型别名（Vec3/Vec6/Vec8/Mat68/Mat86/Mat34/Mat43/Mat48/RotMat）
     ├── mathTools.h              # quatToRotMat / rpyToRotMat / rotMatToRPY / quatMul / quatInverse /
     │                            # quatFromRPY / quatError / smallAngleQuat / saturation /
     │                            # alignQuaternionHemisphere / clampStepVec3 / clampSlewQuat（Phase 3.7）
     ├── MultiRateDecimator.h     # 均匀整数抽取多速率调度（CLAUDE.md Phase 3.1.1）
     ├── LoopProfiler.h           # 频率(Hz)/执行延迟(ms)/超时计数实时观测（CLAUDE.md Phase 3.6）
-    └── OutputSafety.h           # sanitizeAndWriteThrusterCommands()：NaN/Inf 全零 + 饱和写出闸门（Phase 3.7）
+    ├── OutputSafety.h           # sanitizeAndWriteThrusterCommands()：NaN/Inf 全零 + 饱和写出闸门（Phase 3.7）
+    └── ControllerMetrics.h      # ControllerMetricsAccumulator：效率/啁啾/安全遥测（Phase 3.8）
 
 src/
 ├── adhere_controller.cpp        # 生命周期方法 + 均匀多速率调度 + 500Hz 状态估计/融合 + 4 话题订阅/发布 +
@@ -59,13 +66,19 @@ src/
 │   └── ThrusterAllocator.cpp
 ├── estimator/
 │   └── RovStateEstimator.cpp
-├── algorithms/pid/
-│   └── SixDofPidController.cpp
+├── algorithms/
+│   ├── pid/
+│   │   ├── SixDofPidController.cpp
+│   │   └── AdherePidController.cpp
+│   └── smc/
+│       └── SixDofSmcController.cpp
 └── FSM/
     ├── StatePassive.cpp
     ├── StateDepthHold.cpp
     ├── StateOpenLoop.cpp
-    └── StatePidHold.cpp
+    ├── StatePidHold.cpp
+    ├── StateAdherePid.cpp
+    └── StateAdhereSmc.cpp
 
 launch/mujoco.launch.py          # 闭环启动文件：robot_state_publisher + adhere_mujoco_node
                                   # (autostart_controllers=['adhere_controller']) + RViz2
@@ -78,7 +91,11 @@ test/
 ├── test_fsm_states.cpp               # 闭环 gtest：假 CtrlInterfaces + 质点平面"虚拟物理"验证 3 态收敛性
 ├── test_sensor_fusion_and_teleop.cpp # DVL 杠杆臂补偿收敛性 + sensor_fusion 闭环跟踪 + LT/RT 映射（CLAUDE.md Phase 3.5）
 ├── test_loop_profiler.cpp            # 纯逻辑 gtest：Hz EMA 收敛性 + 执行延迟/超时计数（CLAUDE.md Phase 3.6）
-└── test_dynamics_and_pid.cpp         # FossenDynamics/SixDofPidController/接触辅助估计/输出安全闸门（Phase 3.7）
+├── test_dynamics_and_pid.cpp         # FossenDynamics/SixDofPidController/接触辅助估计/输出安全闸门（Phase 3.7）
+├── test_adhere_wall_states.cpp       # 假单边弹簧贴墙模型：StateAdherePid/StateAdhereSmc 收敛性 +
+│                                      # Rhombic Kern 约束 + PID-vs-SMC 抗扰/啁啾对比（Phase 3.8）
+└── test_controller_metrics.cpp       # 纯逻辑 gtest：ControllerMetricsAccumulator 能耗/啁啾/
+                                       # 饱和/接触垫计数契约（Phase 3.8）
 ```
 
 注：`config/controllers.yaml`（历史上的 `controller_manager` 参数文档）与
@@ -102,7 +119,8 @@ test/
   cob_offset_body/z_surface/z_transition/D_lin/D_quad/D_ang_lin/D_ang_quad`
   （Fossen 水动力前馈参数）；
 - `workspace_z_min/workspace_z_max/workspace_x_min`（世界坐标安全边界）；
-- `depth_hold.*`/`open_loop.*`/`pid_hold.*`（各 FSM 状态的增益/限幅）。
+- `depth_hold.*`/`open_loop.*`/`pid_hold.*`/`adhere_pid.*`/`adhere_smc.*`
+  （各 FSM 状态的增益/限幅；后两者为 Phase 3.8 新增的贴壁基线参数）。
 
 `ThrusterAllocator.h::buildThrusterAllocationMatrix(pos, dir)` 对每个推力器
 通用地构造 `b_i = [dir_i; pos_i x dir_i] ∈ R^6`（叉乘公式，不再硬编码角点/
@@ -183,7 +201,7 @@ struct CtrlInterfaces {
 地面真值改由 `adhere_mujoco_node` 单独发布在 `/rov/ground_truth_odom`
 （`nav_msgs/Odometry`），仅供离线评估参考。
 
-## 当前状态（4 态，CLAUDE.md Phase 3.2/3.3/3.5）
+## 当前状态（6 态，CLAUDE.md Phase 3.2/3.3/3.5/3.8）
 
 | 状态 | ID | 职责 |
 |---|---|---|
@@ -191,6 +209,8 @@ struct CtrlInterfaces {
 | `DEPTH_HOLD` (`state_depth_hold`) | 2 | 世界坐标系 Z 向 PID 定深叠加姿态阻尼；`target_z_` 接受 `/rov/setpoint_cmd` 离散设定（沿边应用）与 Xbox 左摇杆连续微调，钳制在 `robot_control.yaml` 的 `workspace_z_min/max` 内 |
 | `OPEN_LOOP` (`state_open_loop`) | 3 | 无记忆地把 `/rov/teleop_cmd` 的 6 维遥操作输入（含 Phase 3.5 新增的 `pitch_rate`/`roll_rate`）线性映射为机体力矩（增益来自 `open_loop.max_wrench`），用于验证 `B`/`B^+` 分配零寄生耦合 |
 | `PID_HOLD` (`state_pid_hold`) | 4 | `enter()` 锁存当前 `(x,y,z,roll,pitch,yaw)` 为保持点；摇杆/扳机推动期间按机体对齐速度平移/旋转该设定点（增益来自 `pid_hold.*`，roll/pitch 目标钳制在 `±max_tilt_deg`），松手瞬间冻结；6-DOF PID + 浮力/科氏力/阻力前馈 |
+| `ADHERE_PID` (`state_adhere_pid`) | 5 | 贴壁 PID 基线（Phase 3.8）：未贴壁时 `AdherePidController` 之外的 Y/Z/姿态+X 全部由 `SixDofPidController` 驱动，X 向设定点以 `adhere_pid.approach_speed` 匀速逼近 `adhere_pid.x_wall`；一旦 4 垫估计法向力之和超过 `adhere_pid.dock_force_thresh` 且位置进入 `adhere_pid.x_dock_eps`，粘滞切换为贴壁态：X 向改由专用 `AdherePidController` 的法向力 PI 律覆盖，Y/Z/姿态仍由 `SixDofPidController` 保持 |
+| `ADHERE_SMC` (`state_adhere_smc`) | 6 | 贴壁 SMC 基线（Phase 3.8）：全程只用一个 `SixDofSmcController` 实例驱动全部 6DOF（不为逼近阶段单独构造位置控制器），贴壁判定与 `ADHERE_PID` 相同，贴壁后额外叠加常值压墙偏置 `adhere_smc.wall_preload_fx` |
 
 ## `MultiRateDecimator`：均匀整数抽取多速率调度
 
@@ -229,6 +249,26 @@ on_activate()`（与各 `FSMState` 构造 `B`/`B^+` 同一时机）预计算：
 `a_contact_`/`c_kern_` 用于把 `/rov/controller_state` 的 `contact_forces`/
 `kern_margin` 由**已下达的推力指令**估计出来（而非直接读测量贴垫力
 传感器），与未来 KAMR-MPPI 约束用的是同一套准静态预测模型。
+
+## 效率/啁啾/安全遥测：`ControllerMetrics.h`（CLAUDE.md Phase 3.8）
+
+`common/ControllerMetrics.h::ControllerMetricsAccumulator`（头文件式实现，
+无 ROS 依赖）在每个 250Hz 内环拍，从经 `sanitizeAndWriteThrusterCommands()`
+清洗/饱和后、通过 `thruster_command_interface_[i].get_value()` 回读的 8 路
+**真实发出**推力指令计算出：
+
+- `thrust_l2_norm = ‖u‖_2`、`thrust_power_proxy = Σ|u_i|^1.5`（CLAUDE.md
+  第 5 节的功率代理公式）；
+- `thrust_slew_rate_l2 = ‖(u[k]-u[k-1])/dt‖_2`（啁啾指标，首拍恒为 0）；
+- `cumulative_energy_l2 = ∫‖u‖_2^2 dt`、`cumulative_impulse_l1 = ∫‖u‖_1 dt`
+  （FSM 状态切换时调用 `reset()` 清零）；
+- `saturated_thruster_count`（按每个推力器自己的 `thruster_max[i]` 判定
+  `>=98%`，而非硬编码额定值）、`active_contact_pad_count`（按
+  `contact_force_thresh` 判定）。
+
+这 7 个字段随既有 `contact_forces`/`kern_margin` 一起发布在
+`/rov/controller_state` 上，供 `adhere_keyboard_input` 的
+`fsm_console_node`/`rt_monitor_node`/`benchmark_evaluator_node` 消费。
 
 `AdhereController` 新增一个真实的异步外环工作**线程**
 （`outerWorkerLoop()`，`on_activate()` 启动、`on_deactivate()`/析构函数

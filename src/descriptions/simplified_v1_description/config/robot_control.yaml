@@ -130,6 +130,46 @@ adhere_mujoco_node:
     pid_hold.max_teleop_vel: [0.25, 0.25, 0.25, 0.4, 0.4, 0.6]
     pid_hold.max_tilt_deg: 45.0  # Roll/pitch target clamp (CLAUDE.md Phase 3.5 Stage 2.3)
 
+    # StateAdherePid gains (CLAUDE.md Phase 3.8): Y/Z/attitude loop reuses the same
+    # SixDofPidController shape as pid_hold (kp_pos/kd_vel's X component is only exercised during
+    # the APPROACH phase -- ADHERED re-latches p_d_world_.x() every tick); kp_force/ki_force/
+    # kd_x/f_preload/f_des/integral_force_max belong to the dedicated wall-normal force PI loop
+    # (algorithms/pid/AdherePidController.h) that overrides the Fx wrench component once docked.
+    adhere_pid.kp_pos: [120.0, 120.0, 0.0]
+    adhere_pid.ki_pos: [10.0, 10.0, 0.0]
+    adhere_pid.kd_vel: [60.0, 60.0, 0.0]
+    adhere_pid.kp_att: [40.0, 40.0, 25.0]
+    adhere_pid.ki_att: [2.0, 2.0, 2.0]
+    adhere_pid.kd_att: [15.0, 15.0, 12.0]
+    adhere_pid.max_teleop_vel: [0.25, 0.25, 0.25, 0.4, 0.4, 0.6]
+    adhere_pid.max_tilt_deg: 30.0
+    adhere_pid.approach_speed: 0.15      # m/s, x_d ramp rate toward x_wall while APPROACHing
+    adhere_pid.dock_force_thresh: 20.0   # N, sum F_N,i required to leave APPROACH
+    adhere_pid.x_wall: 0.0               # m, world X of the wall plane
+    adhere_pid.x_dock_eps: 0.02          # m
+    adhere_pid.kp_force: 2.0
+    adhere_pid.ki_force: 0.5
+    adhere_pid.kd_x: 20.0
+    adhere_pid.f_preload: 30.0           # N, baseline pressing magnitude
+    adhere_pid.f_des: 100.0              # N, desired sum of the 4 pad normal forces
+    adhere_pid.integral_force_max: 80.0  # N, anti-windup clamp on the force-loop integrator
+
+    # StateAdhereSmc gains (CLAUDE.md Phase 3.8): 6-DOF sliding-surface slope (lambda)/damping
+    # (kd)/switching-gain (k_switch)/boundary-layer (phi) vectors, order [x,y,z,roll,pitch,yaw]
+    # body frame (algorithms/smc/SixDofSmcController.h). wall_preload_fx is a constant pressing
+    # bias magnitude added to the Fx wrench only once StateAdhereSmc has docked.
+    adhere_smc.lambda: [2.0, 2.0, 2.0, 1.5, 1.5, 1.5]
+    adhere_smc.kd: [80.0, 80.0, 80.0, 20.0, 20.0, 20.0]
+    adhere_smc.k_switch: [40.0, 40.0, 40.0, 10.0, 10.0, 10.0]
+    adhere_smc.phi: [0.05, 0.05, 0.05, 0.05, 0.05, 0.05]
+    adhere_smc.max_teleop_vel: [0.25, 0.25, 0.25, 0.4, 0.4, 0.6]
+    adhere_smc.max_tilt_deg: 30.0
+    adhere_smc.approach_speed: 0.15
+    adhere_smc.dock_force_thresh: 20.0
+    adhere_smc.x_wall: 0.0
+    adhere_smc.x_dock_eps: 0.02
+    adhere_smc.wall_preload_fx: 30.0     # N magnitude; applied as -wall_preload_fx wrench
+
     # --- Phase 3.5: dual state-acquisition (ground_truth / sensor_fusion) ---
     # "ground_truth": CtrlInterfaces::active_state is populated directly from noise-free
     # hardware odometry (legacy Phase 2-3.4 behavior). "sensor_fusion": active_state comes

@@ -19,6 +19,11 @@
   <depend>adhere_control_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>sensor_msgs</depend>
+  <!-- benchmark_evaluator_node (Phase 3.8): nav_msgs/Odometry for /rov/ground_truth_odom
+       (offline-evaluation-only, per CLAUDE.md) and std_msgs/Int32 for /rov/flow_mode_cmd. Both
+       are core ROS 2 packages, not MuJoCo/CUDA/ros2_control, so the zero-dependency rule holds. -->
+  <depend>nav_msgs</depend>
+  <depend>std_msgs</depend>
 
   <!-- Runtime-only: xbox_teleop_node consumes sensor_msgs/msg/Joy published by the official
        ROS 2 joy package's joy_node, launched alongside it in launch/teleop_gcs.launch.py. This

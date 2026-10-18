@@ -2080,3 +2080,117 @@ false`）确认：`list_controllers` 显示 `adhere_controller` 正常 `active`�
 `Z=-2.994m`（<6mm 误差）；`PID_HOLD`（`MODE_FULL_POSE` 目标
 `[0.3,0.2,-2.5]`）收敛到 `[0.300,0.200,-2.497]`（三轴误差均 <5mm）；
 进程 `SIGINT` 后干净退出，无残留。
+
+## Phase 3.8（2026-10-18）：`ADHERE_PID`/`ADHERE_SMC` 贴壁基线控制器 + 效率/啁啾/安全遥测 + Benchmark 评估节点
+
+### 动机
+
+Phase 4（`Baseline MPPI`/`KAMR-MPPI`）落地前还缺两类"公平"的经典贴壁基线：现有
+`PID_HOLD` 是自由悬浮的 6DOF 位姿保持，从不主动调节壁面法向预压力
+（`Fx<0` 朝墙方向），不能作为贴壁站位的公平基线；同时论文/实验验证需要一套
+量化的能耗/啁啾/饱和/Rhombic Kern 安全裕度/跟踪误差评估手段，才能定量展示
+未来 MPPI/KAMR-MPPI 相对经典控制的优势。本阶段新增两个贴壁基线 FSM 状态
+`ADHERE_PID`（ID `5`）、`ADHERE_SMC`（ID `6`），`FsmCommand`/`ControllerState`
+的 `BASELINE_MPPI`/`KAMR_MPPI` 相应从 `5`/`6` 顺延到 `7`/`8`；新增集中式
+效率/安全遥测字段与独立的 `benchmark_evaluator_node` 评估节点。
+
+### `ADHERE_PID`（`algorithms/pid/AdherePidController` + `FSM/StateAdherePid`）
+
+两阶段结构：APPROACH 阶段（未贴壁时）把 `p_d_world_.x()` 以
+`adhere_pid.approach_speed` 匀速逼近 `adhere_pid.x_wall`，6DOF 全部由既有
+`SixDofPidController` 驱动（与 `PID_HOLD` 完全相同的位置保持律）；一旦
+4 个贴垫法向力估计之和超过 `adhere_pid.dock_force_thresh` 且位置进入
+`adhere_pid.x_dock_eps` 范围内，状态切换为粘滞的 ADHERED 阶段（一旦进入
+永不自动退出，只能通过 `/rov/fsm_command` 显式切换状态离开）：此后每拍把
+`p_d_world_.x()` 重新锚定为当前估计位置（让 `SixDofPidController` 的 X 分量
+贡献恒为零），再用新增的 `AdherePidController`（**不是** `SixDofPidController`
+的包装，是独立的标量力 PI 调节器）覆盖写入 wrench 的 Fx 分量：
+`A = f_preload + Kp_F(F_des-ΣF_N) + Ki_F·∫(...)dt`，
+`Fx_wrench = -A - Kd_x·max(0,v_x)`——符号约定与 CLAUDE.md Sec.5.2 既有的
+`-D_vx·max(0,v_x)` 阻尼项完全一致（后退越快，压墙力越大）。Y/Z/姿态滑动
+（setpoint/teleop）与 `PID_HOLD` 同构，贴壁后 X 分量被忽略。
+
+### `ADHERE_SMC`（`algorithms/smc/SixDofSmcController` + `FSM/StateAdhereSmc`）
+
+新增 `SixDofSmcController`：误差约定采用"估计减期望"（`e_p_body=R^T(p_est-p_d)`，
+`e_R_body=quatError(q_d,q_est)`，刻意与 `SixDofPidController` 的
+`quatError(q_est,q_d)` 调换参数顺序使两者符号一致，详见该文件头注释里记录的
+推导），`s=e_nu+Λ·e_eta`，控制律
+`τ=C(ν)ν+D(ν)ν+g(q)-MΛe_nu+τ_wall_preload-Kd·s-Ksw·sat(s/φ)`（前三项通过
+`FossenDynamics` 精确抵消标称动力学，`τ_wall_preload` 仅在 `docked_` 时叠加）。
+与 `ADHERE_PID` 不同，`StateAdhereSmc` **全程只用一个** `SixDofSmcController`
+实例驱动全部 6DOF（不为 APPROACH 阶段单独构造位置控制器）：其自身的位置误差项
+天然驱动逼近，贴壁后只是额外叠加一个常值压墙偏置。贴壁判定、setpoint/teleop
+滑动逻辑与 `ADHERE_PID` 完全镜像。
+
+### 效率/啁啾/安全遥测（`common/ControllerMetrics.h` + `ControllerState.msg`）
+
+`ControllerState.msg` 新增 7 个字段：`thrust_l2_norm`（`‖u‖_2`）、
+`thrust_power_proxy`（`Σ|u_i|^1.5`，CLAUDE.md Sec.5 功率代理公式）、
+`thrust_slew_rate_l2`（`‖(u[k]-u[k-1])/dt‖_2`，啁啾指标）、
+`cumulative_energy_l2`（`∫‖u‖_2^2 dt`）、`cumulative_impulse_l1`（`∫‖u‖_1 dt`）、
+`saturated_thruster_count`、`active_contact_pad_count`。新增头文件式
+`common/ControllerMetrics.h::ControllerMetricsAccumulator`（风格与
+`OutputSafety.h`/`LoopProfiler.h` 一致，无 ROS 依赖，独立可测），由
+`AdhereController::update()` 在每个 250Hz 内环拍从**真正发出**（经
+`sanitizeAndWriteThrusterCommands()` 清洗/饱和后、通过
+`thruster_command_interface_[i].get_value()` 回读）的推力器指令计算，FSM
+状态切换时（`mode_==FSMMode::CHANGE` 分支）调用 `reset()` 清零累积积分。
+饱和判定用每个推力器自己的 `ModelParams::thruster_max[i]`（而非任务描述文字
+里字面给出的 `60N`——该值与 `robot_control.yaml` 实际配置的 `40N` 不一致，
+按 CLAUDE.md Sec.3.3 的零硬编码规则取动态参数而非魔法数）。
+
+### `ModelParams`/`robot_control.yaml`
+
+新增 `ModelParams::AdherePidGains`/`AdhereSmcGains` 两个嵌套结构体，镜像
+既有 `PidHoldGains` 的 YAML 加载模式（`ModelParams.cpp::loadFromNode()` 新增
+`declareVec6()` 辅助函数，供 `AdhereSmcGains` 的 6 维滑模增益数组使用）；
+`robot_control.yaml` 新增 `adhere_pid.*`/`adhere_smc.*` 两个参数块，紧跟在
+既有 `pid_hold.*` 块之后。
+
+### `adhere_keyboard_input`：控制台/监控扩展 + `benchmark_evaluator_node`
+
+`fsm_console_node` 的 `stateLabel()`/菜单/键盘输入解析/自动弹出设定终端逻辑
+扩展支持 `5`/`6`（`ADHERE_PID`/`ADHERE_SMC`），并新增一行效率/安全遥测摘要
+（从 `/rov/controller_state` 更新）。`state_cmd_console_node` 的 `mode`
+参数扩展接受 `5`/`6`，与既有 `mode==4`（`PID_HOLD`）完全复用同一套
+`z/y/x/roll/pitch/yaw/all/reset/h` 命令语法——贴壁后 `x` 分量在 FSM 层
+本就被忽略，无需新语法。`rt_monitor_node` 新增对 `/rov/controller_state`
+的订阅，在既有 9 路频率诊断表下方追加一张效率/安全表（`||u||`/功率代理/
+啁啾/累积能量/饱和推力器数/贴壁垫数/Kern 裕度，红绿着色）。新增独立节点
+`benchmark_evaluator_node`（纯 `rclcpp::Node`，不 fork 子进程，风格与
+`rt_monitor_node` 的定时重绘一致）：订阅 `/rov/controller_state`、
+`/rov/ground_truth_odom`（本包中唯一允许触达该离线评估专用话题的节点）、
+`/rov/runtime_diagnostics`，用一个可配置的滚动窗口（默认 `12.0s`）聚合出
+跟踪精度（Y/Z RMSE/最大滑移、姿态 RMSE/最大误差，均相对地面真值）、控制
+能耗（`E_u`/`I_u`/平均功率代理）、平顺性（滑移率 RMS/峰值、饱和占比）、
+贴壁安全性（最小 Kern 裕度、Kern 违规占比、4 垫满接触保持率）的
+Markdown 表格，可选 `trigger_flow_gust:=true` 参数在启动时单次触发
+`/rov/flow_mode_cmd=2`（12s 阵风基准场景）。`CMakeLists.txt`/`package.xml`
+新增 `nav_msgs`/`std_msgs` 依赖（核心 ROS 2 包，不违反零 MuJoCo/CUDA/
+ros2_control 依赖规则）。
+
+### 验证结果
+
+`export PATH=/usr/bin:$PATH && colcon build --symlink-install`（5 个包）
+零警告零错误。`colcon test`：`adhere_controller` 新增 `test_adhere_wall_states`
+（3 个用例：`StateAdherePid`/`StateAdhereSmc` 各自对一个简化单边弹簧
+贴墙接触模型收敛到 4 垫均正接触力 + 真实 `C_kern` 约束验证通过 + Y/Z
+设定点保持，以及一个对比用例——在相同持续 +Y 扰动下 `StateAdhereSmc`
+的最大位置误差小于 `StateAdherePid`，而紧边界层/高切换增益配置下的
+`StateAdhereSmc` 观测到的推力滑移率 RMS 显著高于 `StateAdherePid`，
+用真实闭环动力学而非断言验证了"SMC 抗扰更强但更啁啾"的预期物理权衡）
+与 `test_controller_metrics`（6 个用例：首拍零滑移率、滑移率手算验证、
+累积能量/冲量单调递增且与手算积分吻合、`reset()` 清零累积量且不产生
+跨状态切换的虚假滑移、饱和计数在 `0.98×thruster_max` 边界触发、接触垫数
+按 `contact_force_thresh` 判定）全部通过，加上既有 44 个用例零回归
+（5 个新增用例文件 + 既有全部套件共 44/44）；lint 结果与既有基线一致
+（仅剩全仓库预先存在的缺版权头等 Phase 2.14 起已记录的失败）。真实 MuJoCo
+闭环（`mujoco.launch.py headless:=true use_rviz:=false
+estimation_mode:=ground_truth`，经 `ros2 topic pub/echo` 驱动）确认：
+切换到 `ADHERE_PID`（`command:=5`）与 `ADHERE_SMC`（`command:=6`）均不
+崩溃，`/rov/controller_state` 正确发布 `current_state=5/6`、
+`state_name=state_adhere_pid/state_adhere_smc`，贴垫接触力随进程运行从
+0 增长到正值（该 ROV 默认出生点 `X=0.125m` 本就非常接近墙面
+`x_wall=0.0m`，APPROACH 阶段耗时很短），新增的 7 个效率遥测字段与
+`kern_margin` 均正常输出合理数值；进程通过 `SIGTERM` 干净退出。

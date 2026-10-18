@@ -38,12 +38,16 @@ include_directories(include)
 # package split added pure linking overhead with no decoupling benefit.
 add_library(${PROJECT_NAME} SHARED
   src/adhere_controller.cpp
+  src/algorithms/pid/AdherePidController.cpp
   src/algorithms/pid/SixDofPidController.cpp
+  src/algorithms/smc/SixDofSmcController.cpp
   src/allocation/ThrusterAllocator.cpp
   src/dynamics/FossenDynamics.cpp
   src/dynamics/ModelParams.cpp
   src/estimator/RovStateEstimator.cpp
   src/FSM/StatePassive.cpp
+  src/FSM/StateAdherePid.cpp
+  src/FSM/StateAdhereSmc.cpp
   src/FSM/StateDepthHold.cpp
   src/FSM/StateOpenLoop.cpp
   src/FSM/StatePidHold.cpp
@@ -154,6 +158,26 @@ if(BUILD_TESTING)
   target_include_directories(test_dynamics_and_pid PRIVATE include)
   target_link_libraries(test_dynamics_and_pid ${PROJECT_NAME} Eigen3::Eigen)
   ament_target_dependencies(test_dynamics_and_pid rclcpp hardware_interface)
+
+  # Phase 3.8 verification: StateAdherePid/StateAdhereSmc closed-loop wall-docking contract
+  # (4-pad contact established, positive Rhombic Kern margin, Y/Z/attitude hold) against a fake
+  # one-sided wall-contact spring plant, plus the comparative PID-vs-SMC disturbance-rejection/
+  # chattering trade-off check.
+  ament_add_gtest(test_adhere_wall_states
+    test/test_adhere_wall_states.cpp
+  )
+  target_include_directories(test_adhere_wall_states PRIVATE include)
+  target_link_libraries(test_adhere_wall_states ${PROJECT_NAME})
+  ament_target_dependencies(test_adhere_wall_states rclcpp hardware_interface)
+
+  # Header-only (ControllerMetrics.h): no rclcpp/hardware_interface dependency, so the
+  # efficiency/chattering/safety telemetry contract (CLAUDE.md Phase 3.8 Stage 3.1) is
+  # verifiable in isolation.
+  ament_add_gtest(test_controller_metrics
+    test/test_controller_metrics.cpp
+  )
+  target_include_directories(test_controller_metrics PRIVATE include)
+  target_link_libraries(test_controller_metrics ${PROJECT_NAME})
 endif()
 
 ament_package()
