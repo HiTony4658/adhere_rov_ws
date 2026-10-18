@@ -1781,3 +1781,157 @@ estimation_mode:=sensor_fusion`，经 `rclpy` 脚本驱动）：`DEPTH_HOLD` +
 gt_pad_contact_state_interface_" src/controllers/adhere_controller/{src,
 include}` 隔离审计：全部匹配均位于 `adhere_controller.cpp`/`.hpp`，
 `FSM/*.cpp`/`FSM/*.h` 零匹配，确认地面真值隔离契约在代码层面成立。
+
+## Phase 3.6（2026-10-18）：四元数消息重构 + Sim-to-Real 严格分离 + RuntimeDiagnostics 实时观测 + Pre-MPPI 基础设施
+
+### 动机
+
+Phase 4（`Baseline MPPI`/`KAMR-MPPI`）落地前还有三处架构缺口：（1）`FsmState.msg`
+把仿真专属的 `ground_truth_pose` 和真实可部署的控制器状态混在一起，姿态用
+Euler `float64[6]` 表示，存在万向锁奇异且与 Jetson 真实部署（没有地面真值）
+不兼容；（2）完全没有量化手段确认各传感器/估计器/内外环是否达到目标频率、
+有没有超出计算预算——25Hz CUDA MPPI 外环上线前必须先把这个观测能力建好，
+因为它正是最可能超预算的环节；（3）接触力分布矩阵 `A_contact`、Rhombic
+Kern 约束矩阵 `C_kern`、异步外环工作线程骨架都要在 Phase 4 把 MPPI 采样接进来
+之前就存在。另外发现两个已有话题其实就是本阶段要加的新话题的雏形——
+`/rov/wave_mode_cmd`（对应新 `/rov/flow_mode_cmd`）与 `/rov/odom`（对应新
+`/rov/ground_truth_odom`）——经用户确认后选择**重命名**而非并存两套命名。
+
+本阶段按照既有的子阶段提交规范拆成 3.6.1/3.6.2/3.6.3 三次独立的
+build-test-commit 里程碑。
+
+### Phase 3.6.1：消息重构 + 四元数 SO(3) 姿态控制
+
+`adhere_control_msgs`：`FsmCommand.msg` 新增 `BASELINE_MPPI=5`/`KAMR_MPPI=6`
+预留常量；`SetpointCommand.msg` 把 `mode/lock_current_pose/target_x..yaw`
+替换为 `command_type`（`1=MODE_DEPTH_ONLY, 2=MODE_FULL_POSE,
+3=MODE_LOCK_CURRENT, 4=MODE_LEVEL_ATTITUDE`）+ `geometry_msgs/Pose
+target_pose`；`TeleopCommand.msg` 把 6 个裸标量替换为
+`geometry_msgs/Vector3 linear`（surge/sway/heave）+
+`geometry_msgs/Vector3 angular`（roll_rate/pitch_rate/yaw_rate）；删除
+`FsmState.msg`，新增 `ControllerState.msg`（`/rov/controller_state`）——不再
+含任何 `ground_truth_pose` 字段，100% Sim-to-Real 纯净。
+
+`adhere_controller`：`mathTools.h` 新增 `quatMul`/`normalizeQuat`/
+`smallAngleQuat`（从 `RovStateEstimator.h` 提升为公共函数，避免重复实现）、
+`quatInverse`/`quatFromRPY`/`quatError`（`e_R=2·sgn(q_e.w)·[q_e.x,q_e.y,
+q_e.z]`，`q_e=q_est^{-1}⊗q_d`）。`ActiveState` 新增 `quat_w[4]`（世界系姿态
+四元数），`rpy[3]` 改为由 `quat_w` 派生，仅供 `StateDepthHold` 的小角度
+Euler 阻尼使用（该状态从不跟踪大姿态目标，不存在万向锁风险，因此保留
+Euler 写法而不强行改成四元数）。`ControlInputs` 的
+`setpoint_mode/setpoint_lock_current_pose/setpoint_target_{x,y,z,roll,
+pitch,yaw}` 替换为 `setpoint_command_type` + `setpoint_target_pos[3]` +
+`setpoint_target_quat[4]`；`teleop_*` 字段内部原子量命名不变，只是订阅回调
+改为从 `msg->linear.{x,y,z}`/`msg->angular.{x,y,z}` 取值。`FSMState::
+targetPose()` 返回类型从 `std::array<double,6>` 改为新的 `PoseTarget{Vec3
+pos; Quat quat;}`。`StatePidHold` 把 `phi_d_/theta_d_/psi_d_` 三个 Euler
+目标替换为单一 `Quat q_d_`：摇杆/扳机角速度通过
+`q_d_=normalize(q_d_⊗smallAngleQuat(ω_cmd·dt))` 积分，姿态误差改用
+`quatError(q_est, q_d_)` 直接喂给既有的 `kp_att⊙e_R+ki_att⊙integral+
+kd_att⊙e_omega` PD 律，±max_tilt_deg 钳制通过 RPY 往返转换实现（代价很低，
+精确保持既有钳制契约）。`adhere_controller.cpp` 的地面真值/估计器融合分支
+都改为直接写入 `active_state.quat_w`，不再在 `update()` 里把 ground truth
+转成 Euler 发布——`/rov/controller_state` 发布块彻底移除了
+`ground_truth_pose` 这一项。
+
+`adhere_keyboard_input`：`xbox_teleop_node.cpp` 改发布 `linear`/`angular`
+`Vector3`；`state_cmd_console_node.cpp` 新增本文件自带的轻量
+RPY↔四元数小工具（不依赖 Eigen，与 `adhere_controller` 的 `mathTools.h`
+同约定），友好的 `x/y/z` 米、`roll/pitch/yaw` 度输入体验保持不变，显示同时
+给出四元数 `[qw,qx,qy,qz]` 与换算出的 RPY(deg)；`fsm_console_node.cpp` 订阅
+改为 `ControllerState`。
+
+验证：`colcon build --symlink-install`（5 个包）零警告零错误；`colcon
+test --packages-select adhere_control_msgs adhere_controller
+adhere_keyboard_input`：既有 + 更新后的 gtest 全部通过（18/18 用例，仅剩
+Phase 2.14 起已记录的全仓库缺版权头等预先存在 lint 失败）。真实 MuJoCo
+闭环（`rclpy` 脚本驱动）：`PID_HOLD` 的 `MODE_FULL_POSE` 设定点含非零
+roll/pitch/yaw，25s 后 `estimated_pose`/`target_pose` 的位置与四元数均收敛
+到彼此 `<0.06m` 以内。
+
+### Phase 3.6.2：`LoopProfiler` + `RuntimeDiagnostics` + RViz HUD + `rt_monitor_node`
+
+`adhere_control_msgs` 新增 `RuntimeDiagnostics.msg`（9 路频率 + 延迟/预算 +
+超时计数 + `timing_healthy`，10Hz 发布）。`adhere_controller` 新增
+头文件式 `common/LoopProfiler.h`（风格与 `MultiRateDecimator.h` 一致，无
+ROS/Eigen 依赖）：`tickMarker()` 用 steady_clock 间隔的 EMA 估计触发频率，
+`beginExec()/endExec()` 测最新/EMA均值/最大执行耗时并对预算计超时次数。
+
+`adhere_mujoco_hardware`：`hw_states_` 从 55 扩到 57，新增
+`diagnostics/hw_loop_hz`/`diagnostics/hw_step_exec_ms` 两个状态接口——直接
+镜像既有 `MujocoVisBridge::actual_physics_hz`/`step_work_ms`（物理线程早已
+用 0.98/0.02 EMA 算好的遥测），而不是在硬件侧再起一份 `LoopProfiler`
+实例重复测量同一件事，也避免了 `adhere_mujoco_hardware` 反向依赖
+`adhere_controller`。同时把 `/rov/wave_mode_cmd`→`/rov/flow_mode_cmd`、
+`AdhereMujocoHardware::setWaveMode/waveMode`→`setFlowMode/flowMode`、
+`MujocoVisBridge` 的 `wave_mode_cmd/wave_mode_active`→
+`flow_mode_cmd/flow_mode_active`、`MujocoViewer` 的 `ui_wave_mode_` 等全部
+改名为 `flow`（与 CLAUDE.md 自己的 `FlowEnvironmentPlugin` 术语一致）；
+`/rov/odom`→`/rov/ground_truth_odom`（`adhere_mujoco_node.cpp` 的发布者
+改名，`mujoco_sim.rviz` 的 Odometry 显示同步改名）。`fossen_hydrodynamics.hpp`/
+`flow_environment_plugin.hpp` 里描述真实物理"wave-impact gust"现象的
+"wave" 字样保持不动——那是合法的水动力学术语，与被改名的"模式切换"概念
+无关。
+
+`adhere_controller`：绑定新增的 2 个诊断状态接口；新增
+`estimator_profiler_`/`inner_profiler_`（4.0ms 预算）/
+`outer_profiler_`（40.0ms 预算）/`sensor_imu_profiler_`/
+`sensor_loadcell_profiler_`/`sensor_depth_profiler_`/`sensor_dvl_profiler_`
+7 个 `LoopProfiler` 实例；IMU/称重传感器每 tick 调用 `tickMarker()`，
+深度/DVL 用与 `RovStateEstimator` 同款的"采样保持值是否真的变化"边沿检测
+触发。每 50 个 500Hz tick（独立于 `inner_decimation_`/`outer_decimation_`，
+固定 10Hz）调用新增的 `publishRuntimeDiagnostics()`：发布
+`/rov/runtime_diagnostics`，并发布一个 `visualization_msgs::Marker`
+（`TEXT_VIEW_FACING`，健康绿/异常红）到 `/rov/diagnostics_hud_marker`，
+浮在 ROV 正上方 0.6m。`timing_healthy` 故意把 `estimator_hz` 排除在频率检查
+外——`estimation_mode=="ground_truth"` 时估计器本就不跑，报 0Hz 并非超时。
+
+`adhere_keyboard_input` 新增 `rt_monitor_node`（ANSI 彩色实时表格，超时/
+偏离目标标红）与 `fsm_console_node` 的单行计时摘要。
+
+验证：`colcon build --symlink-install`/`colcon test`（22/22 gtest 用例，含
+新增 `test_loop_profiler`）全部通过；真实 MuJoCo 闭环确认 8 路频率全部落在
+目标值 `±10%` 内（500/500/500/50/20/250/25/250Hz）、零超时、
+`timing_healthy=true`，HUD marker 渲染为绿色，`rt_monitor_node` 实时表格
+正确，`ros2 topic pub /rov/flow_mode_cmd std_msgs/msg/Int32 "data: 2"`
+成功无 GUI 触发 12.0s 阵风基准。
+
+### Phase 3.6.3：`A_contact`/`C_kern` 预计算 + 异步外环工作线程骨架
+
+`ThrusterAllocator.h` 新增 `buildPadNormalMap()`（`G∈R^{3×4}`）、
+`buildPadNormalMapPseudoInverse()`（`G^†∈R^{4×3}`）、`buildContactMap()`
+（`A_contact=-G^†B_{[Fx,Ty,Tz]}∈R^{4×8}`）、`padHalfSpans()`、
+`buildKernConstraintMatrix()`（`C_kern∈R^{4×8}`，4 个符号组合边约束）。
+**发现并修正的符号问题**：CLAUDE.md 文字描述 `G` 第一行系数为 `-1`，但其
+自带的验证算例（`u[0:4]=25N` 等幅压紧推力应得到
+`A_contact·u=[25,25,25,25]^T N`）用数值验证后只有系数取 `+1` 才成立——
+两者矛盾，以"显式给出的数值算例"为准，`buildPadNormalMap()` 实现为 `+1`
+并在代码注释与 `test_thruster_allocator.cpp` 新增的
+`ContactMapReproducesEqualPressingLoadExactly`/
+`KernConstraintSatisfiedForSymmetricPressingLoad` 两个用例里留痕说明。
+`ModelParams` 新增 `kern_eps_margin`（默认 `0.20`）。`AdhereController::
+on_activate()` 与各 `FSMState` 构造 `B`/`B^†` 同一时机预计算
+`a_contact_`/`c_kern_`/`kern_l_y_`/`kern_l_z_`；`/rov/controller_state` 的
+`contact_forces`/`kern_margin` 改为由 `a_contact_ * u_cmd`（已下达的推力
+指令）估计，而非直接读测量贴垫力传感器——这正是未来 KAMR-MPPI 的 12D
+OSQP 约束要用的同一套准静态预测。`C_kern` 预计算完毕但暂未接入任何实时
+约束（留给 Phase 4 的 OSQP）。
+
+异步外环工作线程骨架：`AdhereController` 新增
+`outerWorkerLoop()`（在独立 `std::thread` 里跑）、
+`OuterLoopInput`/`OuterLoopOutput` 双缓冲结构体（`mutex`+
+`condition_variable` 保护，不用 `realtime_tools::RealtimeBuffer`——那种
+无锁 SPSC 结构要等 worker 真正按外环预算跑起来才有意义，骨架阶段一把
+mutex 足够简单可靠）。线程在 `on_activate()` 启动、`on_deactivate()`/析构
+函数里停止并 `join()`。每个 `tick.outer_due` 把当前 `active_state` +
+`targetPose()` 快照写入输入缓冲并 `notify_one()`；worker 线程目前只做
+"回传 seq，不做任何真实求解"的占位处理——Phase 4 只需替换 worker 循环体里
+的求解逻辑，线程生命周期/握手架构本身不用再改。
+
+验证：`colcon build --symlink-install`（5 个包）零警告零错误；`colcon
+test --packages-select adhere_controller`：24/24 gtest 用例全部通过
+（含 `test_thruster_allocator` 新增的 2 个 Kern 验证用例）；真实 MuJoCo
+闭环确认 `list_controllers` 显示 `adhere_controller` 正常 `active`（线程
+启动未报错）、`/rov/controller_state`/`/rov/runtime_diagnostics` 均正常
+发布、`kill -INT` 后进程在 3s 内全部干净退出（`outer_worker_thread_`
+无死锁）。

@@ -2,16 +2,20 @@
 
 ## 职责
 
-人机交互终端 + Xbox 手柄遥操作桥接层（CLAUDE.md Phase 3.2）。通过
-`adhere_control_msgs` 定义的 4 话题，以标准 ROS 2 话题（非实时路径）与
-`AdhereController` 异步通信，三个可执行文件各自职责正交：
+人机交互终端 + Xbox 手柄遥操作桥接层（CLAUDE.md Phase 3.2，四元数消息 +
+实时诊断于 Phase 3.6 更新）。通过 `adhere_control_msgs` 定义的 5 话题，以
+标准 ROS 2 话题（非实时路径）与 `AdhereController` 异步通信，四个可执行
+文件各自职责正交：
 
-- `fsm_console_node`：主控 FSM 状态切换终端，**仅**发布 `/rov/fsm_command`；
+- `fsm_console_node`：主控 FSM 状态切换终端，**仅**发布 `/rov/fsm_command`，
+  并订阅 `/rov/runtime_diagnostics` 显示单行计时摘要；
 - `state_cmd_console_node`：`DEPTH_HOLD`/`PID_HOLD` 专属数值设定终端，**仅**发布
   `/rov/setpoint_cmd`，由 `fsm_console_node` 按需自动弹出，也可手动单独运行；
 - `xbox_teleop_node`：订阅官方 ROS 2 `joy` 包的 `/joy`（`sensor_msgs/msg/Joy`），
-  转换为 `/rov/teleop_cmd`（美国手/Mode 2 连续摇杆）与手柄按键边沿触发的
-  `/rov/fsm_command`（瞬时状态切换）。
+  转换为 `/rov/teleop_cmd`（美国手/Mode 2 连续摇杆，`geometry_msgs/Vector3
+  linear`/`angular`）与手柄按键边沿触发的 `/rov/fsm_command`（瞬时状态切换）；
+- `rt_monitor_node`（Phase 3.6 新增）：订阅 `/rov/runtime_diagnostics`，用
+  ANSI 彩色实时刷新一张 9 路频率/延迟表格，超时或偏离目标频率标红。
 
 本包**零依赖** MuJoCo/CUDA/`ros2_control`/`adhere_mujoco_hardware`/
 `adhere_controller`，可独立部署到一台不安装仿真/控制栈的轻量级远程
@@ -22,9 +26,10 @@
 
 ```text
 src/
-├── fsm_console_node.cpp          # 主控 FSM 状态切换终端 + 动态子终端生命周期管理
+├── fsm_console_node.cpp          # 主控 FSM 状态切换终端 + 动态子终端生命周期管理 + 计时摘要
 ├── state_cmd_console_node.cpp    # DEPTH_HOLD/PID_HOLD 专属设定终端（ROS 参数 mode=2|4）
-└── xbox_teleop_node.cpp          # /joy -> TeleopCommand/FsmCommand 桥接
+├── xbox_teleop_node.cpp          # /joy -> TeleopCommand/FsmCommand 桥接
+└── rt_monitor_node.cpp           # /rov/runtime_diagnostics 实时 ANSI 终端表格（Phase 3.6）
 config/
 └── xbox_teleop.yaml              # 摇杆/按键映射参数（死区、曲线、轴/按键索引）
 launch/
@@ -47,13 +52,15 @@ Current State: [1] state_passive (state_passive)
 Select state (1/2/3/4/q):
 ```
 
-- 订阅 `/rov/fsm_state`（`adhere_control_msgs::msg::FsmState`，**不**再订阅
-  `/rov/odom` 等原始硬件话题）在独立的 ROS executor 线程上持续更新菜单中显示
-  的当前状态，主线程阻塞在 `std::cin` 上读取用户选择，两者互不阻塞。
+- 订阅 `/rov/controller_state`（`adhere_control_msgs::msg::ControllerState`，
+  Phase 3.6 替代已删除的 `FsmState`，**不**再订阅 `/rov/ground_truth_odom`
+  等原始硬件话题）与 `/rov/runtime_diagnostics` 在独立的 ROS executor 线程上
+  持续更新菜单中显示的当前状态与计时摘要，主线程阻塞在 `std::cin` 上读取
+  用户选择，两者互不阻塞。
 - 输入 `1`/`2`/`3`/`4`：发布对应的 `FsmCommand{command=...}` 到
   `/rov/fsm_command`；**不**携带任何数值设定点。
 - 输入 `q`：退出控制台（不影响已激活的 FSM 状态）。
-- **动态子终端生命周期管理**：只要 `/rov/fsm_state::current_state` 发生变化
+- **动态子终端生命周期管理**：只要 `/rov/controller_state::current_state` 发生变化
   （无论切换来自本控制台的键盘输入还是 Xbox 手柄按键），就先终止上一个已弹出
   的 `state_cmd_console_node` 子终端，再视新状态决定：
   - 新状态是 `DEPTH_HOLD`（`2`）或 `PID_HOLD`（`4`）：以
@@ -68,8 +75,11 @@ Select state (1/2/3/4/q):
 
 ## `state_cmd_console_node`：`DEPTH_HOLD`/`PID_HOLD` 专属设定终端
 
-ROS 参数 `mode`（`int`，`2` 或 `4`）决定界面；订阅 `/rov/fsm_state` 实时显示
-Actual/Target，**仅**发布 `/rov/setpoint_cmd`：
+ROS 参数 `mode`（`int`，`2` 或 `4`）决定界面；订阅 `/rov/controller_state`
+实时显示 Actual/Target，**仅**发布 `/rov/setpoint_cmd`（线上协议是
+`command_type` + `geometry_msgs/Pose target_pose` 四元数，本终端自带一套
+不依赖 Eigen 的 RPY↔四元数小工具，只在界面层保持人类友好的角度输入/显示，
+Phase 3.6）：
 
 ```text
 # mode:=2（水面 Z=0.0m，水深输入既可为正也可为负，二者等价：2.50 与 -2.50
@@ -79,14 +89,18 @@ Current Depth: 2.000 m (Z = -2.000 m)   |   Target Depth: 2.500 m (Z = -2.500 m)
 [DEPTH_HOLD] Enter target depth in meters, positive or negative (float, e.g.
 2.50 or -2.50 -- both mean 2.50m below the surface), or 'h' to hold current depth:
 
-# mode:=4（`z <val>` 同样接受正负水深输入，归一化方式与 mode:=2 一致）
+# mode:=4（`z <val>` 同样接受正负水深输入，归一化方式与 mode:=2 一致；
+# 同时显示四元数 [qw,qx,qy,qz] 与由其换算出的 RPY(deg)）
 [PID_HOLD] Enter 'z <val>' (depth), 'y <val>' (lateral), 'x <val>' (wall dist),
-'yaw <deg>', 'all <x> <y> <z> <yaw_deg>', or 'h' (lock current pose):
+'roll <deg>', 'pitch <deg>', 'yaw <deg>', 'all <x> <y> <z> <yaw_deg>',
+'reset' (roll/pitch -> 0), or 'h' (lock current pose):
 ```
 
-`mode:=4` 下的单轴部分更新（`z`/`y`/`x`/`yaw`）会把当前已知的 `target_pose`
-（来自 `/rov/fsm_state`）回填进另外 3 个轴，再覆盖被修改的那一个，因此
-`z 0.4` 这样的输入**不会**把 `x`/`y`/`yaw` 意外清零。
+`mode:=4` 下的单轴部分更新（`z`/`y`/`x`/`roll`/`pitch`/`yaw`）会把当前已知的
+`target_pose`（来自 `/rov/controller_state`，四元数换算回 RPY）回填进其余
+轴，再覆盖被修改的那一个，因此 `z 0.4` 这样的输入**不会**把 `x`/`y`/`roll`/
+`pitch`/`yaw` 意外清零。`reset` 发送 `MODE_LEVEL_ATTITUDE`（服务端用自己的
+实时目标重新计算，不依赖本地回填值）。
 
 ```bash
 ros2 run adhere_keyboard_input state_cmd_console_node --ros-args -p mode:=2
@@ -136,7 +150,7 @@ ros2 launch adhere_keyboard_input teleop_gcs.launch.py dev:=/dev/input/js1
 ```
 
 启动 `joy_node`（`joy` 包）+ `xbox_teleop_node` + `fsm_console_node` 三者。
-与运行仿真/真机的下位机之间**只**通过 ROS 2 DDS 的 4 个 `/rov/*` 话题通信，
+与运行仿真/真机的下位机之间**只**通过 ROS 2 DDS 的 `/rov/*` 话题通信，
 不要求两台机器安装相同的软件栈（下位机需要 MuJoCo/CUDA/`ros2_control`，上位机
 不需要）。
 

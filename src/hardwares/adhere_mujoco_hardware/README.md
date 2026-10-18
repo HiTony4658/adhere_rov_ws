@@ -327,7 +327,7 @@ liftoff_ratio`/`corner_trap_ratio`/`liftoff_events`/`active_pads`——这是
 ### 运行时造浪机切换（Runtime Wave-Maker Switching）
 
 `AdhereMujocoHardware` 不再在启动时静态绑定水流环境——节点启动时恒定从**静水
-（模式 `1`）**开始，`wave_mode_`（`std::atomic<int>`）与 `wave_trigger_time_`
+（模式 `1`）**开始，`flow_mode_`（`std::atomic<int>`）与 `wave_trigger_time_`
 （`std::atomic<double>`）允许从任意线程安全地热切换：
 
 - **相对造浪时钟**：切换到模式 `2` 时，立即将 `t_trigger` 锁存为当前仿真时间
@@ -335,17 +335,17 @@ liftoff_ratio`/`corner_trap_ratio`/`liftoff_events`/`active_pads`——这是
   `StationKeepingGustPlugin`，而不是原始仿真时间——这样无论用户在第几秒按下
   `2`，两段阵风都会从造浪开始的那一刻重新播放，不会被仿真已运行的时长"吃掉"。
 - **切回模式 `1`** 时立即恢复零环境流速（`v_flow = 0`），不经过任何过渡。
-- 两个等价的指令入口，都会调用同一个 `AdhereMujocoHardware::setWaveMode(int)`：
+- 两个等价的指令入口，都会调用同一个 `AdhereMujocoHardware::setFlowMode(int)`：
   - **`MujocoViewer`**（主要入口）：按 `1`/`2` 键或点击左侧边栏 "Wave Environment"
-    单选按钮，经 `MujocoVisBridge::wave_mode_cmd`（边沿触发的原子请求槽位）
+    单选按钮，经 `MujocoVisBridge::flow_mode_cmd`（边沿触发的原子请求槽位）
     直接送达 `write()`，无需经过 ROS 话题/DDS。
-  - 话题 `/rov/wave_mode_cmd`（`std_msgs/msg/Int32`，`1` 或 `2`）：供脚本化/
+  - 话题 `/rov/flow_mode_cmd`（`std_msgs/msg/Int32`，`1` 或 `2`）：供脚本化/
     远程场景下发指令，由 `adhere_mujoco_node` 转发给当前唯一存活的
     `AdhereMujocoHardware` 实例（`AdhereMujocoHardware::activeInstance()`，
     与 `mjcb_passive` 单例回调复用同一条"单进程单实例"架构假设），例如：
     ```bash
-    ros2 topic pub /rov/wave_mode_cmd std_msgs/msg/Int32 "{data: 2}" --once   # 开启造浪
-    ros2 topic pub /rov/wave_mode_cmd std_msgs/msg/Int32 "{data: 1}" --once   # 切回静水
+    ros2 topic pub /rov/flow_mode_cmd std_msgs/msg/Int32 "{data: 2}" --once   # 开启造浪
+    ros2 topic pub /rov/flow_mode_cmd std_msgs/msg/Int32 "{data: 1}" --once   # 切回静水
     ```
 
 ## `MujocoVisBridge` 与 `MujocoViewer`：500Hz↔60Hz 双向解耦 + 完整交互式 GUI
@@ -356,9 +356,9 @@ liftoff_ratio`/`corner_trap_ratio`/`liftoff_events`/`active_pads`——这是
 - **硬件 -> GUI 的批量快照**（`qpos`/`qvel`/`ctrl`/`pad_force`/`pad_v_sep`/
   `flow_vel_world`）：由 `write()` 每 8 步（约 60Hz）用 `std::mutex::try_lock()`
   写入，绝不阻塞 500Hz 主循环。
-- **GUI -> 硬件的控制请求**（`paused`/`reset_request`/`wave_mode_cmd`/
+- **GUI -> 硬件的控制请求**（`paused`/`reset_request`/`flow_mode_cmd`/
   `manual_ctrl[8]`/`xfrc_perturb[6]`）与**硬件 -> GUI 的标量遥测**
-  （`actual_physics_hz`/`sim_time`/`wave_mode_active`/`wave_tau`）：全部是
+  （`actual_physics_hz`/`sim_time`/`flow_mode_active`/`wave_tau`）：全部是
   `std::atomic`，任意线程可无锁读写。
 
 ### `MujocoViewer`：仿照官方 `simulate` 的完整交互式窗口
@@ -528,13 +528,17 @@ GLFW 窗口创建，仅空转等待停止信号。
    `simplified_v1_description/launch/mujoco.launch.py`（不在本包内）决定。
    物理循环线程本身用 `std::chrono::steady_clock::sleep_until` 而非
    `rclcpp::Rate`，并对每拍耗时做指数滑动平均写入
-   `MujocoVisBridge::actual_physics_hz`，用于证明 `MujocoViewer`（60Hz GL）与
-   RViz2（100Hz 话题）都不会拖慢物理循环；
+   `MujocoVisBridge::actual_physics_hz`/`step_work_ms`，用于证明
+   `MujocoViewer`（60Hz GL）与 RViz2（100Hz 话题）都不会拖慢物理循环；
+   `AdhereMujocoHardware::read()` 把这两个值直接镜像进
+   `diagnostics/hw_loop_hz`/`diagnostics/hw_step_exec_ms` 两个状态接口
+   （CLAUDE.md Phase 3.6，`hw_states_` 从 55 扩到 57），供 `adhere_controller`
+   汇总进 `/rov/runtime_diagnostics`，而不必反向依赖本包的内部类型；
 3. 额外在 `100Hz` 定时器中，从 `AdhereMujocoHardware::visBridge()` 的快照（而非
    `claim_state_interface()`，后者与 `controller_manager` 所属的 `ResourceManager`
    跨线程竞争同一资源是不安全的）读取位姿/速度/接触力/环境流速，发布
    `tf2_ros::TransformBroadcaster`（`world -> base_link`）、
-   `nav_msgs/msg/Odometry`（`/rov/odom`）、`sensor_msgs/msg/JointState`（`/joint_states`，
+   `nav_msgs/msg/Odometry`（`/rov/ground_truth_odom`）、`sensor_msgs/msg/JointState`（`/joint_states`，
    因模型无可动关节而恒为空）、`visualization_msgs/msg/MarkerArray`
    （`/rov/environment_markers`：壁面 + 4 个接触垫受力柱状图 + 环境流速箭头，
    后者与 `MujocoViewer` 自己画的箭头保持同一份数据来源），使 RViz2 与内嵌
@@ -765,8 +769,8 @@ ros2 launch simplified_v1_description mujoco.launch.py \
     xacro_file:=urdf/full_cad.urdf.xacro
 
 # 无 GUI 窗口时，用话题一次性切换造浪（例如配合 headless:=true 做脚本化测试）
-ros2 topic pub /rov/wave_mode_cmd std_msgs/msg/Int32 "{data: 2}" --once   # 开启造浪
-ros2 topic pub /rov/wave_mode_cmd std_msgs/msg/Int32 "{data: 1}" --once   # 切回静水
+ros2 topic pub /rov/flow_mode_cmd std_msgs/msg/Int32 "{data: 2}" --once   # 开启造浪
+ros2 topic pub /rov/flow_mode_cmd std_msgs/msg/Int32 "{data: 1}" --once   # 切回静水
 ```
 
 `autostart_controllers:="[]"` 时即此前 `mujoco_sim.launch.py` 的纯开环硬件仿真

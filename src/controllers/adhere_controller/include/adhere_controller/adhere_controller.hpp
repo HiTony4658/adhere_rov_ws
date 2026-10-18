@@ -1,8 +1,12 @@
 #ifndef ADHERE_CONTROLLER__ADHERE_CONTROLLER_HPP_
 #define ADHERE_CONTROLLER__ADHERE_CONTROLLER_HPP_
 
+#include <atomic>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 
 #include "controller_interface/controller_interface.hpp"
@@ -44,6 +48,17 @@ class AdhereController : public controller_interface::ControllerInterface
 {
 public:
   AdhereController() = default;
+
+  // Defensive join of the async outer-loop worker (CLAUDE.md Phase 3.6 Stage 2.2) in case the
+  // controller is destroyed without on_deactivate() having run first.
+  ~AdhereController() override
+  {
+    outer_worker_running_.store(false);
+    outer_worker_cv_.notify_all();
+    if (outer_worker_thread_.joinable()) {
+      outer_worker_thread_.join();
+    }
+  }
 
   controller_interface::InterfaceConfiguration command_interface_configuration() const override;
 
@@ -187,6 +202,49 @@ private:
   // FSMState::run() call -- never measured from wall-clock deltas, so it carries zero scheduling
   // jitter regardless of executor/OS timing noise.
   rclcpp::Duration inner_period_ = rclcpp::Duration::from_seconds(0.004);
+
+  // Pre-MPPI contact-force distribution & Rhombic Kern matrices (CLAUDE.md Phase 3.6 Stage
+  // 2.2), precomputed once in on_activate() from model_params_ -- same lifecycle point every
+  // FSMState builds its own B/B^dagger. Not yet consumed by any live constraint (that lands
+  // with Phase 4's 12D OSQP); used here only to estimate ControllerState::contact_forces/
+  // kern_margin from the commanded thruster forces.
+  Mat48 a_contact_ = Mat48::Zero();
+  Mat48 c_kern_ = Mat48::Zero();
+  double kern_l_y_ = 1.0;
+  double kern_l_z_ = 1.0;
+
+  // Async outer-loop worker skeleton (CLAUDE.md Phase 3.6 Stage 2.2/Sec.5): non-blocking
+  // hand-off to a dedicated thread, so the 500Hz update() never waits on outer-loop compute --
+  // exactly the architecture the async CUDA MPPI rollout (Phase 4) will reuse, just with a
+  // trivial pass-through "solve" for now. Double-buffered input/output guarded by a single
+  // mutex + condition_variable (not realtime_tools::RealtimeBuffer -- that lock-free SPSC
+  // structure is the right choice once the worker runs at a real, bounded cadence under the
+  // outer-loop budget; a plain mutex is simpler and sufficient while the worker does ~nothing).
+  struct OuterLoopInput
+  {
+    Vec3 pos_w = Vec3::Zero();
+    Quat quat_w = Quat(1.0, 0.0, 0.0, 0.0);
+    Vec3 vel_body = Vec3::Zero();
+    Vec3 omega_body = Vec3::Zero();
+    Vec3 target_pos = Vec3::Zero();
+    Quat target_quat = Quat(1.0, 0.0, 0.0, 0.0);
+    uint64_t seq = 0;
+  };
+  struct OuterLoopOutput
+  {
+    uint64_t seq = 0;  // echoes OuterLoopInput::seq this output was computed from
+  };
+
+  void outerWorkerLoop();
+
+  std::thread outer_worker_thread_;
+  std::mutex outer_worker_mutex_;
+  std::condition_variable outer_worker_cv_;
+  OuterLoopInput outer_worker_input_;
+  OuterLoopOutput outer_worker_output_;
+  bool outer_worker_has_work_ = false;
+  std::atomic<bool> outer_worker_running_{false};
+  uint64_t outer_worker_seq_ = 0;
 };
 
 }  // namespace adhere_controller

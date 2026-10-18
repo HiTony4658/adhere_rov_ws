@@ -3,10 +3,16 @@
 
 #include <gtest/gtest.h>
 
+using adhere_controller::buildContactMap;
+using adhere_controller::buildKernConstraintMatrix;
+using adhere_controller::buildPadNormalMap;
+using adhere_controller::buildPadNormalMapPseudoInverse;
 using adhere_controller::buildThrusterAllocationMatrix;
 using adhere_controller::buildThrusterAllocationPseudoInverse;
 using adhere_controller::Mat6;
 using adhere_controller::ModelParams;
+using adhere_controller::padHalfSpans;
+using adhere_controller::Vec4;
 using adhere_controller::Vec6;
 using adhere_controller::Vec8;
 
@@ -67,6 +73,50 @@ TEST(ThrusterAllocator, PureHeaveProducesZeroParasiticMoment)
   EXPECT_NEAR(produced(3), 0.0, 1e-3);
   EXPECT_NEAR(produced(4), 0.0, 1e-3);
   EXPECT_NEAR(produced(5), 0.0, 1e-3);
+}
+
+// --- Phase 3.6 Stage 2.2/3.1: pre-MPPI A_contact/C_kern verification -------------------------
+TEST(ThrusterAllocator, ContactMapReproducesEqualPressingLoadExactly)
+{
+  const auto b = buildThrusterAllocationMatrix(kDefaultPos, kDefaultDir);
+  const auto g = buildPadNormalMap(kDefaultModelParams.pad_pos);
+  const auto g_pinv = buildPadNormalMapPseudoInverse(g);
+  const auto a_contact = buildContactMap(g_pinv, b);
+
+  // CLAUDE.md Sec.3's example: equal pressing thrusts u[0:4]=25N (the 4 normal thrusters
+  // co-located with the 4 pads) must yield A_contact*u = [25, 25, 25, 25]^T N exactly.
+  Vec8 u = Vec8::Zero();
+  u(0) = 25.0;
+  u(1) = 25.0;
+  u(2) = 25.0;
+  u(3) = 25.0;
+
+  const Vec4 f_n = a_contact * u;
+  EXPECT_NEAR(f_n(0), 25.0, 1e-3);
+  EXPECT_NEAR(f_n(1), 25.0, 1e-3);
+  EXPECT_NEAR(f_n(2), 25.0, 1e-3);
+  EXPECT_NEAR(f_n(3), 25.0, 1e-3);
+}
+
+TEST(ThrusterAllocator, KernConstraintSatisfiedForSymmetricPressingLoad)
+{
+  const auto b = buildThrusterAllocationMatrix(kDefaultPos, kDefaultDir);
+  const auto spans = padHalfSpans(kDefaultModelParams.pad_pos);
+  const auto c_kern = buildKernConstraintMatrix(
+    b, spans.first, spans.second, kDefaultModelParams.kern_eps_margin);
+
+  // A perfectly symmetric pressing load (CoP at the geometric center) must sit strictly inside
+  // the admissible kern for every one of the 4 edge constraints.
+  Vec8 u = Vec8::Zero();
+  u(0) = 25.0;
+  u(1) = 25.0;
+  u(2) = 25.0;
+  u(3) = 25.0;
+
+  const Eigen::Matrix<double, 4, 1> result = c_kern * u;
+  for (int i = 0; i < 4; ++i) {
+    EXPECT_LT(result(i), 0.0);
+  }
 }
 
 int main(int argc, char ** argv)

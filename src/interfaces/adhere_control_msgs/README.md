@@ -14,17 +14,18 @@ FSM 状态切换命令、状态内数值设定点、Xbox 手柄连续遥操作�
 
 ## 已实现的接口
 
-### 消息（`msg/`）：4 话题解耦契约（CLAUDE.md Phase 3.2）
+### 消息（`msg/`）：5 话题解耦契约（CLAUDE.md Phase 3.2，四元数化 + 实时诊断于 Phase 3.6）
 
-状态切换、状态内离散设定点、连续手柄遥操作、控制器反馈是 4 个正交关注点，
-分别对应 4 个独立话题，互不混用：
+状态切换、状态内离散设定点、连续手柄遥操作、控制器反馈、实时诊断是 5 个
+正交关注点，分别对应 5 个独立话题，互不混用：
 
 | 文件 | 话题 / 发布方 | 字段摘要 | 用途 |
 |---|---|---|---|
-| `FsmCommand.msg` | `/rov/fsm_command`，`fsm_console_node` 或 `xbox_teleop_node` 按键边沿 | `int32 command`（`NO_CHANGE=0, PASSIVE=1, DEPTH_HOLD=2, OPEN_LOOP=3, PID_HOLD=4`） | **仅**用于切换 FSM 状态，不再携带任何数值设定点 |
-| `SetpointCommand.msg` | `/rov/setpoint_cmd`，`state_cmd_console_node` | `uint8 mode`（`2`=`DEPTH_HOLD` 用 `target_z`；`4`=`PID_HOLD` 用 `target_x/y/z/roll/pitch/yaw` 或 `lock_current_pose`）; `bool lock_current_pose`; `float64 target_x/y/z/roll/pitch/yaw` | 离散数值设定点，与状态切换正交，不触发 `FSMState::enter()`（不重置积分器）；`target_roll`/`target_pitch` 为 Phase 3.5 新增字段 |
-| `TeleopCommand.msg` | `/rov/teleop_cmd`，`xbox_teleop_node`，50Hz | `float64 surge_x, sway_y, heave_z, yaw_rate, pitch_rate, roll_rate`（归一化至 `[-1,1]`，美国手/Mode 2 映射）; `bool active` | Xbox 手柄连续遥操作指令，被 `StateOpenLoop`/`StatePidHold`/`StateDepthHold` 消费；`AdhereController` 对其施加 `0.25s` 失联看门狗；`pitch_rate`（LT/LB）/`roll_rate`（RT/RB）为 Phase 3.5 新增字段 |
-| `FsmState.msg` | `/rov/fsm_state`，`AdhereController`，外环速率 | `int32 current_state`; `string state_name`; `string estimation_mode`; `float64[6] target_pose`; `float64[6] estimated_pose`; `float64[6] ground_truth_pose` | 控制器实时反馈，供 `fsm_console_node`/`state_cmd_console_node` 显示；`target/estimated/ground_truth_pose` 均为 `[x,y,z,roll,pitch,yaw]`（Phase 3.5 从 4-DOF 扩展为 6-DOF，并拆分"控制器实际使用的估计位姿"与"仅用于离线评估的地面真值"） |
+| `FsmCommand.msg` | `/rov/fsm_command`，`fsm_console_node` 或 `xbox_teleop_node` 按键边沿 | `int32 command`（`NO_CHANGE=0, PASSIVE=1, DEPTH_HOLD=2, OPEN_LOOP=3, PID_HOLD=4, BASELINE_MPPI=5, KAMR_MPPI=6`） | **仅**用于切换 FSM 状态，不再携带任何数值设定点；`5`/`6` 为 Phase 3.6 预留的 Phase 4 状态 ID |
+| `SetpointCommand.msg` | `/rov/setpoint_cmd`，`state_cmd_console_node` | `uint8 command_type`（`1=MODE_DEPTH_ONLY, 2=MODE_FULL_POSE, 3=MODE_LOCK_CURRENT, 4=MODE_LEVEL_ATTITUDE`）; `geometry_msgs/Pose target_pose`（世界系位置 + 单位四元数） | 离散数值设定点，与状态切换正交，不触发 `FSMState::enter()`（不重置积分器）；Phase 3.6 由 6 个裸标量（`mode/target_x..yaw`）重构为 `command_type` + `Pose`，姿态改用四元数避免万向锁 |
+| `TeleopCommand.msg` | `/rov/teleop_cmd`，`xbox_teleop_node`，50Hz | `geometry_msgs/Vector3 linear`（surge/sway/heave）; `geometry_msgs/Vector3 angular`（roll_rate=RT/RB, pitch_rate=LT/LB, yaw_rate），均归一化至 `[-1,1]`; `bool active` | Xbox 手柄连续遥操作指令，被 `StateOpenLoop`/`StatePidHold`/`StateDepthHold` 消费；`AdhereController` 对其施加 `0.25s` 失联看门狗；Phase 3.6 由 6 个裸标量重构为 2 个 `Vector3` |
+| `ControllerState.msg` | `/rov/controller_state`，`AdhereController`，外环速率（替代 Phase 3.6 删除的 `FsmState.msg`） | `int32 current_state`; `string state_name`; `string estimation_mode`; `geometry_msgs/Pose target_pose`; `geometry_msgs/Pose estimated_pose`; `geometry_msgs/Twist estimated_twist_body`; `float64[4] contact_forces`; `float64[8] thruster_cmds`; `float64 kern_margin` | 控制器实时反馈，供 `fsm_console_node`/`state_cmd_console_node` 显示；**100% Sim-to-Real 纯净**——不含任何地面真值字段（地面真值改由 `adhere_mujoco_node` 单独发布在 `/rov/ground_truth_odom`），姿态全部用四元数表示 |
+| `RuntimeDiagnostics.msg` | `/rov/runtime_diagnostics`，`AdhereController`，固定 10Hz（Phase 3.6 新增） | 9 路频率（Hz）+ 执行延迟/预算（ms）+ 超时计数 + `bool timing_healthy` | 实时频率/延迟可观测性，驱动 `/rov/diagnostics_hud_marker` RViz2 HUD 与 `rt_monitor_node` 实时终端表格 |
 
 ## 规划中的接口列表（后续阶段实现）
 
@@ -39,7 +40,8 @@ FSM 状态切换命令、状态内数值设定点、Xbox 手柄连续遥操作�
 ## 构建说明
 
 `CMakeLists.txt` 的 `rosidl_generate_interfaces(${PROJECT_NAME} "msg/FsmCommand.msg"
-"msg/SetpointCommand.msg" "msg/TeleopCommand.msg" "msg/FsmState.msg" DEPENDENCIES std_msgs)`
+"msg/SetpointCommand.msg" "msg/TeleopCommand.msg" "msg/ControllerState.msg"
+"msg/RuntimeDiagnostics.msg" DEPENDENCIES std_msgs geometry_msgs)`
 生成对应的 `adhere_control_msgs/msg/*.hpp`。其余 `.msg`/`.srv` 文件待后续阶段按上表
 实现后追加到该调用的文件列表中。
 

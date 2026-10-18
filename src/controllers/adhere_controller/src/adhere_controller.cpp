@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "adhere_controller/common/mathTools.h"
+#include "adhere_controller/common/ThrusterAllocator.h"
 
 namespace adhere_controller
 {
@@ -292,6 +293,27 @@ CallbackReturn AdhereController::on_activate(const rclcpp_lifecycle::State & /*p
   findAndAppend(state_interfaces_, "diagnostics/hw_loop_hz", diag_state_interface_);
   findAndAppend(state_interfaces_, "diagnostics/hw_step_exec_ms", diag_state_interface_);
 
+  // Pre-MPPI A_contact/C_kern precompute (CLAUDE.md Phase 3.6 Stage 2.2): same lifecycle point
+  // every FSMState builds its own B/B^dagger, from the same model_params_ geometry.
+  {
+    const Mat68 b =
+      buildThrusterAllocationMatrix(model_params_.thruster_pos, model_params_.thruster_dir);
+    const Mat34 g = buildPadNormalMap(model_params_.pad_pos);
+    const Mat43 g_pinv = buildPadNormalMapPseudoInverse(g);
+    a_contact_ = buildContactMap(g_pinv, b);
+    const auto spans = padHalfSpans(model_params_.pad_pos);
+    kern_l_y_ = spans.first;
+    kern_l_z_ = spans.second;
+    c_kern_ = buildKernConstraintMatrix(b, kern_l_y_, kern_l_z_, model_params_.kern_eps_margin);
+  }
+
+  // Async outer-loop worker skeleton (CLAUDE.md Phase 3.6 Stage 2.2): started here so a
+  // deactivate/reactivate cycle always gets a fresh thread, joined in on_deactivate() below.
+  outer_worker_seq_ = 0;
+  outer_worker_has_work_ = false;
+  outer_worker_running_.store(true);
+  outer_worker_thread_ = std::thread(&AdhereController::outerWorkerLoop, this);
+
   state_list_.passive = std::make_shared<StatePassive>(ctrl_interfaces_, model_params_);
   state_list_.depth_hold = std::make_shared<StateDepthHold>(ctrl_interfaces_, model_params_);
   state_list_.open_loop = std::make_shared<StateOpenLoop>(ctrl_interfaces_, model_params_);
@@ -317,6 +339,14 @@ CallbackReturn AdhereController::on_activate(const rclcpp_lifecycle::State & /*p
 
 CallbackReturn AdhereController::on_deactivate(const rclcpp_lifecycle::State & /*previous_state*/)
 {
+  // Stop & join the async outer-loop worker (CLAUDE.md Phase 3.6 Stage 2.2) before releasing
+  // interfaces, so it never touches ctrl_interfaces_ after this point.
+  outer_worker_running_.store(false);
+  outer_worker_cv_.notify_all();
+  if (outer_worker_thread_.joinable()) {
+    outer_worker_thread_.join();
+  }
+
   release_interfaces();
   ctrl_interfaces_.clear();
   gt_imu_state_interface_.clear();
@@ -507,12 +537,6 @@ controller_interface::return_type AdhereController::update()
     outer_profiler_.tickMarker();
     outer_profiler_.beginExec();
 
-    // Outer-loop hook (default 25Hz, CLAUDE.md Phase 3.1.1 Stage 2.1): the async CUDA MPPI
-    // rollout thread hand-off (qpos, qvel, F_x_extra_preload) <-> w_cmd via
-    // realtime_tools::RealtimeBuffer is a Phase 4/5 milestone -- intentionally a no-op placeholder
-    // here so the uniform timing contract itself is already wired and verifiable (see
-    // adhere_controller's test_multirate_decimator).
-
     // Live terminal feedback (CLAUDE.md Phase 3.6's ControllerState.msg, 100% Sim-to-Real pure
     // -- no ground truth here at all): published here (not gated on tick.inner_due) so
     // fsm_console_node/state_cmd_console_node see live estimated_pose/target_pose at the
@@ -533,6 +557,29 @@ controller_interface::return_type AdhereController::update()
     controller_state_msg.target_pose.orientation.z = target.quat(3);
 
     const auto & active = ctrl_interfaces_.active_state;
+
+    // Async outer-loop worker hand-off (CLAUDE.md Phase 3.6 Stage 2.2): non-blocking snapshot
+    // of the current state + target into the shared input buffer, waking outerWorkerLoop().
+    // The real async CUDA MPPI rollout (qpos, qvel, F_x_extra_preload -> w_cmd) is a Phase 4
+    // milestone -- the worker below only does a trivial pass-through "solve" for now, but the
+    // threading/hand-off architecture itself is already wired and running at the uniform 25Hz
+    // outer-loop rate (see adhere_controller's test_multirate_decimator).
+    {
+      std::lock_guard<std::mutex> lock(outer_worker_mutex_);
+      outer_worker_input_.pos_w = Vec3(active.pos_w[0], active.pos_w[1], active.pos_w[2]);
+      outer_worker_input_.quat_w =
+        Quat(active.quat_w[0], active.quat_w[1], active.quat_w[2], active.quat_w[3]);
+      outer_worker_input_.vel_body =
+        Vec3(active.vel_body[0], active.vel_body[1], active.vel_body[2]);
+      outer_worker_input_.omega_body =
+        Vec3(active.omega_body[0], active.omega_body[1], active.omega_body[2]);
+      outer_worker_input_.target_pos = target.pos;
+      outer_worker_input_.target_quat = target.quat;
+      outer_worker_input_.seq = ++outer_worker_seq_;
+      outer_worker_has_work_ = true;
+    }
+    outer_worker_cv_.notify_one();
+
     controller_state_msg.estimated_pose.position.x = active.pos_w[0];
     controller_state_msg.estimated_pose.position.y = active.pos_w[1];
     controller_state_msg.estimated_pose.position.z = active.pos_w[2];
@@ -546,16 +593,42 @@ controller_interface::return_type AdhereController::update()
     controller_state_msg.estimated_twist_body.angular.x = active.omega_body[0];
     controller_state_msg.estimated_twist_body.angular.y = active.omega_body[1];
     controller_state_msg.estimated_twist_body.angular.z = active.omega_body[2];
-    for (int i = 0; i < 4; ++i) {
-      controller_state_msg.contact_forces[i] = active.pad_force[i];
-    }
+    Vec8 u_cmd;
     for (int i = 0; i < 8; ++i) {
-      controller_state_msg.thruster_cmds[i] =
-        ctrl_interfaces_.thruster_state_interface_[i].get().get_value();
+      u_cmd(i) = ctrl_interfaces_.thruster_state_interface_[i].get().get_value();
+      controller_state_msg.thruster_cmds[i] = u_cmd(i);
     }
-    // kern_margin (Rhombic Kern safety margin, CLAUDE.md Sec.4.4) requires the A_contact/C_kern
-    // precompute landing in Phase 3.6.3's ThrusterAllocator extension -- placeholder until then.
-    controller_state_msg.kern_margin = 0.0;
+
+    // contact_forces/kern_margin (CLAUDE.md Sec.4.4/Sec.5, Phase 3.6 Stage 2.2): estimated from
+    // the commanded thruster forces via A_contact, NOT read from the real pad-contact sensors --
+    // this is the quasi-static prediction the future KAMR-MPPI's OSQP constraint will also use.
+    const Vec4 f_contact_est = a_contact_ * u_cmd;
+    for (int i = 0; i < 4; ++i) {
+      controller_state_msg.contact_forces[i] = f_contact_est(i);
+    }
+    // Center-of-pressure / K_val is only meaningful while the hull is actually pressing against
+    // the wall (sum_f appreciably > 0) -- when it isn't (e.g. PID_HOLD floating away from the
+    // wall), dividing by a near-zero sum_f would blow p_y/p_z/K_val up into meaningless large
+    // values. kern_margin reports the safe default (1.0, "fully inside kern") below that
+    // threshold instead of garbage telemetry; kFContactFloor is a noise-floor-scale threshold,
+    // not a physical rail limit.
+    constexpr double kFContactFloor = 1.0;  // N
+    const double sum_f = f_contact_est.sum();
+    double k_val = 0.0;
+    if (sum_f > kFContactFloor) {
+      const double p_y =
+        (f_contact_est(0) * model_params_.pad_pos[0].y() +
+         f_contact_est(1) * model_params_.pad_pos[1].y() +
+         f_contact_est(2) * model_params_.pad_pos[2].y() +
+         f_contact_est(3) * model_params_.pad_pos[3].y()) / sum_f;
+      const double p_z =
+        (f_contact_est(0) * model_params_.pad_pos[0].z() +
+         f_contact_est(1) * model_params_.pad_pos[1].z() +
+         f_contact_est(2) * model_params_.pad_pos[2].z() +
+         f_contact_est(3) * model_params_.pad_pos[3].z()) / sum_f;
+      k_val = std::abs(p_y) / kern_l_y_ + std::abs(p_z) / kern_l_z_;
+    }
+    controller_state_msg.kern_margin = 1.0 - k_val;
 
     controller_state_publisher_->publish(controller_state_msg);
     outer_profiler_.endExec();
@@ -652,6 +725,38 @@ void AdhereController::publishRuntimeDiagnostics(const rclcpp::Time & time)
   hud.text = buf;
 
   diagnostics_hud_publisher_->publish(hud);
+}
+
+void AdhereController::outerWorkerLoop()
+{
+  // Async outer-loop worker skeleton (CLAUDE.md Phase 3.6 Stage 2.2): blocks on the condition
+  // variable between snapshots (zero busy-polling), wakes on every outer_due tick's notify_one()
+  // from update(), and currently performs a trivial pass-through "solve" -- Phase 4 replaces
+  // the body of this loop with the real async CUDA MPPI rollout, without touching the
+  // thread/hand-off lifecycle itself (started in on_activate(), joined in on_deactivate()/~dtor).
+  while (outer_worker_running_.load()) {
+    OuterLoopInput input;
+    {
+      std::unique_lock<std::mutex> lock(outer_worker_mutex_);
+      outer_worker_cv_.wait(
+        lock, [this] { return outer_worker_has_work_ || !outer_worker_running_.load(); });
+      if (!outer_worker_running_.load()) {
+        break;
+      }
+      input = outer_worker_input_;
+      outer_worker_has_work_ = false;
+    }
+
+    // Placeholder "solve": Phase 4's MPPI sampling/rollout/cost-evaluation goes here. For now
+    // just echoes the sequence number so a future test can verify the hand-off round-trips.
+    OuterLoopOutput output;
+    output.seq = input.seq;
+
+    {
+      std::lock_guard<std::mutex> lock(outer_worker_mutex_);
+      outer_worker_output_ = output;
+    }
+  }
 }
 
 std::shared_ptr<FSMState> AdhereController::getNextState(

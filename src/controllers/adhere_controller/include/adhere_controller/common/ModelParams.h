@@ -83,6 +83,11 @@ struct ModelParams
   std::array<Vec3, 4> pad_pos = {
     Vec3(-0.10, 0.25, 0.15), Vec3(-0.10, -0.25, 0.15), Vec3(-0.10, 0.25, -0.15),
     Vec3(-0.10, -0.25, -0.15)};
+  // Rhombic Kern safety margin (CLAUDE.md Sec.4.4/Sec.5, Phase 3.6): shrinks the admissible
+  // kern region C_kern*u<=0 enforces by this fraction. Not yet consumed by any live constraint
+  // (that lands with Phase 4's 12D OSQP) -- precomputed now purely for AdhereController's
+  // estimated kern_margin telemetry on /rov/controller_state.
+  double kern_eps_margin = 0.20;
 
   // Hydrostatic & Fossen hydrodynamic feedforward parameters.
   double rho_water = 1000.0;
@@ -201,6 +206,7 @@ struct ModelParams
     declareDoubleArray8("thruster_min", p.thruster_min, p.thruster_min);
     declareDoubleArray8("thruster_max", p.thruster_max, p.thruster_max);
     declareVec3Array4("pad_pos_xyz", p.pad_pos, p.pad_pos);
+    p.kern_eps_margin = autoDeclareDouble("kern_eps_margin", p.kern_eps_margin);
 
     p.rho_water = autoDeclareDouble("rho_water", p.rho_water);
     p.gravity = autoDeclareDouble("gravity", p.gravity);

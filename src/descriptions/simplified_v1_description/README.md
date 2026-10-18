@@ -26,7 +26,7 @@ urdf/
   └── simplified_v1.urdf.xacro     # 顶层入口：include robot.xacro + ros2_control.xacro
 xacro/
   ├── robot.xacro                   # 机体/4接触垫/8推力器标记几何宏（base_link 为唯一根连杆）
-  └── ros2_control.xacro            # <ros2_control> 标签：8 command + 55 state interface
+  └── ros2_control.xacro            # <ros2_control> 标签：8 command + 57 state interface
 mjcf/
   └── rov_wall.xml                  # MuJoCo 物理描述（与原型仓库数值对齐，只读复制）
 config/
@@ -49,7 +49,7 @@ launch/
 | `thr_N1/effort` .. `thr_N4/effort` | `[-40.0, 40.0] N` |
 | `thr_T5/effort` .. `thr_T8/effort` | `[-40.0, 40.0] N` |
 
-### 55 个 `state_interface`（CLAUDE.md Phase 3.5：地面真值 + 独立的噪声多速率传感器通路）
+### 57 个 `state_interface`（CLAUDE.md Phase 3.5：地面真值 + 独立的噪声多速率传感器通路；Phase 3.6 新增诊断 2 项）
 
 | 分组 | 数量 | 接口名 | 性质 |
 |---|---|---|---|
@@ -61,6 +61,7 @@ launch/
 | 噪声深度 (`depth_sensor_noisy`) | 1 | `z`，50Hz 采样保持 | 噪声 |
 | 噪声 DVL (`dvl_sensor_noisy`) | 4 | `vel.x/y/z`, `range`，20Hz 采样保持 | 噪声 |
 | 噪声载荷传感器 (`loadcell_noisy`) | 4 | `pad_TL/force` .. `pad_BR/force`，500Hz | 噪声 |
+| 诊断 (`diagnostics`) | 2 | `hw_loop_hz`, `hw_step_exec_ms` | 镜像 `MujocoVisBridge` 物理线程 EMA 遥测（Phase 3.6） |
 
 地面真值与噪声两组通路完全独立生成（`AdhereMujocoHardware::read()`），从不
 互相派生；`AdhereController` 仅把地面真值组私有化用于评估，`FSMState` 只能

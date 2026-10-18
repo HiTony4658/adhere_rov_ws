@@ -28,11 +28,13 @@ include/adhere_controller/
 │   └── StatePidHold.h
 └── common/
     ├── enumClass.h              # FSMStateName（PASSIVE/DEPTH_HOLD/OPEN_LOOP/PID_HOLD）/ FSMMode
-    ├── mathTypes.h              # Eigen 类型别名（Vec3/Vec6/Vec8/Mat68/Mat86/RotMat）
-    ├── mathTools.h              # quatToRotMat / rpyToRotMat / rotMatToRPY / saturation
+    ├── mathTypes.h              # Eigen 类型别名（Vec3/Vec6/Vec8/Mat68/Mat86/Mat34/Mat43/Mat48/RotMat）
+    ├── mathTools.h              # quatToRotMat / rpyToRotMat / rotMatToRPY / quatMul / quatInverse /
+    │                            # quatFromRPY / quatError / smallAngleQuat / saturation（Phase 3.6）
     ├── MultiRateDecimator.h     # 均匀整数抽取多速率调度（CLAUDE.md Phase 3.1.1）
+    ├── LoopProfiler.h           # 频率(Hz)/执行延迟(ms)/超时计数实时观测（CLAUDE.md Phase 3.6）
     ├── ModelParams.h            # 运行时加载的模型解耦物理/增益/传感器安装参数（CLAUDE.md Phase 3.3/3.5）
-    └── ThrusterAllocator.h      # 由 ModelParams 几何动态构建的 6x8 推力分配矩阵 B 及其阻尼伪逆
+    └── ThrusterAllocator.h      # 6x8 推力分配矩阵 B/B^+ + Pre-MPPI 的 G/G^+/A_contact/C_kern（Phase 3.6）
 
 src/
 ├── adhere_controller.cpp        # 生命周期方法 + 均匀多速率调度 + 500Hz 状态估计/融合 + 4 话题订阅/发布 + FSM 切换逻辑 + pluginlib 导出
@@ -50,9 +52,10 @@ launch/mujoco.launch.py          # 闭环启动文件：robot_state_publisher + 
 
 test/
 ├── test_multirate_decimator.cpp      # 纯逻辑 gtest，不依赖 rclcpp/hardware_interface
-├── test_thruster_allocator.cpp       # 纯 Eigen gtest：B*B^+ ~= I_6，零寄生力矩
+├── test_thruster_allocator.cpp       # 纯 Eigen gtest：B*B^+ ~= I_6，零寄生力矩，A_contact/C_kern（Phase 3.6）
 ├── test_fsm_states.cpp               # 闭环 gtest：假 CtrlInterfaces + 质点平面"虚拟物理"验证 3 态收敛性
-└── test_sensor_fusion_and_teleop.cpp # DVL 杠杆臂补偿收敛性 + sensor_fusion 闭环跟踪 + LT/RT 映射（CLAUDE.md Phase 3.5）
+├── test_sensor_fusion_and_teleop.cpp # DVL 杠杆臂补偿收敛性 + sensor_fusion 闭环跟踪 + LT/RT 映射（CLAUDE.md Phase 3.5）
+└── test_loop_profiler.cpp            # 纯逻辑 gtest：Hz EMA 收敛性 + 执行延迟/超时计数（CLAUDE.md Phase 3.6）
 ```
 
 ## 模型解耦：`ModelParams` + 动态 `ThrusterAllocator`（CLAUDE.md 第 3 节）
@@ -87,8 +90,9 @@ test/
 
 ```cpp
 struct ActiveState {
-  double pos_w[3];       // 世界坐标系质心位置 [x, y, z]
-  double rpy[3];          // [roll, pitch, yaw]，rad
+  double pos_w[3];        // 世界坐标系质心位置 [x, y, z]
+  double quat_w[4];       // 世界坐标系姿态四元数 [w, x, y, z]（Phase 3.6）
+  double rpy[3];          // 由 quat_w 派生，仅供 StateDepthHold 的小角度阻尼使用
   double vel_body[3];     // 机体坐标系线速度
   double omega_body[3];   // 机体坐标系角速度
   double pad_force[4];    // TL/TR/BL/BR 法向接触力
@@ -144,8 +148,10 @@ struct CtrlInterfaces {
   `<1.0deg` 的 RMSE 契约。
 
 无论哪种模式，地面真值都会被读入 `AdhereController::update()` 的局部变量，
-**仅**用于填充 `/rov/fsm_state` 的 `ground_truth_pose`（供离线评估参考），
-从不写入 `active_state`。
+仅用于首次 `reset()` 估计器与填充 `ground_truth` 模式的 `active_state`
+——Phase 3.6 起**不再**通过本包发布地面真值（`/rov/fsm_state` 已删除）：
+地面真值改由 `adhere_mujoco_node` 单独发布在 `/rov/ground_truth_odom`
+（`nav_msgs/Odometry`），仅供离线评估参考。
 
 ## 当前状态（4 态，CLAUDE.md Phase 3.2/3.3/3.5）
 
@@ -173,6 +179,53 @@ public:
 默认 `inner_decimation=2`、`outer_decimation=20` 使内环精确 `250Hz`
 （`dt=4.0ms` 恒定）、外环精确 `25Hz`（`dt=40.0ms` 恒定），`outer_decimation`
 也可配置为 `25` 得到 `20Hz` 外环。
+
+## Pre-MPPI 基础设施：`A_contact`/`C_kern` 预计算与异步外环工作线程骨架（CLAUDE.md Phase 3.6）
+
+`ThrusterAllocator.h` 在 `B`/`B^+` 之外新增 4 个函数，供 `AdhereController::
+on_activate()`（与各 `FSMState` 构造 `B`/`B^+` 同一时机）预计算：
+
+- `buildPadNormalMap(pad_pos)` → `G ∈ R^{3x4}`：第 `i` 列为
+  `[+1, -z_i, y_i]^T`，把 4 个贴垫法向力 `F_N,i >= 0`（沿 body `+X`）映射到
+  `[Fx, Ty, Tz]^T`（**注意**：代码按数值算例取 `+1`，与 `CLAUDE.md` §4.4
+  文字公式字面写的 `-1` 不一致，详见 `ThrusterAllocator.h` 内联注释）；
+- `buildPadNormalMapPseudoInverse(G)` → `G^+ ∈ R^{4x3}`（阻尼伪逆）；
+- `buildContactMap(G^+, B)` → `A_contact = -G^+ B_{[Fx,Ty,Tz]} ∈ R^{4x8}`，
+  估计 `F_N_hat ≈ A_contact * u`；
+- `buildKernConstraintMatrix(B, Ly, Lz, eps_margin)` → `C_kern ∈ R^{4x8}`
+  （Rhombic Kern 4 条边约束，尚未接入任何实时约束，留给 Phase 4 的 12D
+  OSQP）。
+
+`a_contact_`/`c_kern_` 用于把 `/rov/controller_state` 的 `contact_forces`/
+`kern_margin` 由**已下达的推力指令**估计出来（而非直接读测量贴垫力
+传感器），与未来 KAMR-MPPI 约束用的是同一套准静态预测模型。
+
+`AdhereController` 新增一个真实的异步外环工作**线程**
+（`outerWorkerLoop()`，`on_activate()` 启动、`on_deactivate()`/析构函数
+`join()`），通过 `mutex`+`condition_variable` 保护的 `OuterLoopInput`/
+`OuterLoopOutput` 双缓冲结构体与 500Hz 物理线程非阻塞握手：每个
+`tick.outer_due` 把当前 `active_state`+`targetPose()` 快照写入输入缓冲并
+`notify_one()`。目前 worker 只做"回传序号，不做任何真实求解"的占位
+处理——Phase 4 只需替换 worker 循环体，线程生命周期/握手架构本身不用再改。
+
+## 实时诊断：`LoopProfiler` + `RuntimeDiagnostics`（CLAUDE.md Phase 3.6）
+
+`LoopProfiler.h`（纯头文件，无 ROS/Eigen 依赖，风格与 `MultiRateDecimator.h`
+一致）提供 `tickMarker()`（基于 `steady_clock` 调用间隔的 EMA 估计触发
+频率）与 `beginExec()`/`endExec()`（测最新/EMA均值/最大执行耗时，并对
+`budget_ms` 计超时次数）。`AdhereController` 为估计器、内环（预算
+`4.0ms`）、外环（预算 `40.0ms`）、IMU/称重传感器（逐 tick）、深度/DVL
+（采样保持值变化时边沿触发）各建一个 `LoopProfiler` 实例，每 50 个 500Hz
+tick（固定 10Hz，独立于 `inner_decimation_`/`outer_decimation_`）汇总发布
+`/rov/runtime_diagnostics`，并发布一个绿/红
+`visualization_msgs::Marker`（`TEXT_VIEW_FACING`）到
+`/rov/diagnostics_hud_marker`，浮在 ROV 正上方。`hw_loop_hz`/
+`hw_step_exec_ms` 两路直接读取 `AdhereMujocoHardware` 新增的
+`diagnostics/hw_loop_hz`/`hw_step_exec_ms` 状态接口（镜像其
+`MujocoVisBridge` 既有的物理线程 EMA 遥测，本包不反向依赖
+`adhere_mujoco_hardware` 内部类型）。`estimator_hz` 在
+`estimation_mode=="ground_truth"` 时合法地报 `0Hz`（估计器本就没跑），
+因此被排除在 `timing_healthy` 的频率检查之外。
 
 ### `robot_control.yaml` 参数文件与节点重映射陷阱
 
