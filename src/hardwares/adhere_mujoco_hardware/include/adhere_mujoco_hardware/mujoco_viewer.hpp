@@ -127,7 +127,7 @@ private:
   // to MuJoCo's own sane defaults before buildUi0() runs. Only genuinely custom (non-MuJoCo)
   // toggles need a dedicated ui_* member here.
   int ui_running_ = 1;         // 1 = running, 0 = paused (mirrors bridge_->paused, inverted)
-  int ui_wave_mode_ = 0;       // radio index: 0 = Calm, 1 = Gust
+  int ui_flow_mode_ = 0;       // radio index: 0 = Calm, 1 = Gust
   mjtByte ui_show_pad_forces_ = 1;  // custom green capsule bars, not a MuJoCo opt_/scn_ flag
   mjtByte ui_show_flow_arrow_ = 1;  // custom blue flow arrow, not a MuJoCo opt_/scn_ flag
   double thruster_slider_[8] = {0, 0, 0, 0, 0, 0, 0, 0};
@@ -171,8 +171,8 @@ private:
   int cached_hydro_patch_count_ = 0;
 
   // --- Bug 6: bidirectional wave-mode sync state (replaces the old function-local static). ---
-  int last_ui_wave_mode_ = -1;
-  int last_external_wave_mode_ = -1;
+  int last_ui_flow_mode_ = -1;
+  int last_external_flow_mode_ = -1;
 
   // --- Section C1: Rhombic Kern diamond geometry, resolved once from bridge_->pad_site_pos_body
   //     the first time it's observed valid (write-once data, never changes afterwards). ---

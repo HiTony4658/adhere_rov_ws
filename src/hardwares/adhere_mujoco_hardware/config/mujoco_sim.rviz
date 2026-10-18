@@ -20,10 +20,10 @@ Visualization Manager:
       Show Arrows: false
       Marker Scale: 0.12
     - Class: rviz_default_plugins/Odometry
-      Name: Odometry
+      Name: GroundTruthOdometry
       Enabled: true
       Topic:
-        Value: /rov/odom
+        Value: /rov/ground_truth_odom
       Keep: 1
       Shape:
         Value: Axes

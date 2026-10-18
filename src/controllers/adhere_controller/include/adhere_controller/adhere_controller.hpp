@@ -6,12 +6,15 @@
 #include <unordered_map>
 
 #include "controller_interface/controller_interface.hpp"
+#include "visualization_msgs/msg/marker.hpp"
 
 #include "adhere_control_msgs/msg/controller_state.hpp"
 #include "adhere_control_msgs/msg/fsm_command.hpp"
+#include "adhere_control_msgs/msg/runtime_diagnostics.hpp"
 #include "adhere_control_msgs/msg/setpoint_command.hpp"
 #include "adhere_control_msgs/msg/teleop_command.hpp"
 #include "adhere_controller/common/enumClass.h"
+#include "adhere_controller/common/LoopProfiler.h"
 #include "adhere_controller/common/ModelParams.h"
 #include "adhere_controller/common/MultiRateDecimator.h"
 #include "adhere_controller/CtrlInterfaces.h"
@@ -80,6 +83,10 @@ private:
   std::shared_ptr<FSMState> getNextState(
     FSMStateName state_name) const;
 
+  // Builds and publishes RuntimeDiagnostics + the RViz2 HUD marker from the current profiler
+  // state (CLAUDE.md Phase 3.6 Stage 1.2/3.2). Called from update() at a fixed 10Hz.
+  void publishRuntimeDiagnostics(const rclcpp::Time & time);
+
   CtrlInterfaces ctrl_interfaces_;
   // Runtime-loaded model-decoupled parameters (CLAUDE.md Phase 3.3 Sec.3), populated once in
   // on_configure() and passed by const reference into every FSMState constructed in
@@ -103,6 +110,15 @@ private:
   // truth field at all (that now only exists on adhere_mujoco_node's /rov/ground_truth_odom).
   rclcpp::Publisher<adhere_control_msgs::msg::ControllerState>::SharedPtr controller_state_publisher_;
 
+  // Phase 3.6 Stage 1.2: real-time frequency/latency observability, published at 10Hz
+  // independently of the inner/outer decimation schedule (diag_decimation_ ticks, see
+  // on_configure()).
+  rclcpp::Publisher<adhere_control_msgs::msg::RuntimeDiagnostics>::SharedPtr
+    runtime_diagnostics_publisher_;
+  rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr diagnostics_hud_publisher_;
+  int diag_decimation_ = 50;  // cm_update_rate_/10 -> 10Hz, recomputed in on_configure()
+  uint64_t diag_tick_count_ = 0;
+
   // Phase 3.5 strict ground-truth isolation (CLAUDE.md Stage 2.3): these raw hardware state
   // interfaces are PRIVATE to AdhereController -- never exposed via CtrlInterfaces, never
   // reachable from any FSMState. gt_* hold noise-free ground truth (used only to populate
@@ -123,11 +139,34 @@ private:
     noisy_dvl_state_interface_;       // size 4
   std::vector<std::reference_wrapper<hardware_interface::LoanedStateInterface>>
     noisy_loadcell_state_interface_;  // size 4
+  std::vector<std::reference_wrapper<hardware_interface::LoanedStateInterface>>
+    diag_state_interface_;  // size 2: [hw_loop_hz, hw_step_exec_ms] (Phase 3.6 Stage 1.2)
 
   // RovStateEstimator instance driven at 500Hz by update(), ahead of the inner-loop gate, only
   // when model_params_.estimation_mode == "sensor_fusion".
   RovStateEstimator estimator_;
   bool estimator_initialized_ = false;
+
+  // Real-time instrumentation (CLAUDE.md Phase 3.6 Stage 1.2/3.2): budgets match
+  // RuntimeDiagnostics.msg's documented inner_loop_budget_ms/outer_loop_budget_ms (4.0ms for
+  // 250Hz, 40.0ms for 25Hz); estimator has no documented budget (no overrun field for it in the
+  // message), so its profiler is budget-less (overrun counting disabled). Sensor profilers only
+  // ever call tickMarker() (never beginExec()/endExec()), since "how often does a new sample
+  // arrive" -- not "how long did processing take" -- is what RuntimeDiagnostics wants from them.
+  LoopProfiler estimator_profiler_;
+  LoopProfiler inner_profiler_{4.0};
+  LoopProfiler outer_profiler_{40.0};
+  LoopProfiler sensor_imu_profiler_;
+  LoopProfiler sensor_loadcell_profiler_;
+  LoopProfiler sensor_depth_profiler_;
+  LoopProfiler sensor_dvl_profiler_;
+  // Edge-detection state for the sample-and-hold noisy depth/DVL channels (mirrors
+  // RovStateEstimator's own "has this sample actually changed" pattern) -- sensor_*_profiler_
+  // only calls tickMarker() on a genuine new sample, not every 500Hz tick.
+  bool have_last_depth_diag_ = false;
+  double last_depth_diag_ = 0.0;
+  bool have_last_dvl_diag_ = false;
+  double last_dvl_diag_ = 0.0;
 
   // 0.25s /rov/teleop_cmd staleness watchdog (CLAUDE.md Phase 3.2 Stage 2.3): compared against
   // ctrl_interfaces_.control_inputs_.teleop_last_rx_time_sec on every inner-due tick, in

@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -69,6 +71,10 @@ std::vector<std::string> stateInterfaceNames()
   for (const auto * pad : kPadNames) {
     names.emplace_back(std::string("loadcell_noisy/") + pad + "/force");
   }
+
+  // Phase 3.6 Stage 1.2: runtime diagnostics mirrors from AdhereMujocoHardware.
+  names.emplace_back("diagnostics/hw_loop_hz");
+  names.emplace_back("diagnostics/hw_step_exec_ms");
 
   return names;
 }
@@ -181,6 +187,12 @@ CallbackReturn AdhereController::on_configure(const rclcpp_lifecycle::State & /*
   controller_state_publisher_ = get_node()->create_publisher<adhere_control_msgs::msg::ControllerState>(
     "/rov/controller_state", 10);
 
+  runtime_diagnostics_publisher_ =
+    get_node()->create_publisher<adhere_control_msgs::msg::RuntimeDiagnostics>(
+      "/rov/runtime_diagnostics", 10);
+  diagnostics_hud_publisher_ = get_node()->create_publisher<visualization_msgs::msg::Marker>(
+    "/rov/diagnostics_hud_marker", 10);
+
   // Uniform integer-ratio multi-rate parameters (CLAUDE.md Phase 3.1.1 Stage 2.1), read here
   // (rather than on_activate()) so robot_control.yaml's adhere_controller.ros__parameters
   // block is consulted exactly once per configure, same lifecycle point as the subscription
@@ -197,6 +209,11 @@ CallbackReturn AdhereController::on_configure(const rclcpp_lifecycle::State & /*
     cm_update_rate_, inner_decimation_, outer_decimation_);
   inner_period_ = rclcpp::Duration::from_seconds(decimator_->innerPeriodSeconds());
 
+  // Runtime diagnostics publish rate (CLAUDE.md Phase 3.6 Stage 1.2): fixed at 10Hz,
+  // independent of inner_decimation_/outer_decimation_ (so changing those never silently
+  // changes the diagnostics rate too).
+  diag_decimation_ = std::max(1, cm_update_rate_ / 10);
+
   return CallbackReturn::SUCCESS;
 }
 
@@ -210,7 +227,18 @@ CallbackReturn AdhereController::on_activate(const rclcpp_lifecycle::State & /*p
   noisy_depth_state_interface_.clear();
   noisy_dvl_state_interface_.clear();
   noisy_loadcell_state_interface_.clear();
+  diag_state_interface_.clear();
   estimator_initialized_ = false;
+  estimator_profiler_.reset();
+  inner_profiler_.reset();
+  outer_profiler_.reset();
+  sensor_imu_profiler_.reset();
+  sensor_loadcell_profiler_.reset();
+  sensor_depth_profiler_.reset();
+  sensor_dvl_profiler_.reset();
+  have_last_depth_diag_ = false;
+  have_last_dvl_diag_ = false;
+  diag_tick_count_ = 0;
 
   for (const auto * name : kThrusterNames) {
     findAndAppend(
@@ -261,6 +289,9 @@ CallbackReturn AdhereController::on_activate(const rclcpp_lifecycle::State & /*p
       noisy_loadcell_state_interface_);
   }
 
+  findAndAppend(state_interfaces_, "diagnostics/hw_loop_hz", diag_state_interface_);
+  findAndAppend(state_interfaces_, "diagnostics/hw_step_exec_ms", diag_state_interface_);
+
   state_list_.passive = std::make_shared<StatePassive>(ctrl_interfaces_, model_params_);
   state_list_.depth_hold = std::make_shared<StateDepthHold>(ctrl_interfaces_, model_params_);
   state_list_.open_loop = std::make_shared<StateOpenLoop>(ctrl_interfaces_, model_params_);
@@ -295,6 +326,7 @@ CallbackReturn AdhereController::on_deactivate(const rclcpp_lifecycle::State & /
   noisy_depth_state_interface_.clear();
   noisy_dvl_state_interface_.clear();
   noisy_loadcell_state_interface_.clear();
+  diag_state_interface_.clear();
   return CallbackReturn::SUCCESS;
 }
 
@@ -344,7 +376,30 @@ controller_interface::return_type AdhereController::update()
     gt_imu_state_interface_[4].get().get_value(), gt_imu_state_interface_[5].get().get_value(),
     gt_imu_state_interface_[6].get().get_value());
 
+  // Sensor sample-rate instrumentation (CLAUDE.md Phase 3.6 Stage 1.2/3.2): AdhereMujocoHardware
+  // populates the noisy sensor blocks every 500Hz tick regardless of estimation_mode, so these
+  // measure the true hardware sampling cadence, not just "whenever sensor_fusion consumes them".
+  // IMU/loadcell update every tick (500Hz); depth/DVL are sample-and-hold, so tickMarker() only
+  // fires on a genuine new sample (edge-detected exactly like RovStateEstimator's own
+  // correctDepth()/correctDvl() pattern).
+  sensor_imu_profiler_.tickMarker();
+  sensor_loadcell_profiler_.tickMarker();
+  const double depth_sample = noisy_depth_state_interface_[0].get().get_value();
+  if (!have_last_depth_diag_ || depth_sample != last_depth_diag_) {
+    sensor_depth_profiler_.tickMarker();
+    have_last_depth_diag_ = true;
+    last_depth_diag_ = depth_sample;
+  }
+  const double dvl_sample = noisy_dvl_state_interface_[0].get().get_value();
+  if (!have_last_dvl_diag_ || dvl_sample != last_dvl_diag_) {
+    sensor_dvl_profiler_.tickMarker();
+    have_last_dvl_diag_ = true;
+    last_dvl_diag_ = dvl_sample;
+  }
+
   if (model_params_.estimation_mode == "sensor_fusion") {
+    estimator_profiler_.tickMarker();
+    estimator_profiler_.beginExec();
     if (!estimator_initialized_) {
       // Latch the estimator to ground truth once on the first sensor_fusion tick (e.g. right
       // after on_activate()) purely so it does not have to converge from zero -- this is the
@@ -394,6 +449,7 @@ controller_interface::return_type AdhereController::update()
         est_vel.x() + est_omega.y() * model_params_.pad_pos[i].z() -
         est_omega.z() * model_params_.pad_pos[i].y();
     }
+    estimator_profiler_.endExec();
   } else {
     estimator_initialized_ = false;
     const Vec3 gt_rpy = rotMatToRPY(quatToRotMat(gt_quat));
@@ -413,6 +469,9 @@ controller_interface::return_type AdhereController::update()
   }
 
   if (tick.inner_due) {
+    inner_profiler_.tickMarker();
+    inner_profiler_.beginExec();
+
     // 0.25s /rov/teleop_cmd staleness watchdog (CLAUDE.md Phase 3.2 Stage 2.3): forces teleop
     // inputs to a safe all-zero/inactive state centrally, so no FSMState implementation needs
     // its own disconnect-handling logic.
@@ -440,9 +499,14 @@ controller_interface::return_type AdhereController::update()
       current_state_->enter();
       mode_ = FSMMode::NORMAL;
     }
+
+    inner_profiler_.endExec();
   }
 
   if (tick.outer_due) {
+    outer_profiler_.tickMarker();
+    outer_profiler_.beginExec();
+
     // Outer-loop hook (default 25Hz, CLAUDE.md Phase 3.1.1 Stage 2.1): the async CUDA MPPI
     // rollout thread hand-off (qpos, qvel, F_x_extra_preload) <-> w_cmd via
     // realtime_tools::RealtimeBuffer is a Phase 4/5 milestone -- intentionally a no-op placeholder
@@ -494,9 +558,100 @@ controller_interface::return_type AdhereController::update()
     controller_state_msg.kern_margin = 0.0;
 
     controller_state_publisher_->publish(controller_state_msg);
+    outer_profiler_.endExec();
+  }
+
+  // Real-time diagnostics (CLAUDE.md Phase 3.6 Stage 1.2): fixed 10Hz, independent of the
+  // inner/outer decimation schedule above.
+  if (++diag_tick_count_ % static_cast<uint64_t>(diag_decimation_) == 0) {
+    publishRuntimeDiagnostics(time);
   }
 
   return controller_interface::return_type::OK;
+}
+
+void AdhereController::publishRuntimeDiagnostics(const rclcpp::Time & time)
+{
+  adhere_control_msgs::msg::RuntimeDiagnostics diag;
+  diag.header.stamp = time;
+
+  diag.hw_loop_hz = diag_state_interface_[0].get().get_value();
+  diag.sensor_imu_hz = sensor_imu_profiler_.hz();
+  diag.sensor_loadcell_hz = sensor_loadcell_profiler_.hz();
+  diag.sensor_depth_hz = sensor_depth_profiler_.hz();
+  diag.sensor_dvl_hz = sensor_dvl_profiler_.hz();
+  diag.estimator_hz = estimator_profiler_.hz();
+  diag.inner_loop_hz = inner_profiler_.hz();
+  diag.outer_loop_hz = outer_profiler_.hz();
+  diag.thruster_cmd_hz = inner_profiler_.hz();  // thruster write() is gated by the same tick
+
+  diag.hw_step_exec_ms = diag_state_interface_[1].get().get_value();
+  diag.estimator_exec_ms = estimator_profiler_.latestExecMs();
+  diag.estimator_max_ms = estimator_profiler_.maxExecMs();
+  diag.inner_loop_exec_ms = inner_profiler_.latestExecMs();
+  diag.inner_loop_max_ms = inner_profiler_.maxExecMs();
+  diag.inner_loop_budget_ms = inner_profiler_.budgetMs();
+  diag.outer_loop_exec_ms = outer_profiler_.latestExecMs();
+  diag.outer_loop_max_ms = outer_profiler_.maxExecMs();
+  diag.outer_loop_budget_ms = outer_profiler_.budgetMs();
+
+  diag.inner_loop_overruns = inner_profiler_.overruns();
+  diag.outer_loop_overruns = outer_profiler_.overruns();
+
+  // timing_healthy (CLAUDE.md Phase 3.6 Stage 1.2): all measured frequencies within 10% of
+  // their target AND latest inner/outer exec <= budget. estimator_hz is deliberately excluded
+  // from the frequency check -- it legitimately reports 0 whenever estimation_mode ==
+  // "ground_truth" (the estimator simply isn't driven), which is not a timing fault.
+  const auto withinTenPercent = [](double measured, double target) {
+    return target <= 0.0 || std::abs(measured - target) <= 0.10 * target;
+  };
+  diag.timing_healthy =
+    withinTenPercent(diag.hw_loop_hz, 500.0) &&
+    withinTenPercent(diag.sensor_imu_hz, 500.0) &&
+    withinTenPercent(diag.sensor_loadcell_hz, 500.0) &&
+    withinTenPercent(diag.sensor_depth_hz, 50.0) &&
+    withinTenPercent(diag.sensor_dvl_hz, 20.0) &&
+    withinTenPercent(diag.inner_loop_hz, 250.0) &&
+    withinTenPercent(diag.outer_loop_hz, 25.0) &&
+    withinTenPercent(diag.thruster_cmd_hz, 250.0) &&
+    diag.inner_loop_exec_ms <= diag.inner_loop_budget_ms &&
+    diag.outer_loop_exec_ms <= diag.outer_loop_budget_ms;
+
+  runtime_diagnostics_publisher_->publish(diag);
+
+  // RViz2 3D HUD overlay (CLAUDE.md Phase 3.6 Stage 3.2): floats above the ROV, green when
+  // healthy, red on any overrun/off-target frequency.
+  visualization_msgs::msg::Marker hud;
+  hud.header.frame_id = "world";
+  hud.header.stamp = time;
+  hud.ns = "runtime_diagnostics";
+  hud.id = 0;
+  hud.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+  hud.action = visualization_msgs::msg::Marker::ADD;
+  hud.pose.position.x = ctrl_interfaces_.active_state.pos_w[0];
+  hud.pose.position.y = ctrl_interfaces_.active_state.pos_w[1];
+  hud.pose.position.z = ctrl_interfaces_.active_state.pos_w[2] + 0.6;
+  hud.pose.orientation.w = 1.0;
+  hud.scale.z = 0.12;
+  hud.color.a = 1.0;
+  hud.color.r = diag.timing_healthy ? 0.0 : 1.0;
+  hud.color.g = diag.timing_healthy ? 1.0 : 0.0;
+  hud.color.b = 0.0;
+  hud.lifetime = rclcpp::Duration::from_seconds(0.5);
+
+  char buf[512];
+  std::snprintf(
+    buf, sizeof(buf),
+    "HW %.0fHz/%.2fms  IMU %.0fHz  LC %.0fHz  Depth %.0fHz  DVL %.0fHz\n"
+    "Est %.0fHz/%.2fms  Inner %.0fHz/%.2fms(ovr %lu)  Outer %.0fHz/%.2fms(ovr %lu)",
+    diag.hw_loop_hz, diag.hw_step_exec_ms, diag.sensor_imu_hz, diag.sensor_loadcell_hz,
+    diag.sensor_depth_hz, diag.sensor_dvl_hz, diag.estimator_hz, diag.estimator_exec_ms,
+    diag.inner_loop_hz, diag.inner_loop_exec_ms,
+    static_cast<unsigned long>(diag.inner_loop_overruns), diag.outer_loop_hz,
+    diag.outer_loop_exec_ms, static_cast<unsigned long>(diag.outer_loop_overruns));
+  hud.text = buf;
+
+  diagnostics_hud_publisher_->publish(hud);
 }
 
 std::shared_ptr<FSMState> AdhereController::getNextState(

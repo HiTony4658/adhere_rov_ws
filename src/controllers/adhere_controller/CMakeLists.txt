@@ -17,6 +17,7 @@ find_package(pluginlib REQUIRED)
 find_package(realtime_tools REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(adhere_control_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
 
 include_directories(include)
 
@@ -55,6 +56,7 @@ ament_target_dependencies(${PROJECT_NAME}
   pluginlib
   realtime_tools
   adhere_control_msgs
+  visualization_msgs
 )
 pluginlib_export_plugin_description_file(controller_interface adhere_controller.xml)
 
@@ -132,6 +134,13 @@ if(BUILD_TESTING)
   target_include_directories(test_sensor_fusion_and_teleop PRIVATE include)
   target_link_libraries(test_sensor_fusion_and_teleop ${PROJECT_NAME})
   ament_target_dependencies(test_sensor_fusion_and_teleop rclcpp hardware_interface)
+
+  # Header-only (LoopProfiler.h): no rclcpp/hardware_interface dependency, so the Hz/latency/
+  # overrun instrumentation contract (CLAUDE.md Phase 3.6 Stage 3.2) is verifiable in isolation.
+  ament_add_gtest(test_loop_profiler
+    test/test_loop_profiler.cpp
+  )
+  target_include_directories(test_loop_profiler PRIVATE include)
 endif()
 
 ament_package()

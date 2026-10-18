@@ -32,12 +32,17 @@ constexpr std::array<const char *, kNumThrusters> kThrusterNames = {
   "thr_N1", "thr_N2", "thr_N3", "thr_N4", "thr_T5", "thr_T6", "thr_T7", "thr_T8"};
 constexpr std::array<const char *, 4> kPadNames = {"pad_TL", "pad_TR", "pad_BL", "pad_BR"};
 
-// 55 total state interfaces: 8 thruster readback + 10 IMU (ground truth) + 10 odom (ground
+// 57 total state interfaces: 8 thruster readback + 10 IMU (ground truth) + 10 odom (ground
 // truth) + 8 pad-contact (ground truth) + 10 noisy IMU + 1 noisy depth + 4 noisy DVL
 // (vel xyz + range) + 4 noisy load cells (CLAUDE.md Phase 3.5 Stage 2.1 dual-mode
-// state-acquisition). The noisy blocks are a second, independent sensing path -- never
-// derived from or mixed into the ground-truth blocks above.
-constexpr int kNumStates = 55;
+// state-acquisition) + 2 runtime diagnostics (CLAUDE.md Phase 3.6 Stage 1.2). The noisy blocks
+// are a second, independent sensing path -- never derived from or mixed into the ground-truth
+// blocks above. The 2 diagnostics scalars mirror MujocoVisBridge::actual_physics_hz/
+// step_work_ms (already computed by adhere_mujoco_node's physics thread) so AdhereController
+// can report hw_loop_hz/hw_step_exec_ms on /rov/runtime_diagnostics purely via the standard
+// ros2_control state-interface channel, with zero direct package dependency back on
+// adhere_mujoco_hardware internals.
+constexpr int kNumStates = 57;
 
 // AdhereMujocoHardware: a 500Hz hardware_interface::SystemInterface (ROS 2 Foxy) that owns
 // the master MuJoCo mjModel/mjData, the FossenHydrodynamics port, the active
@@ -68,12 +73,12 @@ public:
   std::shared_ptr<MujocoVisBridge> visBridge() const { return vis_bridge_; }
 
   // Runtime wave-maker switch (CLAUDE.md Phase 2.5 Stage 2.3/3.2): thread-safe, callable from
-  // any thread (e.g. adhere_mujoco_node's /rov/wave_mode_cmd subscriber callback, which runs
+  // any thread (e.g. adhere_mujoco_node's /rov/flow_mode_cmd subscriber callback, which runs
   // on the executor thread, not the 500Hz physics thread). mode must be 1 (CalmWater) or 2
   // (StationKeepingGust); anything else is ignored. Selecting mode 2 always re-latches
   // t_trigger to the current sim time, so repeated "2" presses restart the gust clock.
-  void setWaveMode(int mode);
-  int waveMode() const { return wave_mode_.load(); }
+  void setFlowMode(int mode);
+  int flowMode() const { return flow_mode_.load(); }
 
   // Single-instance back-pointer accessor (see the mjcb_passive rationale in
   // adhere_mujoco_hardware.cpp): lets adhere_mujoco_node's wave-mode subscriber reach the one
@@ -116,6 +121,8 @@ private:
     kDepthNoisy = kImuNoisy + 10,  // [46, 47)    world Z, 50Hz sample-and-hold
     kDvlNoisy = kDepthNoisy + 1,   // [47, 51)    vel x/y/z + wall range, 20Hz sample-and-hold
     kLoadcellNoisy = kDvlNoisy + 4,  // [51, 55)  pad_TL/TR/BL/BR force, 500Hz
+    kDiagHwLoopHz = kLoadcellNoisy + 4,       // [55, 56) mirrors MujocoVisBridge::actual_physics_hz
+    kDiagHwStepExecMs = kDiagHwLoopHz + 1,    // [56, 57) mirrors MujocoVisBridge::step_work_ms
   };
 
   mjModel * model_ = nullptr;
@@ -132,9 +139,9 @@ private:
   // take effect without restarting the node.
   std::unique_ptr<FlowEnvironmentPlugin> calm_plugin_;
   std::unique_ptr<FlowEnvironmentPlugin> gust_plugin_;
-  std::atomic<int> wave_mode_{1};              // 1 = CalmWater (default), 2 = StationKeepingGust
+  std::atomic<int> flow_mode_{1};              // 1 = CalmWater (default), 2 = StationKeepingGust
   std::atomic<double> wave_trigger_time_{0.0};  // sim time t_trigger latched when mode 2 is selected
-  std::atomic<double> sim_time_atomic_{0.0};    // lock-free mirror of sim_time_ for setWaveMode()
+  std::atomic<double> sim_time_atomic_{0.0};    // lock-free mirror of sim_time_ for setFlowMode()
 
   std::shared_ptr<MujocoVisBridge> vis_bridge_;
   std::unique_ptr<MujocoViewer> viewer_;

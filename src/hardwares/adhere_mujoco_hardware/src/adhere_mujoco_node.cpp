@@ -186,21 +186,27 @@ int main(int argc, char ** argv)
   }
 
   auto tf_broadcaster = std::make_shared<tf2_ros::TransformBroadcaster>(node);
-  auto odom_pub = node->create_publisher<nav_msgs::msg::Odometry>("/rov/odom", 10);
+  // Phase 3.6 Sim-to-Real purity: renamed from /rov/odom -- this is noise-free ground truth
+  // (straight from AdhereMujocoHardware's gt_* state interfaces via readTelemetry()), which does
+  // not exist on a real Jetson deployment. adhere_controller's /rov/controller_state never
+  // carries this; it is offline-evaluation-only.
+  auto ground_truth_odom_pub =
+    node->create_publisher<nav_msgs::msg::Odometry>("/rov/ground_truth_odom", 10);
   auto joint_state_pub = node->create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
   auto marker_pub = node->create_publisher<visualization_msgs::msg::MarkerArray>(
     "/rov/environment_markers", 10);
 
-  // Runtime wave-maker switch (CLAUDE.md Phase 2.5 Stage 2.3): a scripted/remote-control entry
+  // Runtime flow-mode switch (CLAUDE.md Phase 2.5 Stage 2.3, renamed from wave_mode in Phase
+  // 3.6 for naming consistency with FlowEnvironmentPlugin): a scripted/remote-control entry
   // point alongside MujocoViewer's own in-window 1/2 keys (the primary interactive control,
   // CLAUDE.md Phase 2.6). Forwarded straight to the one live AdhereMujocoHardware instance via
   // its single-instance back-pointer (see adhere_mujoco_hardware.cpp).
-  auto wave_mode_sub = node->create_subscription<std_msgs::msg::Int32>(
-    "/rov/wave_mode_cmd", 10,
+  auto flow_mode_sub = node->create_subscription<std_msgs::msg::Int32>(
+    "/rov/flow_mode_cmd", 10,
     [](const std_msgs::msg::Int32::SharedPtr msg) {
       auto * active_hw = adhere_mujoco_hardware::AdhereMujocoHardware::activeInstance();
       if (active_hw) {
-        active_hw->setWaveMode(msg->data);
+        active_hw->setFlowMode(msg->data);
       }
     });
 
@@ -243,7 +249,7 @@ int main(int argc, char ** argv)
       odom_msg.twist.twist.angular.x = snap.gyro_body[0];
       odom_msg.twist.twist.angular.y = snap.gyro_body[1];
       odom_msg.twist.twist.angular.z = snap.gyro_body[2];
-      odom_pub->publish(odom_msg);
+      ground_truth_odom_pub->publish(odom_msg);
 
       // No articulated URDF joints exist on this model (see simplified_v1_description's
       // README), so the published JointState is intentionally empty.

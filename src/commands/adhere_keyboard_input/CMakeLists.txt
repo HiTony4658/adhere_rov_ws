@@ -50,7 +50,17 @@ ament_target_dependencies(xbox_teleop_node
   sensor_msgs
 )
 
-install(TARGETS fsm_console_node state_cmd_console_node xbox_teleop_node
+add_executable(rt_monitor_node src/rt_monitor_node.cpp)
+target_include_directories(rt_monitor_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+ament_target_dependencies(rt_monitor_node
+  rclcpp
+  adhere_control_msgs
+)
+
+install(TARGETS fsm_console_node state_cmd_console_node xbox_teleop_node rt_monitor_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

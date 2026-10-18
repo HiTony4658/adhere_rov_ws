@@ -250,7 +250,7 @@ hardware_interface::return_type AdhereMujocoHardware::configure(
   gyro_bias_.setZero();
 
   // Always starts in Calm Water (CLAUDE.md Phase 2.5 Stage 2.3): both plugins are constructed
-  // up front and selected at runtime via setWaveMode(), never by a static launch-time param.
+  // up front and selected at runtime via setFlowMode(), never by a static launch-time param.
   calm_plugin_ = std::make_unique<CalmWaterPlugin>();
   gust_plugin_ = std::make_unique<StationKeepingGustPlugin>();
 
@@ -261,7 +261,7 @@ hardware_interface::return_type AdhereMujocoHardware::configure(
   HydroParams::applyMjModelOverrides(model_, calm_plugin_->mutableHydroParams());
   HydroParams::applyMjModelOverrides(model_, gust_plugin_->mutableHydroParams());
 
-  wave_mode_.store(1);
+  flow_mode_.store(1);
   wave_trigger_time_.store(0.0);
   RCLCPP_INFO(logger(), "AdhereMujocoHardware: configured, starting in Calm Water mode");
 
@@ -349,6 +349,11 @@ std::vector<hardware_interface::StateInterface> AdhereMujocoHardware::export_sta
     interfaces.emplace_back("loadcell_noisy", kLoadcellNoisyNames[i], &hw_states_[kLoadcellNoisy + i]);
   }
 
+  // Runtime diagnostics (CLAUDE.md Phase 3.6 Stage 1.2): hw_loop_hz/hw_step_exec_ms for
+  // /rov/runtime_diagnostics.
+  interfaces.emplace_back("diagnostics", "hw_loop_hz", &hw_states_[kDiagHwLoopHz]);
+  interfaces.emplace_back("diagnostics", "hw_step_exec_ms", &hw_states_[kDiagHwStepExecMs]);
+
   return interfaces;
 }
 
@@ -391,7 +396,7 @@ hardware_interface::return_type AdhereMujocoHardware::start()
   step_count_ = 0;
   have_prev_vel_ = false;
   last_accel_step_count_ = -1;
-  wave_mode_.store(1);
+  flow_mode_.store(1);
   wave_trigger_time_.store(0.0);
 
   // Deferred from configure() (CLAUDE.md Phase 2.6 Stage 2.1): headless_ is only known now,
@@ -420,27 +425,27 @@ hardware_interface::return_type AdhereMujocoHardware::stop()
   return hardware_interface::return_type::OK;
 }
 
-void AdhereMujocoHardware::setWaveMode(int mode)
+void AdhereMujocoHardware::setFlowMode(int mode)
 {
   if (mode != 1 && mode != 2) {
-    RCLCPP_WARN(logger(), "Ignoring invalid wave mode %d (expected 1=calm or 2=gust)", mode);
+    RCLCPP_WARN(logger(), "Ignoring invalid flow mode %d (expected 1=calm or 2=gust)", mode);
     return;
   }
   // Hydrodynamic-accuracy audit (thread-safety finding 1.1): wave_trigger_time_ must be
-  // latched BEFORE wave_mode_ becomes externally visible as 2, not after. applyHydrodynamics()
+  // latched BEFORE flow_mode_ becomes externally visible as 2, not after. applyHydrodynamics()
   // (500Hz physics thread) and this call (ROS executor thread or the GUI's write()-internal
   // path) race against each other; with the old mode-then-trigger ordering, a tick landing in
   // the gap between the two stores could observe the new mode (2) paired with the still-stale
   // trigger time, corrupting that one tick's tau = t_sim - t_trigger computation. Storing the
-  // trigger first closes that window: by the time wave_mode_ flips to 2, wave_trigger_time_ is
+  // trigger first closes that window: by the time flow_mode_ flips to 2, wave_trigger_time_ is
   // already correct.
   if (mode == 2) {
     wave_trigger_time_.store(sim_time_atomic_.load());
   }
-  const int previous = wave_mode_.exchange(mode);
+  const int previous = flow_mode_.exchange(mode);
   if (previous != mode) {
     RCLCPP_INFO(
-      logger(), "Wave mode switched: %s -> %s", previous == 2 ? "gust" : "calm",
+      logger(), "Flow mode switched: %s -> %s", previous == 2 ? "gust" : "calm",
       mode == 2 ? "gust" : "calm");
   }
 }
@@ -463,7 +468,7 @@ void AdhereMujocoHardware::applyHydrodynamics(const mjModel * m, mjData * d)
   // Relative wave clock (CLAUDE.md Phase 2.5 Stage 2.3/3.2): mode 2 evaluates the gust
   // profile at tau = t_sim - t_trigger (>= 0) instead of raw sim time, so switching into the
   // gust scenario at an arbitrary sim time always replays the gusts from their own t=0.
-  const bool gust_active = wave_mode_.load() == 2;
+  const bool gust_active = flow_mode_.load() == 2;
   const HydroParams & params =
     gust_active ? gust_plugin_->getHydroParams() : calm_plugin_->getHydroParams();
   const double t_eval = gust_active ? std::max(0.0, d->time - wave_trigger_time_.load()) : d->time;
@@ -650,6 +655,15 @@ hardware_interface::return_type AdhereMujocoHardware::read()
       std::max(0.0, hw_states_[kPadContact + i] + noise(kLoadcellNoiseStd));
   }
 
+  // Runtime diagnostics (CLAUDE.md Phase 3.6 Stage 1.2): mirrors the physics thread's own EMA
+  // telemetry (adhere_mujoco_node.cpp) via the vis_bridge_ this hardware already owns -- no
+  // separate timing measurement needed here, just republished through the standard
+  // ros2_control state-interface channel so AdhereController can read it like any other sensor.
+  if (vis_bridge_) {
+    hw_states_[kDiagHwLoopHz] = vis_bridge_->actual_physics_hz.load();
+    hw_states_[kDiagHwStepExecMs] = vis_bridge_->step_work_ms.load();
+  }
+
   return hardware_interface::return_type::OK;
 }
 
@@ -705,11 +719,11 @@ hardware_interface::return_type AdhereMujocoHardware::write()
     vis_bridge_->active_pads.store(static_cast<int>(kPadNames.size()));
   }
 
-  // GUI wave-mode request (1/2 keys in MujocoViewer): reuses the same setWaveMode() logic the
-  // /rov/wave_mode_cmd topic subscriber calls, so both entry points stay consistent.
-  const int wave_cmd = vis_bridge_->wave_mode_cmd.exchange(0);
+  // GUI wave-mode request (1/2 keys in MujocoViewer): reuses the same setFlowMode() logic the
+  // /rov/flow_mode_cmd topic subscriber calls, so both entry points stay consistent.
+  const int wave_cmd = vis_bridge_->flow_mode_cmd.exchange(0);
   if (wave_cmd != 0) {
-    setWaveMode(wave_cmd);
+    setFlowMode(wave_cmd);
   }
 
   // Run/Pause (Space in MujocoViewer): when paused, skip stepping entirely so the scene stays
@@ -821,7 +835,7 @@ hardware_interface::return_type AdhereMujocoHardware::write()
         vis_bridge_->pad_force[i] = data_->sensordata[pad_touch_sensor_adr_[i]];
         vis_bridge_->pad_v_sep[i] = hw_states_[kPadContact + 4 + i];
       }
-      const bool gust_active = wave_mode_.load() == 2;
+      const bool gust_active = flow_mode_.load() == 2;
       const double t_eval =
         gust_active ? std::max(0.0, sim_time_ - wave_trigger_time_.load()) : sim_time_;
       const FlowEnvironmentPlugin & active_plugin =
@@ -832,9 +846,9 @@ hardware_interface::return_type AdhereMujocoHardware::write()
       vis_bridge_->flow_acc_world = {flow_acc.x(), flow_acc.y(), flow_acc.z()};
       vis_bridge_->valid = true;
     }
-    vis_bridge_->wave_mode_active.store(wave_mode_.load());
+    vis_bridge_->flow_mode_active.store(flow_mode_.load());
     vis_bridge_->wave_tau.store(
-      wave_mode_.load() == 2 ? std::max(0.0, sim_time_ - wave_trigger_time_.load()) : 0.0);
+      flow_mode_.load() == 2 ? std::max(0.0, sim_time_ - wave_trigger_time_.load()) : 0.0);
     vis_bridge_->hydro_patch_count.store(static_cast<int>(hydro_geometry_model_.patches.size()));
   }
 

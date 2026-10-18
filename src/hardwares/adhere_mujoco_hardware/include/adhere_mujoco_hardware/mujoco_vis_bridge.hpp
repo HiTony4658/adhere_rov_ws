@@ -69,7 +69,7 @@ struct MujocoVisBridge
   std::atomic<bool> reset_request{false};
   std::atomic<bool> step_once_request{false};  // single-tick advance while paused (debugging)
   std::atomic<bool> reset_stats_request{false};  // clears the cumulative liftoff/kern counters
-  std::atomic<int> wave_mode_cmd{0};  // 0 = no request pending; 1/2 = switch request from GUI
+  std::atomic<int> flow_mode_cmd{0};  // 0 = no request pending; 1/2 = switch request from GUI
   std::array<std::atomic<double>, 8> manual_ctrl{};  // additive manual slider thrust, N
   std::array<std::atomic<double>, 6> xfrc_perturb{};  // [Fx,Fy,Fz,Tx,Ty,Tz] on rov_base, world
   std::atomic<int> hydro_mode{0};  // mirrors HydroModelMode: 0=ParametricLumped, 1=StonefishGeometryDriven
@@ -84,7 +84,7 @@ struct MujocoVisBridge
   std::atomic<double> actual_physics_hz{0.0};
   std::atomic<double> step_work_ms{0.0};  // EMA of read()+update()+write() pure compute time
   std::atomic<double> sim_time{0.0};
-  std::atomic<int> wave_mode_active{1};
+  std::atomic<int> flow_mode_active{1};
   std::atomic<double> wave_tau{0.0};
   std::atomic<int> hydro_patch_count{0};   // HydroGeometryModel::patches.size()
   std::atomic<double> kern_val{0.0};       // Rhombic Kern K_val

@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 
@@ -21,6 +22,7 @@
 
 #include "adhere_control_msgs/msg/controller_state.hpp"
 #include "adhere_control_msgs/msg/fsm_command.hpp"
+#include "adhere_control_msgs/msg/runtime_diagnostics.hpp"
 
 namespace
 {
@@ -33,6 +35,11 @@ std::mutex g_state_name_mutex;
 // IS its process group id -- killpg() on that pid tears down gnome-terminal/xterm and the
 // inner ros2 run process together.
 std::atomic<pid_t> g_child_pgid{-1};
+
+// Compact 1-line timing summary (CLAUDE.md Phase 3.6 Stage 3.2), updated from
+// /rov/runtime_diagnostics -- full detail lives in rt_monitor_node, this is just a glance.
+std::mutex g_timing_mutex;
+std::string g_timing_line = "Inner: --Hz  Outer: --Hz  Status: --";
 
 const char * stateLabel(int32_t state)
 {
@@ -109,8 +116,12 @@ void printMenu()
             << "  [q] Quit Console     (退出控制台)\n"
             << "------------------------------------------------------------\n"
             << "Current State: " << stateLabel(g_current_state.load()) << " (" << state_name
-            << ")\n"
-            << "Select state (1/2/3/4/q): " << std::flush;
+            << ")\n";
+  {
+    std::lock_guard<std::mutex> lock(g_timing_mutex);
+    std::cout << g_timing_line << "\n";
+  }
+  std::cout << "Select state (1/2/3/4/q): " << std::flush;
 }
 
 }  // namespace
@@ -138,6 +149,19 @@ int main(int argc, char ** argv)
         }
       }
     });
+
+  auto runtime_diagnostics_sub =
+    node->create_subscription<adhere_control_msgs::msg::RuntimeDiagnostics>(
+      "/rov/runtime_diagnostics", 10,
+      [](const adhere_control_msgs::msg::RuntimeDiagnostics::SharedPtr msg) {
+        std::ostringstream oss;
+        oss << "Timing: Inner " << static_cast<int>(msg->inner_loop_hz + 0.5) << "Hz  Outer "
+            << static_cast<int>(msg->outer_loop_hz + 0.5) << "Hz  Status: "
+            << (msg->timing_healthy ? "HEALTHY" : "UNHEALTHY")
+            << " (full detail: ros2 run adhere_keyboard_input rt_monitor_node)";
+        std::lock_guard<std::mutex> lock(g_timing_mutex);
+        g_timing_line = oss.str();
+      });
 
   auto executor = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
   executor->add_node(node);

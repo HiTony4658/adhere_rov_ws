@@ -171,7 +171,7 @@ void MujocoViewer::buildUi0()
 
   mjuiDef def_wave[] = {
     {mjITEM_SECTION, "Wave & Hydro Model", mjSECT_OPEN, nullptr, "", 0},
-    {mjITEM_RADIO, "Mode (1/2)", 2, &ui_wave_mode_, "Calm Water\nStation-Keeping Gust", 0},
+    {mjITEM_RADIO, "Mode (1/2)", 2, &ui_flow_mode_, "Calm Water\nStation-Keeping Gust", 0},
     {mjITEM_RADIO, "Hydro Model", 2, &ui_hydro_mode_, "Lumped\nStonefish-Mesh", 0},
     {mjITEM_CHECKBYTE, "Kern Diamond", 1, &ui_show_kern_diamond_, "", 0},
     {mjITEM_END, "", 0, nullptr, "", 0}};
@@ -595,10 +595,10 @@ void MujocoViewer::onKey(int key, int act, int mods)
       bridge_->reset_request.store(true);
       break;
     case GLFW_KEY_1:
-      ui_wave_mode_ = 0;
+      ui_flow_mode_ = 0;
       break;
     case GLFW_KEY_2:
-      ui_wave_mode_ = 1;
+      ui_flow_mode_ = 1;
       break;
     case GLFW_KEY_TAB:
       ui0_visible_ = !ui0_visible_;
@@ -975,13 +975,13 @@ void MujocoViewer::drawOverlayTelemetry(mjrRect viewport)
   const double hz = bridge_->actual_physics_hz.load();
   const double work_ms = bridge_->step_work_ms.load();
   const double sim_t = bridge_->sim_time.load();
-  const int wave_mode = bridge_->wave_mode_active.load();
+  const int flow_mode = bridge_->flow_mode_active.load();
   const double tau = bridge_->wave_tau.load();
   const char * hydro_name = ui_hydro_mode_ == 1 ? "Stonefish-Mesh" : "Lumped";
 
   std::snprintf(
     title, sizeof(title),
-    "Physics Rate\nSim Time\nWave Mode\nFlow Velocity\n"
+    "Physics Rate\nSim Time\nFlow Mode\nFlow Velocity\n"
     "Pad TL / TR / BL / BR\nPose (X Y Z)\nPose (phi theta psi)\nBody Vel (vx vy vz)\n"
     "Body AngVel (wx wy wz)\nHydro Mode\nKern Margin M_kern\nActive Pads\n"
     "Liftoff Ratio (cum.)\nCorner-Trap Ratio (cum.)\nLiftoff Events");
@@ -990,7 +990,7 @@ void MujocoViewer::drawOverlayTelemetry(mjrRect viewport)
     "%.1f Hz (work: %.3f ms)\n%.2f s\n%s (tau=%.2fs)\n[%.2f, %.2f, %.2f] m/s\n"
     "%.1f / %.1f / %.1f / %.1f N\n[%.3f, %.3f, %.3f] m\n[%.1f, %.1f, %.1f] deg\n[%.3f, %.3f, %.3f] m/s\n"
     "[%.3f, %.3f, %.3f] rad/s\n%s (%d patches)\n%.3f (K_val=%.3f)\n%d / 4\n%.1f%%\n%.1f%%\n%lld",
-    hz, work_ms, sim_t, wave_mode == 2 ? "Gust" : "Calm", tau, flow[0], flow[1], flow[2],
+    hz, work_ms, sim_t, flow_mode == 2 ? "Gust" : "Calm", tau, flow[0], flow[1], flow[2],
     pad_force[0], pad_force[1], pad_force[2], pad_force[3], px, py, pz, phi * 57.2958, theta * 57.2958,
     psi * 57.2958, vx, vy, vz, wx, wy, wz, hydro_name, cached_hydro_patch_count_, cached_m_kern_,
     cached_kern_val_, cached_active_pads_, cached_liftoff_ratio_ * 100.0,
@@ -1138,18 +1138,18 @@ void MujocoViewer::renderFrame()
   bridge_->paused.store(ui_running_ == 0);
 
   // Bug 6 fix: bidirectional wave-mode sync. Read the external bridge state FIRST; if it
-  // changed since last frame (e.g. the /rov/wave_mode_cmd ROS topic, or onKey()'s 1/2 keys
-  // which already write ui_wave_mode_ directly), pull it into ui_wave_mode_ and mark it as
+  // changed since last frame (e.g. the /rov/flow_mode_cmd ROS topic, or onKey()'s 1/2 keys
+  // which already write ui_flow_mode_ directly), pull it into ui_flow_mode_ and mark it as
   // "already synced" so the edit-detect below does not immediately push it right back out.
-  const int external_mode = bridge_->wave_mode_active.load();
-  if (external_mode != last_external_wave_mode_) {
-    last_external_wave_mode_ = external_mode;
-    ui_wave_mode_ = external_mode - 1;
-    last_ui_wave_mode_ = ui_wave_mode_;
+  const int external_mode = bridge_->flow_mode_active.load();
+  if (external_mode != last_external_flow_mode_) {
+    last_external_flow_mode_ = external_mode;
+    ui_flow_mode_ = external_mode - 1;
+    last_ui_flow_mode_ = ui_flow_mode_;
   }
-  if (ui_wave_mode_ != last_ui_wave_mode_) {
-    last_ui_wave_mode_ = ui_wave_mode_;
-    bridge_->wave_mode_cmd.store(ui_wave_mode_ + 1);
+  if (ui_flow_mode_ != last_ui_flow_mode_) {
+    last_ui_flow_mode_ = ui_flow_mode_;
+    bridge_->flow_mode_cmd.store(ui_flow_mode_ + 1);
   }
 
   bridge_->hydro_mode.store(ui_hydro_mode_);

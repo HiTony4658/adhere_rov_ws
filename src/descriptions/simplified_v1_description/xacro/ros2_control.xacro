@@ -3,7 +3,7 @@
 
   <!--
     ros2_control contract for AdhereMujocoHardware (ROS 2 Foxy hardware_interface::SystemInterface).
-    8 command_interface (thruster effort) + 55 state_interface, matching CLAUDE.md Sec.3/4 and
+    8 command_interface (thruster effort) + 57 state_interface, matching CLAUDE.md Sec.3/4 and
     this package's README interface table exactly:
       - 8  thruster effort readback
       - 10 imu_sensor      (orientation.w/x/y/z, angular_velocity.x/y/z, linear_acceleration.x/y/z), ground truth
@@ -13,6 +13,7 @@
       - 1  depth_sensor_noisy (z, 50Hz sample-and-hold noisy depth)
       - 4  dvl_sensor_noisy   (vel.x/y/z + range, 20Hz sample-and-hold noisy DVL)
       - 4  loadcell_noisy     (pad_*/force x4, 500Hz noisy load cells)
+      - 2  diagnostics        (hw_loop_hz, hw_step_exec_ms), Phase 3.6 runtime diagnostics
     (Phase 3.5, CLAUDE.md dual state-acquisition: ground_truth vs sensor_fusion.)
   -->
   <ros2_control name="AdhereMujocoSystem" type="system">
@@ -145,6 +146,13 @@
       <state_interface name="pad_TR/force"/>
       <state_interface name="pad_BL/force"/>
       <state_interface name="pad_BR/force"/>
+    </sensor>
+
+    <!-- Phase 3.6 runtime diagnostics: mirrors MujocoVisBridge's own EMA physics-step telemetry
+         so AdhereController can report hw_loop_hz/hw_step_exec_ms on /rov/runtime_diagnostics. -->
+    <sensor name="diagnostics">
+      <state_interface name="hw_loop_hz"/>
+      <state_interface name="hw_step_exec_ms"/>
     </sensor>
   </ros2_control>
 
