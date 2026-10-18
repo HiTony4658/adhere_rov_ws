@@ -21,8 +21,11 @@ namespace
 {
 
 std::mutex g_pose_mutex;
-std::array<double, 4> g_target_pose{0.0, 0.0, 0.0, 0.0};  // [x, y, z, yaw(rad)]
-std::array<double, 4> g_actual_pose{0.0, 0.0, 0.0, 0.0};
+// [x, y, z, roll(rad), pitch(rad), yaw(rad)] (Phase 3.5: extended from 4 to 6 DOF).
+std::array<double, 6> g_target_pose{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+// "Actual" display uses FsmState::estimated_pose -- what the controller itself tracks (ground
+// truth in "ground_truth" mode, RovStateEstimator's fused output in "sensor_fusion" mode).
+std::array<double, 6> g_actual_pose{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
 
 constexpr double kRadToDeg = 180.0 / M_PI;
 constexpr double kDegToRad = M_PI / 180.0;
@@ -41,7 +44,7 @@ double depthInputToTargetZ(double input_val)
 
 void printDepthHoldPrompt()
 {
-  std::array<double, 4> target, actual;
+  std::array<double, 6> target, actual;
   {
     std::lock_guard<std::mutex> lock(g_pose_mutex);
     target = g_target_pose;
@@ -62,7 +65,7 @@ void printDepthHoldPrompt()
 
 void printPidHoldPrompt()
 {
-  std::array<double, 4> target, actual;
+  std::array<double, 6> target, actual;
   {
     std::lock_guard<std::mutex> lock(g_pose_mutex);
     target = g_target_pose;
@@ -70,15 +73,18 @@ void printPidHoldPrompt()
   }
   // CLAUDE.md Phase 3.3 tank geometry: water surface at world Z=0.0m, so depth = -Z.
   std::cout << "============================================================\n"
-            << "  [PID_HOLD] Setpoint Console (6DOF 位置+航向保持设定终端)\n"
+            << "  [PID_HOLD] Setpoint Console (6DOF 位置+姿态保持设定终端)\n"
             << "============================================================\n"
-            << "  Actual [X, Y, Z, Yaw]: [" << actual[0] << ", " << actual[1] << ", " << actual[2]
-            << ", " << actual[3] * kRadToDeg << " deg]  (Depth: " << -actual[2] << " m)\n"
-            << "  Target [X, Y, Z, Yaw]: [" << target[0] << ", " << target[1] << ", " << target[2]
-            << ", " << target[3] * kRadToDeg << " deg]  (Depth: " << -target[2] << " m)\n"
+            << "  Actual [X, Y, Z, Roll, Pitch, Yaw]: [" << actual[0] << ", " << actual[1] << ", "
+            << actual[2] << ", " << actual[3] * kRadToDeg << ", " << actual[4] * kRadToDeg << ", "
+            << actual[5] * kRadToDeg << " deg]  (Depth: " << -actual[2] << " m)\n"
+            << "  Target [X, Y, Z, Roll, Pitch, Yaw]: [" << target[0] << ", " << target[1] << ", "
+            << target[2] << ", " << target[3] * kRadToDeg << ", " << target[4] * kRadToDeg << ", "
+            << target[5] * kRadToDeg << " deg]  (Depth: " << -target[2] << " m)\n"
             << "------------------------------------------------------------\n"
             << "[PID_HOLD] Enter 'z <val>' (depth), 'y <val>' (lateral), 'x <val>' (wall dist), "
-               "'yaw <deg>', 'all <x> <y> <z> <yaw_deg>', or 'h' (lock current pose): "
+               "'roll <deg>', 'pitch <deg>', 'yaw <deg>', 'all <x> <y> <z> <yaw_deg>', "
+               "'reset' (roll/pitch -> 0), or 'h' (lock current pose): "
             << std::flush;
 }
 
@@ -102,7 +108,7 @@ int main(int argc, char ** argv)
     "/rov/fsm_state", 10, [](const adhere_control_msgs::msg::FsmState::SharedPtr msg) {
       std::lock_guard<std::mutex> lock(g_pose_mutex);
       std::copy(msg->target_pose.begin(), msg->target_pose.end(), g_target_pose.begin());
-      std::copy(msg->actual_pose.begin(), msg->actual_pose.end(), g_actual_pose.begin());
+      std::copy(msg->estimated_pose.begin(), msg->estimated_pose.end(), g_actual_pose.begin());
     });
 
   auto executor = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
@@ -143,11 +149,11 @@ int main(int argc, char ** argv)
         }
       }
     } else {
-      // mode == 4: parse 'z <val>' / 'y <val>' / 'x <val>' / 'yaw <deg>' /
-      // 'all <x> <y> <z> <yaw_deg>' / 'h'. Partial updates (z/y/x/yaw) carry the CURRENTLY
-      // known target_pose for the other 3 axes forward, so e.g. 'z 0.4' never silently resets
-      // x/y/yaw to 0.
-      std::array<double, 4> target;
+      // mode == 4: parse 'z <val>' / 'y <val>' / 'x <val>' / 'roll <deg>' / 'pitch <deg>' /
+      // 'yaw <deg>' / 'all <x> <y> <z> <yaw_deg>' / 'reset' / 'h'. Partial updates carry the
+      // CURRENTLY known target_pose for the other axes forward, so e.g. 'z 0.4' never silently
+      // resets x/y/roll/pitch/yaw to 0.
+      std::array<double, 6> target;
       {
         std::lock_guard<std::mutex> lock(g_pose_mutex);
         target = g_target_pose;
@@ -155,10 +161,16 @@ int main(int argc, char ** argv)
       cmd.target_x = target[0];
       cmd.target_y = target[1];
       cmd.target_z = target[2];
-      cmd.target_yaw = target[3];
+      cmd.target_roll = target[3];
+      cmd.target_pitch = target[4];
+      cmd.target_yaw = target[5];
 
       if (line == "h" || line == "H") {
         cmd.lock_current_pose = true;
+      } else if (line == "reset" || line == "RESET") {
+        // Phase 3.5: reset roll/pitch to 0 while carrying x/y/z/yaw forward unchanged.
+        cmd.target_roll = 0.0;
+        cmd.target_pitch = 0.0;
       } else {
         std::istringstream iss(line);
         std::string token;
@@ -176,6 +188,14 @@ int main(int argc, char ** argv)
             double v;
             iss >> v;
             cmd.target_x = v;
+          } else if (token == "roll") {
+            double v_deg;
+            iss >> v_deg;
+            cmd.target_roll = v_deg * kDegToRad;
+          } else if (token == "pitch") {
+            double v_deg;
+            iss >> v_deg;
+            cmd.target_pitch = v_deg * kDegToRad;
           } else if (token == "yaw") {
             double v_deg;
             iss >> v_deg;

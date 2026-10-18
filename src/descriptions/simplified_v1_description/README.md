@@ -26,7 +26,7 @@ urdf/
   └── simplified_v1.urdf.xacro     # 顶层入口：include robot.xacro + ros2_control.xacro
 xacro/
   ├── robot.xacro                   # 机体/4接触垫/8推力器标记几何宏（base_link 为唯一根连杆）
-  └── ros2_control.xacro            # <ros2_control> 标签：8 command + 36 state interface
+  └── ros2_control.xacro            # <ros2_control> 标签：8 command + 55 state interface
 mjcf/
   └── rov_wall.xml                  # MuJoCo 物理描述（与原型仓库数值对齐，只读复制）
 config/
@@ -49,14 +49,23 @@ launch/
 | `thr_N1/effort` .. `thr_N4/effort` | `[-40.0, 40.0] N` |
 | `thr_T5/effort` .. `thr_T8/effort` | `[-40.0, 40.0] N` |
 
-### 36 个 `state_interface`
+### 55 个 `state_interface`（CLAUDE.md Phase 3.5：地面真值 + 独立的噪声多速率传感器通路）
 
-| 分组 | 数量 | 接口名 |
-|---|---|---|
-| 推力器回读 | 8 | `thr_N1/effort` .. `thr_T8/effort` |
-| IMU (`imu_sensor`) | 10 | `orientation.w/x/y/z`, `angular_velocity.x/y/z`, `linear_acceleration.x/y/z` |
-| 位姿/机体速度 (`rov_odom`) | 10 | `pos.x/y/z`, `quat.w/x/y/z`, `vel_body.x/y/z` |
-| 接触垫 (`pad_contact`) | 8 | `pad_TL/force` .. `pad_BR/force`, `pad_TL/v_sep` .. `pad_BR/v_sep` |
+| 分组 | 数量 | 接口名 | 性质 |
+|---|---|---|---|
+| 推力器回读 | 8 | `thr_N1/effort` .. `thr_T8/effort` | — |
+| IMU (`imu_sensor`) | 10 | `orientation.w/x/y/z`, `angular_velocity.x/y/z`, `linear_acceleration.x/y/z` | 地面真值 |
+| 位姿/机体速度 (`rov_odom`) | 10 | `pos.x/y/z`, `quat.w/x/y/z`, `vel_body.x/y/z` | 地面真值 |
+| 接触垫 (`pad_contact`) | 8 | `pad_TL/force` .. `pad_BR/force`, `pad_TL/v_sep` .. `pad_BR/v_sep` | 地面真值 |
+| 噪声 IMU (`imu_sensor_noisy`) | 10 | 与 `imu_sensor` 同名布局，500Hz | 噪声（`RovStateEstimator` 专用） |
+| 噪声深度 (`depth_sensor_noisy`) | 1 | `z`，50Hz 采样保持 | 噪声 |
+| 噪声 DVL (`dvl_sensor_noisy`) | 4 | `vel.x/y/z`, `range`，20Hz 采样保持 | 噪声 |
+| 噪声载荷传感器 (`loadcell_noisy`) | 4 | `pad_TL/force` .. `pad_BR/force`，500Hz | 噪声 |
+
+地面真值与噪声两组通路完全独立生成（`AdhereMujocoHardware::read()`），从不
+互相派生；`AdhereController` 仅把地面真值组私有化用于评估，`FSMState` 只能
+读取 `estimation_mode` 选定来源后写入的 `CtrlInterfaces::ActiveState`
+（详见 [`adhere_controller/README.md`](../../controllers/adhere_controller/README.md)）。
 
 ## 关键几何参数（须与 MJCF 数值一致）
 
@@ -68,6 +77,11 @@ launch/
 - 水箱：水面在世界 `Z = 0.0 m`，箱底在 `Z = -10.0 m`（10m 水深），水平范围
   `20.0 m × 20.0 m`；ROV 默认水下出生点 `pos = "0.125 0 -2.0"`（水面以下 2.0m）
 - 机体：质量 20.0 kg（MJCF 中为含附加质量的 26.0 kg），对角惯量 `[1.35, 0.55, 1.10] kg·m²`
+- 传感器安装位（CLAUDE.md Phase 3.5，`mjcf/rov_wall.xml` 的 `imu_site`/
+  `depth_site`/`dvl_site`/`loadcell_*` 与 `xacro/robot.xacro` 的
+  `imu_link`/`depth_link`/`dvl_link`/`loadcell_*_link` 一一对应）：IMU/深度计在
+  质心 `(0,0,0)`，DVL 在机体底面 `(0,0,-0.20)`，4 个载荷传感器与接触垫同坐标
+  `(-0.10, ±0.25, ±0.15)`
 
 ## `config/robot_control.yaml`：模型解耦参数文件
 
@@ -114,4 +128,8 @@ ros2 launch simplified_v1_description mujoco.launch.py
 # 纯开环硬件仿真：覆盖为 0 个控制器加载（u=0 被动漂移验证场景），不弹出遥操作
 ros2 launch simplified_v1_description mujoco.launch.py autostart_controllers:="[]" \
     launch_teleop:=false
+
+# CLAUDE.md Phase 3.5：切换到"仅凭噪声多速率传感器 + RovStateEstimator"的真实
+# 部署模式（默认是 ground_truth，与 Phase 2-3.4 行为完全一致）
+ros2 launch simplified_v1_description mujoco.launch.py estimation_mode:=sensor_fusion
 ```

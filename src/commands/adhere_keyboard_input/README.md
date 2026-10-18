@@ -107,10 +107,16 @@ ros2 run adhere_keyboard_input state_cmd_console_node --ros-args -p mode:=2
 | 左摇杆左右（`axis_yaw`） | `0` | 左(+) | `yaw_rate > 0`（逆时针 `+omega_z`） |
 | 右摇杆上下（`axis_surge`） | `4` | 上(+) | `surge_x > 0`（朝墙面方向，机体 `-X`） |
 | 右摇杆左右（`axis_sway`） | `3` | 左/右 | `sway_y`（沿墙平移） |
+| 左扳机（`axis_pitch_trigger`，LT） | `2` | 按下(+) | `pitch_rate > 0`（`+omega_y`）；按住 LB（`button_pitch_reverse`，默认 `4`）反转符号 |
+| 右扳机（`axis_roll_trigger`，RT） | `5` | 按下(+) | `roll_rate > 0`（`+omega_x`）；按住 RB（`button_roll_reverse`，默认 `5`）反转符号 |
 
 索引匹配 Linux `xpad` 驱动默认的 8 轴 Xbox 360 风格布局
 （`[LX, LY, LT, RX, RY, RT, DX, DY]`）；若实际手柄/驱动索引不同，用
 `ros2 topic echo /joy` 核对后在 `config/xbox_teleop.yaml` 中调整。
+
+扳机单侧行程在多数 `xpad` 配置下报告为静止 `+1.0` / 完全按下 `-1.0`（与摇杆
+相反的约定），`applyTriggerDeadzone()` 先做 `(1-raw)/2` 归一化到 `[0,1]` 再
+应用死区（CLAUDE.md Phase 3.5）。
 
 ### 按键映射（瞬时 FSM 切换，上升沿去抖）
 

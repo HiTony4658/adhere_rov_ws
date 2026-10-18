@@ -114,6 +114,18 @@
       <site name="pad_TR_site" type="sphere" size="0.035" pos="-0.1 -0.25 0.15"/>
       <site name="pad_BL_site" type="sphere" size="0.035" pos="-0.1 0.25 -0.15"/>
       <site name="pad_BR_site" type="sphere" size="0.035" pos="-0.1 -0.25 -0.15"/>
+
+      <!-- Phase 3.5 realistic sensor mounting sites (CLAUDE.md Stage 2.1): IMU/Depth at the
+           dynamics origin/CoM, DVL at the bottom-most hull face, 4 load cells at the exact
+           box-sphere junction with the contact pads (same coords as pad_*_site). Visual-only
+           markers (size 0.015), read by AdhereMujocoHardware via mj_name2id(mjOBJ_SITE,...). -->
+      <site name="imu_site" type="sphere" size="0.015" pos="0.0 0.0 0.0" rgba="0.2 1.0 0.2 1"/>
+      <site name="depth_site" type="sphere" size="0.015" pos="0.0 0.0 0.0" rgba="0.2 0.2 1.0 1"/>
+      <site name="dvl_site" type="sphere" size="0.015" pos="0.0 0.0 -0.20" rgba="1.0 1.0 0.2 1"/>
+      <site name="loadcell_TL" type="sphere" size="0.015" pos="-0.1 0.25 0.15" rgba="1 0.6 0 1"/>
+      <site name="loadcell_TR" type="sphere" size="0.015" pos="-0.1 -0.25 0.15" rgba="1 0.6 0 1"/>
+      <site name="loadcell_BL" type="sphere" size="0.015" pos="-0.1 0.25 -0.15" rgba="1 0.6 0 1"/>
+      <site name="loadcell_BR" type="sphere" size="0.015" pos="-0.1 -0.25 -0.15" rgba="1 0.6 0 1"/>
     </body>
   </worldbody>
 

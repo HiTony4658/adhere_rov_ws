@@ -17,7 +17,9 @@ MPPI 外环。
 ```text
 include/adhere_controller/
 ├── adhere_controller.hpp        # AdhereController 声明
-├── CtrlInterfaces.h             # 零拷贝状态/命令包装 + ControlInputs
+├── CtrlInterfaces.h             # 零拷贝命令包装 + ActiveState（唯一的 FSM 可见状态） + ControlInputs
+├── estimator/
+│   └── RovStateEstimator.h     # 500Hz 多速率传感器融合（CLAUDE.md Phase 3.5）
 ├── FSM/
 │   ├── FSMState.h               # 抽象基类（checkFsmCommandChange()/targetPose() 共享实现）
 │   ├── StatePassive.h
@@ -27,13 +29,13 @@ include/adhere_controller/
 └── common/
     ├── enumClass.h              # FSMStateName（PASSIVE/DEPTH_HOLD/OPEN_LOOP/PID_HOLD）/ FSMMode
     ├── mathTypes.h              # Eigen 类型别名（Vec3/Vec6/Vec8/Mat68/Mat86/RotMat）
-    ├── mathTools.h              # quatToRotMat / rotMatToRPY / saturation
+    ├── mathTools.h              # quatToRotMat / rpyToRotMat / rotMatToRPY / saturation
     ├── MultiRateDecimator.h     # 均匀整数抽取多速率调度（CLAUDE.md Phase 3.1.1）
-    ├── ModelParams.h            # 运行时加载的模型解耦物理/增益参数（CLAUDE.md Phase 3.3）
+    ├── ModelParams.h            # 运行时加载的模型解耦物理/增益/传感器安装参数（CLAUDE.md Phase 3.3/3.5）
     └── ThrusterAllocator.h      # 由 ModelParams 几何动态构建的 6x8 推力分配矩阵 B 及其阻尼伪逆
 
 src/
-├── adhere_controller.cpp        # 生命周期方法 + 均匀多速率调度 + 4 话题订阅/发布 + FSM 切换逻辑 + pluginlib 导出
+├── adhere_controller.cpp        # 生命周期方法 + 均匀多速率调度 + 500Hz 状态估计/融合 + 4 话题订阅/发布 + FSM 切换逻辑 + pluginlib 导出
 └── FSM/
     ├── StatePassive.cpp
     ├── StateDepthHold.cpp
@@ -47,9 +49,10 @@ launch/mujoco.launch.py          # 闭环启动文件：robot_state_publisher + 
                                   # teleop_gcs.launch.py（joy_node + xbox_teleop_node + fsm_console_node）
 
 test/
-├── test_multirate_decimator.cpp  # 纯逻辑 gtest，不依赖 rclcpp/hardware_interface
-├── test_thruster_allocator.cpp   # 纯 Eigen gtest：B*B^+ ~= I_6，零寄生力矩
-└── test_fsm_states.cpp           # 闭环 gtest：假 CtrlInterfaces + 质点平面"虚拟物理"验证 3 态收敛性
+├── test_multirate_decimator.cpp      # 纯逻辑 gtest，不依赖 rclcpp/hardware_interface
+├── test_thruster_allocator.cpp       # 纯 Eigen gtest：B*B^+ ~= I_6，零寄生力矩
+├── test_fsm_states.cpp               # 闭环 gtest：假 CtrlInterfaces + 质点平面"虚拟物理"验证 3 态收敛性
+└── test_sensor_fusion_and_teleop.cpp # DVL 杠杆臂补偿收敛性 + sensor_fusion 闭环跟踪 + LT/RT 映射（CLAUDE.md Phase 3.5）
 ```
 
 ## 模型解耦：`ModelParams` + 动态 `ThrusterAllocator`（CLAUDE.md 第 3 节）
@@ -80,37 +83,78 @@ test/
 > 零杠杆臂），而非 `CLAUDE.md` 第 4.3 节给出的示意性 `X=-0.10m` 杠杆臂占位
 > 常数（二者描述的推力器安装偏移不同，已与用户确认按真实几何实现）。
 
-## `CtrlInterfaces`：零拷贝状态/命令包装
+## `CtrlInterfaces`：零拷贝命令包装 + 严格地面真值隔离（CLAUDE.md Phase 3.5）
 
 ```cpp
+struct ActiveState {
+  double pos_w[3];       // 世界坐标系质心位置 [x, y, z]
+  double rpy[3];          // [roll, pitch, yaw]，rad
+  double vel_body[3];     // 机体坐标系线速度
+  double omega_body[3];   // 机体坐标系角速度
+  double pad_force[4];    // TL/TR/BL/BR 法向接触力
+  double v_sep[4];         // TL/TR/BL/BR 分离速度
+};
+
 struct CtrlInterfaces {
   std::vector<std::reference_wrapper<hardware_interface::LoanedCommandInterface>>
     thruster_command_interface_;   // 8: thr_N1..thr_N4, thr_T5..thr_T8
   std::vector<std::reference_wrapper<hardware_interface::LoanedStateInterface>>
-    thruster_state_interface_,     // 8
-    imu_state_interface_,          // 10: orientation.w/x/y/z, angular_velocity.*, linear_acceleration.*
-    odom_state_interface_,         // 10: pos.*, quat.w/x/y/z, vel_body.*
-    pad_contact_state_interface_;  // 8: force TL/TR/BL/BR, v_sep TL/TR/BL/BR
+    thruster_state_interface_;     // 8（推力器力反馈，非位姿/速度，不受隔离约束）
+  ActiveState active_state;        // 唯一允许 FSMState 读取的位姿/速度/接触力来源
   ControlInputs control_inputs_;
   int frequency_ = 500;
 };
 ```
 
+**严格地面真值隔离**：`imu_state_interface_`/`odom_state_interface_`/
+`pad_contact_state_interface_`（地面真值）与 4 组噪声多速率传感器状态接口
+**均不是** `CtrlInterfaces` 的成员——它们是 `AdhereController` 自己的私有成员
+（`gt_*_state_interface_`/`noisy_*_state_interface_`），任何 `FSMState` 都
+无法访问。`AdhereController::update()` 在每个 500Hz tick 的内环门控**之前**，
+依据 `estimation_mode`（见下）把地面真值或 `RovStateEstimator` 的融合输出
+写入 `ctrl_interfaces_.active_state`——这是 4 个 `FSMState` 读取位姿/速度/
+接触力的唯一入口。
+
 `ControlInputs` 对应 CLAUDE.md Phase 3.2 的 4 话题解耦契约，持有 3 组正交字段
 （均为 `std::atomic<T>`，由 `AdhereController` 的订阅回调——ROS executor
 线程——写入，由当前活跃 `FSMState::run()`——500Hz 物理线程——无锁读取）：
 `command`（`/rov/fsm_command`）、`setpoint_*` + `setpoint_seq`
-（`/rov/setpoint_cmd`，沿边检测）、`teleop_*` + `teleop_last_rx_time_sec`
-（`/rov/teleop_cmd`，`0.25s` 失联看门狗判据）。
+（`/rov/setpoint_cmd`，沿边检测，Phase 3.5 新增 `setpoint_target_roll/pitch`）、
+`teleop_*` + `teleop_last_rx_time_sec`（`/rov/teleop_cmd`，`0.25s` 失联看门狗
+判据，Phase 3.5 新增 `teleop_pitch_rate`/`teleop_roll_rate`）。
 
-## 当前状态（4 态，CLAUDE.md Phase 3.2/3.3）
+## `RovStateEstimator`：500Hz 多速率传感器融合（CLAUDE.md Phase 3.5）
+
+`model_params_.estimation_mode`（`robot_control.yaml`/`mujoco.launch.py` 的
+`estimation_mode` 启动参数；注意该参数**不**写在 `robot_control.yaml` 里，
+见该文件内的说明注释）控制 `ActiveState` 的来源：
+
+- `"ground_truth"`（默认）：直接拷贝 `AdhereMujocoHardware` 的无噪声
+  `imu_sensor`/`rov_odom`/`pad_contact` 状态接口。
+- `"sensor_fusion"`：每个 500Hz tick 调用 `RovStateEstimator::predict()`
+  （融合噪声 IMU 陀螺/加计）与 `correctAttitude()`（融合噪声 IMU 姿态四元数），
+  并在噪声 `depth_sensor_noisy`/`dvl_sensor_noisy` 采样保持值发生变化时调用
+  `correctDepth()`/`correctDvl()`（含精确杠杆臂补偿
+  `y = v_dvl_meas - omega_hat x r_dvl`）。`RovStateEstimator` 是纯数学头文件
+  （无 ROS/MuJoCo 依赖），实现的是**按通道解耦的固定增益（稳态）
+  Kalman/互补滤波**，而非单一联合协方差 EKF——增益依据 CLAUDE.md Phase 3.5
+  给定的噪声标准差，用指数滑动平均稳态方差公式
+  `Var(y_hat) = K/(2-K) * Var(meas)` 解析选取，并在
+  `test_sensor_fusion_and_teleop.cpp` 中验证满足 `<0.015 m/s`/`<15mm`/
+  `<1.0deg` 的 RMSE 契约。
+
+无论哪种模式，地面真值都会被读入 `AdhereController::update()` 的局部变量，
+**仅**用于填充 `/rov/fsm_state` 的 `ground_truth_pose`（供离线评估参考），
+从不写入 `active_state`。
+
+## 当前状态（4 态，CLAUDE.md Phase 3.2/3.3/3.5）
 
 | 状态 | ID | 职责 |
 |---|---|---|
 | `PASSIVE` (`state_passive`) | 1 | `enter()`/`run()` 均将 8 个推力器指令置零，安全默认态 |
 | `DEPTH_HOLD` (`state_depth_hold`) | 2 | 世界坐标系 Z 向 PID 定深叠加姿态阻尼；`target_z_` 接受 `/rov/setpoint_cmd` 离散设定（沿边应用）与 Xbox 左摇杆连续微调，钳制在 `robot_control.yaml` 的 `workspace_z_min/max` 内 |
-| `OPEN_LOOP` (`state_open_loop`) | 3 | 无记忆地把 `/rov/teleop_cmd` 的 4 维遥操作输入线性映射为机体力矩（增益来自 `open_loop.max_wrench`），用于验证 `B`/`B^+` 分配零寄生耦合 |
-| `PID_HOLD` (`state_pid_hold`) | 4 | `enter()` 锁存当前 `(x,y,z,yaw)` 为保持点；摇杆推动期间按机体对齐速度平移/旋转该设定点（增益来自 `pid_hold.*`），松手瞬间冻结；6-DOF PID + 浮力/科氏力/阻力前馈 |
+| `OPEN_LOOP` (`state_open_loop`) | 3 | 无记忆地把 `/rov/teleop_cmd` 的 6 维遥操作输入（含 Phase 3.5 新增的 `pitch_rate`/`roll_rate`）线性映射为机体力矩（增益来自 `open_loop.max_wrench`），用于验证 `B`/`B^+` 分配零寄生耦合 |
+| `PID_HOLD` (`state_pid_hold`) | 4 | `enter()` 锁存当前 `(x,y,z,roll,pitch,yaw)` 为保持点；摇杆/扳机推动期间按机体对齐速度平移/旋转该设定点（增益来自 `pid_hold.*`，roll/pitch 目标钳制在 `±max_tilt_deg`），松手瞬间冻结；6-DOF PID + 浮力/科氏力/阻力前馈 |
 
 ## `MultiRateDecimator`：均匀整数抽取多速率调度
 

@@ -8,4 +8,6 @@ float64 surge_x        # Right stick up/down: +1.0 = forward toward wall (-X bod
 float64 sway_y         # Right stick left/right: lateral velocity command
 float64 heave_z        # Left stick up/down: +1.0 = ascend (+Z), -1.0 = descend (-Z)
 float64 yaw_rate       # Left stick left/right: +1.0 = CCW yaw (+omega_z), -1.0 = CW yaw (-omega_z)
-bool active            # True when at least one stick axis is outside its deadzone
+float64 pitch_rate     # Left trigger (LT, +1.0) / Left bumper (LB, reverses sign): +1.0 = +omega_y
+float64 roll_rate      # Right trigger (RT, +1.0) / Right bumper (RB, reverses sign): +1.0 = +omega_x
+bool active            # True when at least one stick axis/trigger is outside its deadzone

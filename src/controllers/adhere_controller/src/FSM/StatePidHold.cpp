@@ -31,16 +31,12 @@ StatePidHold::StatePidHold(CtrlInterfaces & ctrl_interfaces, const ModelParams &
 
 void StatePidHold::enter()
 {
-  p_d_world_ = Vec3(
-    ctrl_interfaces_.odom_state_interface_[0].get().get_value(),
-    ctrl_interfaces_.odom_state_interface_[1].get().get_value(),
-    ctrl_interfaces_.odom_state_interface_[2].get().get_value());
-  const Quat quat(
-    ctrl_interfaces_.odom_state_interface_[3].get().get_value(),
-    ctrl_interfaces_.odom_state_interface_[4].get().get_value(),
-    ctrl_interfaces_.odom_state_interface_[5].get().get_value(),
-    ctrl_interfaces_.odom_state_interface_[6].get().get_value());
-  psi_d_ = rotMatToRPY(quatToRotMat(quat))(2);
+  // Phase 3.5 strict ground-truth isolation: reads ONLY ctrl_interfaces_.active_state.
+  const auto & active = ctrl_interfaces_.active_state;
+  p_d_world_ = Vec3(active.pos_w[0], active.pos_w[1], active.pos_w[2]);
+  phi_d_ = active.rpy[0];
+  theta_d_ = active.rpy[1];
+  psi_d_ = active.rpy[2];
 
   integral_pos_body_.setZero();
   integral_att_body_.setZero();
@@ -52,70 +48,72 @@ void StatePidHold::run(const rclcpp::Time & /*time*/, const rclcpp::Duration & p
   auto & ci = ctrl_interfaces_.control_inputs_;
   const auto & gains = model_params_.pid_hold;
 
-  const Vec3 pos_world(
-    ctrl_interfaces_.odom_state_interface_[0].get().get_value(),
-    ctrl_interfaces_.odom_state_interface_[1].get().get_value(),
-    ctrl_interfaces_.odom_state_interface_[2].get().get_value());
-  const Quat quat(
-    ctrl_interfaces_.odom_state_interface_[3].get().get_value(),
-    ctrl_interfaces_.odom_state_interface_[4].get().get_value(),
-    ctrl_interfaces_.odom_state_interface_[5].get().get_value(),
-    ctrl_interfaces_.odom_state_interface_[6].get().get_value());
-  const Vec3 vel_body(
-    ctrl_interfaces_.odom_state_interface_[7].get().get_value(),
-    ctrl_interfaces_.odom_state_interface_[8].get().get_value(),
-    ctrl_interfaces_.odom_state_interface_[9].get().get_value());
-  const Vec3 omega_body(
-    ctrl_interfaces_.imu_state_interface_[4].get().get_value(),
-    ctrl_interfaces_.imu_state_interface_[5].get().get_value(),
-    ctrl_interfaces_.imu_state_interface_[6].get().get_value());
+  // Phase 3.5 strict ground-truth isolation: reads ONLY ctrl_interfaces_.active_state, which
+  // AdhereController populates from either ground truth or RovStateEstimator depending on
+  // estimation_mode -- this state has no way to tell which.
+  const auto & active = ctrl_interfaces_.active_state;
+  const Vec3 pos_world(active.pos_w[0], active.pos_w[1], active.pos_w[2]);
+  const Vec3 rpy(active.rpy[0], active.rpy[1], active.rpy[2]);
+  const Vec3 vel_body(active.vel_body[0], active.vel_body[1], active.vel_body[2]);
+  const Vec3 omega_body(active.omega_body[0], active.omega_body[1], active.omega_body[2]);
 
-  const RotMat r = quatToRotMat(quat);
-  const Vec3 rpy = rotMatToRPY(r);
+  const RotMat r = rpyToRotMat(rpy);
   const double psi = rpy(2);
 
-  // Discrete setpoint (CLAUDE.md Phase 3.2 Stage 2.1): edge-detected via setpoint_seq, same
-  // pattern as StateDepthHold.
+  // Discrete setpoint (CLAUDE.md Phase 3.2/3.5 Stage 2.1): edge-detected via setpoint_seq, same
+  // pattern as StateDepthHold, now carrying the full 6-DOF pose.
   const uint64_t seq = ci.setpoint_seq.load();
   if (seq != last_seen_setpoint_seq_) {
     last_seen_setpoint_seq_ = seq;
     if (ci.setpoint_mode.load() == 4) {
       if (ci.setpoint_lock_current_pose.load()) {
         p_d_world_ = pos_world;
+        phi_d_ = rpy(0);
+        theta_d_ = rpy(1);
         psi_d_ = psi;
       } else {
         p_d_world_ = Vec3(
           ci.setpoint_target_x.load(), ci.setpoint_target_y.load(), ci.setpoint_target_z.load());
+        phi_d_ = ci.setpoint_target_roll.load();
+        theta_d_ = ci.setpoint_target_pitch.load();
         psi_d_ = ci.setpoint_target_yaw.load();
       }
     }
   }
 
-  // Stick-driven setpoint move / release-to-lock (CLAUDE.md Phase 3.2 Stage 2.2.4). v_d_body
-  // and omega_zd stay exactly zero when teleop is inactive (including the watchdog-forced-zero
-  // case), so e_v_body/drag-feedforward below automatically target zero velocity and p_d_world_/
-  // psi_d_ are simply never advanced -- no separate "release" branch needed.
+  // Stick-driven setpoint move / release-to-lock (CLAUDE.md Phase 3.2 Stage 2.2.4, extended to
+  // roll/pitch in Phase 3.5 via Xbox LT/RT). v_d_body and omega_{x,y,z}d stay exactly zero when
+  // teleop is inactive (including the watchdog-forced-zero case), so e_v_body/drag-feedforward
+  // below automatically target zero velocity and p_d_world_/phi_d_/theta_d_/psi_d_ are simply
+  // never advanced -- no separate "release" branch needed.
   Vec3 v_d_body = Vec3::Zero();
+  double omega_xd = 0.0;
+  double omega_yd = 0.0;
   double omega_zd = 0.0;
   if (ci.teleop_active.load()) {
     v_d_body = Vec3(
       -gains.max_teleop_vel[0] * ci.teleop_surge_x.load(),
       -gains.max_teleop_vel[1] * ci.teleop_sway_y.load(),
       gains.max_teleop_vel[2] * ci.teleop_heave_z.load());
-    omega_zd = gains.max_teleop_vel[3] * ci.teleop_yaw_rate.load();
+    omega_xd = gains.max_teleop_vel[3] * ci.teleop_roll_rate.load();
+    omega_yd = gains.max_teleop_vel[4] * ci.teleop_pitch_rate.load();
+    omega_zd = gains.max_teleop_vel[5] * ci.teleop_yaw_rate.load();
 
     p_d_world_ += r * v_d_body * dt;
     p_d_world_.x() = std::max(p_d_world_.x(), model_params_.workspace_x_min);
     p_d_world_.z() =
       saturation(p_d_world_.z(), model_params_.workspace_z_min, model_params_.workspace_z_max);
+    const double max_tilt_rad = gains.max_tilt_deg * M_PI / 180.0;
+    phi_d_ = saturation(phi_d_ + omega_xd * dt, -max_tilt_rad, max_tilt_rad);
+    theta_d_ = saturation(theta_d_ + omega_yd * dt, -max_tilt_rad, max_tilt_rad);
     psi_d_ = wrapToPi(psi_d_ + omega_zd * dt);
   }
 
   // Errors in the body frame.
   const Vec3 e_p_body = r.transpose() * (p_d_world_ - pos_world);
   const Vec3 e_v_body = v_d_body - vel_body;
-  const Vec3 e_r(-rpy(0), -rpy(1), wrapToPi(psi_d_ - psi));
-  const Vec3 e_omega_body = Vec3(0.0, 0.0, omega_zd) - omega_body;
+  const Vec3 e_r(phi_d_ - rpy(0), theta_d_ - rpy(1), wrapToPi(psi_d_ - psi));
+  const Vec3 e_omega_body = Vec3(omega_xd, omega_yd, omega_zd) - omega_body;
 
   integral_pos_body_ += e_p_body * dt;
   integral_att_body_ += e_r * dt;
@@ -168,9 +166,9 @@ FSMStateName StatePidHold::checkChange()
   return checkFsmCommandChange();
 }
 
-std::array<double, 4> StatePidHold::targetPose() const
+std::array<double, 6> StatePidHold::targetPose() const
 {
-  return {p_d_world_.x(), p_d_world_.y(), p_d_world_.z(), psi_d_};
+  return {p_d_world_.x(), p_d_world_.y(), p_d_world_.z(), phi_d_, theta_d_, psi_d_};
 }
 
 }  // namespace adhere_controller

@@ -60,11 +60,12 @@ public:
 
   virtual FSMStateName checkChange() { return checkFsmCommandChange(); }
 
-  // Live reference-pose report for /rov/fsm_state (CLAUDE.md Phase 3.2 Stage 2.1's
-  // FsmState.msg::target_pose), published by AdhereController on every outer-loop tick.
-  // Meaning is per-state: PASSIVE/OPEN_LOOP have no reference pose (default all-zero);
-  // StateDepthHold overrides index 2 (Z) only; StatePidHold overrides the full [x,y,z,yaw].
-  virtual std::array<double, 4> targetPose() const { return {0.0, 0.0, 0.0, 0.0}; }
+  // Live reference-pose report for /rov/fsm_state (CLAUDE.md Phase 3.2/3.5 Stage 2.1's
+  // FsmState.msg::target_pose, [x, y, z, roll, pitch, yaw]), published by AdhereController on
+  // every outer-loop tick. Meaning is per-state: PASSIVE/OPEN_LOOP have no reference pose
+  // (default all-zero); StateDepthHold overrides index 2 (Z) only; StatePidHold overrides the
+  // full 6-DOF pose.
+  virtual std::array<double, 6> targetPose() const { return {0.0, 0.0, 0.0, 0.0, 0.0, 0.0}; }
 
   FSMStateName state_name;
   std::string state_name_string;

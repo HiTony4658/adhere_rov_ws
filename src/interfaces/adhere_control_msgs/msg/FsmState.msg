@@ -6,5 +6,7 @@ std_msgs/Header header
 
 int32 current_state    # 1 = PASSIVE, 2 = DEPTH_HOLD, 3 = OPEN_LOOP, 4 = PID_HOLD
 string state_name
-float64[4] target_pose # [target_x, target_y, target_z, target_yaw], meaning is per-state (see FSMState::targetPose())
-float64[4] actual_pose # [x, y, z, yaw]
+string estimation_mode      # "ground_truth" or "sensor_fusion" (CtrlInterfaces::active_state source)
+float64[6] target_pose       # [x, y, z, roll, pitch, yaw], meaning is per-state (see FSMState::targetPose())
+float64[6] estimated_pose    # [x, y, z, roll, pitch, yaw] actually used by the controller (CtrlInterfaces::active_state)
+float64[6] ground_truth_pose # [x, y, z, roll, pitch, yaw] noise-free reference, for evaluation only -- never fed to FSMState

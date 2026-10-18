@@ -29,10 +29,13 @@ void StateOpenLoop::run(const rclcpp::Time & /*time*/, const rclcpp::Duration & 
   const double f_x = -max_wrench[0] * ci.teleop_surge_x.load();
   const double f_y = -max_wrench[1] * ci.teleop_sway_y.load();
   const double f_z = max_wrench[2] * ci.teleop_heave_z.load();
+  // Phase 3.5: Xbox LT/LB -> pitch torque Ty, RT/RB -> roll torque Tx.
+  const double t_x = max_wrench[3] * ci.teleop_roll_rate.load();
+  const double t_y = max_wrench[4] * ci.teleop_pitch_rate.load();
   const double t_z = max_wrench[5] * ci.teleop_yaw_rate.load();
 
   Vec6 wrench_des;
-  wrench_des << f_x, f_y, f_z, 0.0, 0.0, t_z;
+  wrench_des << f_x, f_y, f_z, t_x, t_y, t_z;
 
   const Vec8 u = b_pinv_ * wrench_des;
   for (int i = 0; i < 8; ++i) {

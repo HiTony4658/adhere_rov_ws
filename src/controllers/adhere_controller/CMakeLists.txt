@@ -122,6 +122,16 @@ if(BUILD_TESTING)
   target_include_directories(test_fsm_states PRIVATE include)
   target_link_libraries(test_fsm_states ${PROJECT_NAME})
   ament_target_dependencies(test_fsm_states rclcpp hardware_interface)
+
+  # Phase 3.5 verification (CLAUDE.md Stage 3): RovStateEstimator's DVL lever-arm compensation,
+  # closed-loop StateDepthHold/StatePidHold tracking driven entirely through "sensor_fusion"
+  # (never ground truth), and the Xbox LT/RT -> pitch/roll teleop mapping.
+  ament_add_gtest(test_sensor_fusion_and_teleop
+    test/test_sensor_fusion_and_teleop.cpp
+  )
+  target_include_directories(test_sensor_fusion_and_teleop PRIVATE include)
+  target_link_libraries(test_sensor_fusion_and_teleop ${PROJECT_NAME})
+  ament_target_dependencies(test_sensor_fusion_and_teleop rclcpp hardware_interface)
 endif()
 
 ament_package()

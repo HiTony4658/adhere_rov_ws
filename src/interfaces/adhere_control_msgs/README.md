@@ -22,9 +22,9 @@ FSM 状态切换命令、状态内数值设定点、Xbox 手柄连续遥操作�
 | 文件 | 话题 / 发布方 | 字段摘要 | 用途 |
 |---|---|---|---|
 | `FsmCommand.msg` | `/rov/fsm_command`，`fsm_console_node` 或 `xbox_teleop_node` 按键边沿 | `int32 command`（`NO_CHANGE=0, PASSIVE=1, DEPTH_HOLD=2, OPEN_LOOP=3, PID_HOLD=4`） | **仅**用于切换 FSM 状态，不再携带任何数值设定点 |
-| `SetpointCommand.msg` | `/rov/setpoint_cmd`，`state_cmd_console_node` | `uint8 mode`（`2`=`DEPTH_HOLD` 用 `target_z`；`4`=`PID_HOLD` 用 `target_x/y/z/yaw` 或 `lock_current_pose`）; `bool lock_current_pose`; `float64 target_x/y/z/yaw` | 离散数值设定点，与状态切换正交，不触发 `FSMState::enter()`（不重置积分器） |
-| `TeleopCommand.msg` | `/rov/teleop_cmd`，`xbox_teleop_node`，50Hz | `float64 surge_x, sway_y, heave_z, yaw_rate`（归一化至 `[-1,1]`，美国手/Mode 2 映射）; `bool active` | Xbox 手柄连续遥操作指令，被 `StateOpenLoop`/`StatePidHold`/`StateDepthHold` 消费；`AdhereController` 对其施加 `0.25s` 失联看门狗 |
-| `FsmState.msg` | `/rov/fsm_state`，`AdhereController`，外环速率 | `int32 current_state`; `string state_name`; `float64[4] target_pose`; `float64[4] actual_pose` | 控制器实时反馈，供 `fsm_console_node`/`state_cmd_console_node` 显示；是终端感知"当前到底是哪个状态"的唯一信源，无论状态切换来自键盘还是手柄按键 |
+| `SetpointCommand.msg` | `/rov/setpoint_cmd`，`state_cmd_console_node` | `uint8 mode`（`2`=`DEPTH_HOLD` 用 `target_z`；`4`=`PID_HOLD` 用 `target_x/y/z/roll/pitch/yaw` 或 `lock_current_pose`）; `bool lock_current_pose`; `float64 target_x/y/z/roll/pitch/yaw` | 离散数值设定点，与状态切换正交，不触发 `FSMState::enter()`（不重置积分器）；`target_roll`/`target_pitch` 为 Phase 3.5 新增字段 |
+| `TeleopCommand.msg` | `/rov/teleop_cmd`，`xbox_teleop_node`，50Hz | `float64 surge_x, sway_y, heave_z, yaw_rate, pitch_rate, roll_rate`（归一化至 `[-1,1]`，美国手/Mode 2 映射）; `bool active` | Xbox 手柄连续遥操作指令，被 `StateOpenLoop`/`StatePidHold`/`StateDepthHold` 消费；`AdhereController` 对其施加 `0.25s` 失联看门狗；`pitch_rate`（LT/LB）/`roll_rate`（RT/RB）为 Phase 3.5 新增字段 |
+| `FsmState.msg` | `/rov/fsm_state`，`AdhereController`，外环速率 | `int32 current_state`; `string state_name`; `string estimation_mode`; `float64[6] target_pose`; `float64[6] estimated_pose`; `float64[6] ground_truth_pose` | 控制器实时反馈，供 `fsm_console_node`/`state_cmd_console_node` 显示；`target/estimated/ground_truth_pose` 均为 `[x,y,z,roll,pitch,yaw]`（Phase 3.5 从 4-DOF 扩展为 6-DOF，并拆分"控制器实际使用的估计位姿"与"仅用于离线评估的地面真值"） |
 
 ## 规划中的接口列表（后续阶段实现）
 

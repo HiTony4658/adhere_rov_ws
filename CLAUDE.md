@@ -177,28 +177,31 @@ adhere_robot_ws/
 
 **Always re-read the last 2 sections of `PROGRESS.md` after every `/clear`** (Sec.0's startup protocol) before trusting this snapshot — it is a point-in-time summary, `PROGRESS.md` is the authoritative chronological record. Whenever a `/clear` session completes a major architectural change (package merge/split, new topic, new coordinate convention, new FSM state), **update this section in the same commit**.
 
-### Exact 5-Package Workspace Layout (as of Phase 3.3)
+### Exact 5-Package Workspace Layout (as of Phase 3.5)
 ```text
 src/
 ├── interfaces/adhere_control_msgs/        # FsmCommand, SetpointCommand, TeleopCommand, FsmState (zero MuJoCo/CUDA/ros2_control deps)
 ├── descriptions/simplified_v1_description/ # URDF/Xacro + mjcf/rov_wall.xml + config/robot_control.yaml (single source of model params)
-├── hardwares/adhere_mujoco_hardware/       # AdhereMujocoHardware (500Hz SystemInterface) + FossenHydrodynamics + MujocoViewer + adhere_mujoco_node
-├── controllers/adhere_controller/          # AdhereController plugin (FSM: PASSIVE/DEPTH_HOLD/OPEN_LOOP/PID_HOLD) + ModelParams + ThrusterAllocator + MultiRateDecimator
+├── hardwares/adhere_mujoco_hardware/       # AdhereMujocoHardware (500Hz SystemInterface) + FossenHydrodynamics + dual ground-truth/noisy sensor paths + MujocoViewer + adhere_mujoco_node
+├── controllers/adhere_controller/          # AdhereController plugin (FSM: PASSIVE/DEPTH_HOLD/OPEN_LOOP/PID_HOLD) + RovStateEstimator + ModelParams + ThrusterAllocator + MultiRateDecimator
 └── commands/adhere_keyboard_input/         # fsm_console_node + state_cmd_console_node + xbox_teleop_node (zero MuJoCo/CUDA/ros2_control deps)
 ```
 `adhere_controller_common` and `adhere_kamr_controller` NO LONGER EXIST (merged into `adhere_controller` in Phase 3.3) — do not recreate them or reference their names in new code.
 
-### 4 ROS Topics (`adhere_control_msgs`, orthogonal contract, Sec.3.4)
+### 4 ROS Topics (`adhere_control_msgs`, orthogonal contract, Sec.3.4, extended to 6-DOF in Phase 3.5)
 1. `/rov/fsm_command` (`FsmCommand`) — ONLY switches FSM state (`1=PASSIVE, 2=DEPTH_HOLD, 3=OPEN_LOOP, 4=PID_HOLD`).
-2. `/rov/setpoint_cmd` (`SetpointCommand`) — ONLY discrete numeric targets (`mode`, `lock_current_pose`, `target_x/y/z/yaw`).
-3. `/rov/teleop_cmd` (`TeleopCommand`) — ONLY `50Hz` continuous Xbox Mode-2 stick commands (`surge_x/sway_y/heave_z/yaw_rate` in `[-1,1]`).
-4. `/rov/fsm_state` (`FsmState`) — `25Hz` feedback (`current_state, state_name, target_pose, actual_pose`), published by `AdhereController`.
+2. `/rov/setpoint_cmd` (`SetpointCommand`) — ONLY discrete numeric targets (`mode`, `lock_current_pose`, `target_x/y/z/roll/pitch/yaw`).
+3. `/rov/teleop_cmd` (`TeleopCommand`) — ONLY `50Hz` continuous Xbox Mode-2 stick/trigger commands (`surge_x/sway_y/heave_z/yaw_rate/pitch_rate/roll_rate` in `[-1,1]`; `pitch_rate`=LT/LB, `roll_rate`=RT/RB).
+4. `/rov/fsm_state` (`FsmState`) — `25Hz` feedback (`current_state, state_name, estimation_mode, target_pose[6], estimated_pose[6], ground_truth_pose[6]`), published by `AdhereController`.
 
 ### Water Tank Coordinate Convention (Sec.4, Phase 3.3)
 Water surface at world `Z=0.0m`; tank floor at world `Z=-10.0m` (10m depth); wall at `X=0.0m` spanning `Y∈[-10,10]m × Z∈[-10,0]m` (20m×10m); ROV spawns at `pos="0.125 0 -2.0"`. Depth below surface `d = -Z`. All submerged positions have `Z ≤ 0.0m`.
 
 ### Model-Decoupling Status (Sec.3.3)
-`ModelParams::loadFromNode()` (`adhere_controller/include/adhere_controller/common/ModelParams.h`) loads ALL thruster/pad geometry, Fossen hydro params, workspace bounds, and per-FSM-state gains from `simplified_v1_description/config/robot_control.yaml` at `on_configure()`. `ThrusterAllocator.h::buildThrusterAllocationMatrix()` builds `B` dynamically from `ModelParams`' loaded geometry (no hardcoded corner coordinates). `robot_control.yaml`'s `thruster_pos_xyz`/`thruster_dir_xyz` encode `rov_wall.xml`'s REAL geometry (all 8 thruster sites at body `X=0.0`, zero lever arm) — a documented, user-confirmed deviation from this file's own Sec.4.3 illustrative placeholder.
+`ModelParams::loadFromNode()` (`adhere_controller/include/adhere_controller/common/ModelParams.h`) loads ALL thruster/pad geometry, Fossen hydro params, workspace bounds, per-FSM-state gains, `estimation_mode`, and sensor mounting lever arms from `simplified_v1_description/config/robot_control.yaml` at `on_configure()`. `ThrusterAllocator.h::buildThrusterAllocationMatrix()` builds `B` dynamically from `ModelParams`' loaded geometry (no hardcoded corner coordinates). `robot_control.yaml`'s `thruster_pos_xyz`/`thruster_dir_xyz` encode `rov_wall.xml`'s REAL geometry (all 8 thruster sites at body `X=0.0`, zero lever arm) — a documented, user-confirmed deviation from this file's own Sec.4.3 illustrative placeholder. `estimation_mode` is deliberately NOT a `robot_control.yaml` key (see that file's inline comment on the wildcard-vs-exact-node-name parameter-precedence gotcha) — it is set only via `mujoco.launch.py`'s `estimation_mode` launch argument (default `ground_truth`) or `ModelParams`' compiled-in default.
 
-### FSM States Implemented (Phase 3.2/3.3, `adhere_controller`)
-`PASSIVE` (zero-thrust safe default), `DEPTH_HOLD` (world-Z PID + attitude damping), `OPEN_LOOP` (direct teleop-to-wrench, no memory), `PID_HOLD` (6-DOF PID + buoyancy/drag feedforward, lock-on-release). `KAMR-MPPI`'s 250Hz inner loop (Impedance PD + Pad-Force DOB + 12D OSQP) and 25Hz async CUDA MPPI outer loop (Sec.5) are NOT yet implemented — only the uniform `MultiRateDecimator` timing contract and an empty outer-loop hook exist today.
+### FSM States Implemented (Phase 3.2/3.3/3.5, `adhere_controller`)
+`PASSIVE` (zero-thrust safe default), `DEPTH_HOLD` (world-Z PID + attitude damping), `OPEN_LOOP` (direct teleop-to-wrench, no memory, now 6-DOF with Tx/Ty from roll_rate/pitch_rate), `PID_HOLD` (6-DOF PID + buoyancy/drag feedforward, lock-on-release, roll/pitch targets clamped to `±pid_hold.max_tilt_deg`). `KAMR-MPPI`'s 250Hz inner loop (Impedance PD + Pad-Force DOB + 12D OSQP) and 25Hz async CUDA MPPI outer loop (Sec.5) are NOT yet implemented — only the uniform `MultiRateDecimator` timing contract and an empty outer-loop hook exist today.
+
+### Dual State-Acquisition & Strict Ground-Truth Isolation (Phase 3.5)
+`AdhereMujocoHardware` exposes 55 state interfaces: the original 28 noise-free ground-truth ones (`imu_sensor`/`rov_odom`/`pad_contact`) PLUS 4 new independent noisy multi-rate channels (`imu_sensor_noisy` 500Hz, `depth_sensor_noisy` 50Hz sample-and-hold, `dvl_sensor_noisy` 20Hz sample-and-hold with lever-arm DVL velocity, `loadcell_noisy` 500Hz) generated entirely inside `AdhereMujocoHardware::read()` from hardcoded noise-std constants (not ROS parameters — this hardware component is not an `rclcpp::Node`). `AdhereController` binds the ground-truth and noisy interfaces to PRIVATE members (`gt_*_state_interface_`/`noisy_*_state_interface_`) — NEVER members of `CtrlInterfaces` — and every 500Hz tick populates `CtrlInterfaces::active_state` (an `ActiveState` struct: `pos_w/rpy/vel_body/omega_body/pad_force/v_sep`) either directly from ground truth (`estimation_mode=="ground_truth"`) or from `RovStateEstimator`'s fused output (`estimation_mode=="sensor_fusion"`). `FSMState::run()` reads ONLY `ctrl_interfaces_.active_state` — it has no way to access ground truth, enforcing the isolation contract even in code review (`grep` for `gt_*_state_interface_` must only ever match inside `adhere_controller.cpp`/`.hpp`). `RovStateEstimator` (`adhere_controller/include/adhere_controller/estimator/RovStateEstimator.h`) is a decoupled, fixed-gain (steady-state EMA) Kalman/complementary filter per channel, NOT a joint-covariance EKF — verified against the `<0.015 m/s`/`<15mm`/`<1.0deg` RMSE contract in `test_sensor_fusion_and_teleop.cpp`.

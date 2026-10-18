@@ -30,13 +30,15 @@ public:
 
   FSMStateName checkChange() override;
 
-  // Reports the live hold setpoint [x_d, y_d, z_d, psi_d].
-  std::array<double, 4> targetPose() const override;
+  // Reports the live hold setpoint [x_d, y_d, z_d, phi_d, theta_d, psi_d].
+  std::array<double, 6> targetPose() const override;
 
 private:
   Mat86 b_pinv_;
 
   Vec3 p_d_world_ = Vec3::Zero();
+  double phi_d_ = 0.0;    // roll target, rad (Phase 3.5)
+  double theta_d_ = 0.0;  // pitch target, rad (Phase 3.5)
   double psi_d_ = 0.0;
 
   // Body-frame PID integrator states (CLAUDE.md Phase 3.2 Stage 2.2.4's I_p^B / I_R^B), cleared

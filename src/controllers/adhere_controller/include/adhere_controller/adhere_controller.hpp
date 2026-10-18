@@ -15,6 +15,7 @@
 #include "adhere_controller/common/ModelParams.h"
 #include "adhere_controller/common/MultiRateDecimator.h"
 #include "adhere_controller/CtrlInterfaces.h"
+#include "adhere_controller/estimator/RovStateEstimator.h"
 #include "adhere_controller/FSM/FSMState.h"
 #include "adhere_controller/FSM/StateDepthHold.h"
 #include "adhere_controller/FSM/StateOpenLoop.h"
@@ -99,6 +100,32 @@ private:
   rclcpp::Subscription<adhere_control_msgs::msg::TeleopCommand>::SharedPtr
     teleop_command_subscription_;
   rclcpp::Publisher<adhere_control_msgs::msg::FsmState>::SharedPtr fsm_state_publisher_;
+
+  // Phase 3.5 strict ground-truth isolation (CLAUDE.md Stage 2.3): these raw hardware state
+  // interfaces are PRIVATE to AdhereController -- never exposed via CtrlInterfaces, never
+  // reachable from any FSMState. gt_* hold noise-free ground truth (used only to populate
+  // FsmState::ground_truth_pose for offline evaluation, and to populate
+  // ctrl_interfaces_.active_state directly in "ground_truth" mode); noisy_* hold the realistic
+  // multi-rate sensors consumed exclusively by estimator_ in "sensor_fusion" mode.
+  std::vector<std::reference_wrapper<hardware_interface::LoanedStateInterface>>
+    gt_imu_state_interface_;          // size 10
+  std::vector<std::reference_wrapper<hardware_interface::LoanedStateInterface>>
+    gt_odom_state_interface_;         // size 10
+  std::vector<std::reference_wrapper<hardware_interface::LoanedStateInterface>>
+    gt_pad_contact_state_interface_;  // size 8
+  std::vector<std::reference_wrapper<hardware_interface::LoanedStateInterface>>
+    noisy_imu_state_interface_;       // size 10
+  std::vector<std::reference_wrapper<hardware_interface::LoanedStateInterface>>
+    noisy_depth_state_interface_;     // size 1
+  std::vector<std::reference_wrapper<hardware_interface::LoanedStateInterface>>
+    noisy_dvl_state_interface_;       // size 4
+  std::vector<std::reference_wrapper<hardware_interface::LoanedStateInterface>>
+    noisy_loadcell_state_interface_;  // size 4
+
+  // RovStateEstimator instance driven at 500Hz by update(), ahead of the inner-loop gate, only
+  // when model_params_.estimation_mode == "sensor_fusion".
+  RovStateEstimator estimator_;
+  bool estimator_initialized_ = false;
 
   // 0.25s /rov/teleop_cmd staleness watchdog (CLAUDE.md Phase 3.2 Stage 2.3): compared against
   // ctrl_interfaces_.control_inputs_.teleop_last_rx_time_sec on every inner-due tick, in

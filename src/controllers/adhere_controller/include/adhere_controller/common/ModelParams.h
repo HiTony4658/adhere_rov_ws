@@ -46,8 +46,20 @@ struct ModelParams
     Vec3 kp_att = Vec3(40.0, 40.0, 25.0);
     Vec3 ki_att = Vec3(2.0, 2.0, 2.0);
     Vec3 kd_att = Vec3(15.0, 15.0, 12.0);
-    // [vx_max, vy_max, vz_max, omega_z_max] stick-driven setpoint-move rates.
-    std::array<double, 4> max_teleop_vel = {0.25, 0.25, 0.25, 0.6};
+    // [vx_max, vy_max, vz_max, omega_x_roll_max, omega_y_pitch_max, omega_z_yaw_max]
+    // stick-driven setpoint-move rates (Phase 3.5: extended from 4 to 6 DOF).
+    std::array<double, 6> max_teleop_vel = {0.25, 0.25, 0.25, 0.4, 0.4, 0.6};
+    double max_tilt_deg = 45.0;  // Roll/pitch target clamp (CLAUDE.md Phase 3.5 Stage 2.3)
+  };
+
+  // Phase 3.5 sensor mounting lever arms (body frame, relative to CoM), used by
+  // RovStateEstimator's lever-arm compensation formulas. Must match mjcf/rov_wall.xml's
+  // imu_site/depth_site/dvl_site positions.
+  struct SensorMount
+  {
+    Vec3 r_imu = Vec3(0.0, 0.0, 0.0);
+    Vec3 r_depth = Vec3(0.0, 0.0, 0.0);
+    Vec3 r_dvl = Vec3(0.0, 0.0, -0.20);
   };
 
   // Thruster geometry/limits (body frame, relative to CoM) for dynamically building
@@ -94,6 +106,11 @@ struct ModelParams
   DepthHoldGains depth_hold;
   OpenLoopGains open_loop;
   PidHoldGains pid_hold;
+  SensorMount sensor_mount;
+
+  // Phase 3.5 dual state-acquisition mode: "ground_truth" or "sensor_fusion" (CLAUDE.md
+  // Stage 2.3). Read directly by AdhereController, not by any FSMState.
+  std::string estimation_mode = "ground_truth";
 
   // Declares/reads every field above as a ROS parameter on `node` (mirrors the existing
   // auto_declare<int>("cm_update_rate", ...) pattern already used for the multi-rate
@@ -120,6 +137,12 @@ struct ModelParams
         return node->declare_parameter<double>(name, def);
       }
       return node->get_parameter(name).get_value<double>();
+    };
+    auto autoDeclareString = [&node](const std::string & name, const std::string & def) {
+      if (!node->has_parameter(name)) {
+        return node->declare_parameter<std::string>(name, def);
+      }
+      return node->get_parameter(name).get_value<std::string>();
     };
 
     auto declareVec3Array = [&autoDeclareVec](
@@ -213,6 +236,12 @@ struct ModelParams
     declareVec3("pid_hold.ki_att", p.pid_hold.ki_att);
     declareVec3("pid_hold.kd_att", p.pid_hold.kd_att);
     declareDoubleArray("pid_hold.max_teleop_vel", p.pid_hold.max_teleop_vel);
+    p.pid_hold.max_tilt_deg = autoDeclareDouble("pid_hold.max_tilt_deg", p.pid_hold.max_tilt_deg);
+
+    p.estimation_mode = autoDeclareString("estimation_mode", p.estimation_mode);
+    declareVec3("sensor_mount.r_imu_xyz", p.sensor_mount.r_imu);
+    declareVec3("sensor_mount.r_depth_xyz", p.sensor_mount.r_depth);
+    declareVec3("sensor_mount.r_dvl_xyz", p.sensor_mount.r_dvl);
 
     return p;
   }

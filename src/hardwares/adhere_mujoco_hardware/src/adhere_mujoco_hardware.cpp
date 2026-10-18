@@ -28,6 +28,22 @@ std::atomic<AdhereMujocoHardware *> g_active_instance{nullptr};
 constexpr const char * kPadSiteNames[4] = {
   "pad_TL_site", "pad_TR_site", "pad_BL_site", "pad_BR_site"};
 
+// Phase 3.5 realistic sensor noise/bias/decimation defaults (CLAUDE.md Stage 2.1). Hardcoded
+// here rather than read from robot_control.yaml: AdhereMujocoHardware is a plain
+// hardware_interface::SystemInterface, not an rclcpp::Node, so it has no ROS parameter access
+// (the same reason HydroParams' own noise-unrelated constants are hardcoded defaults, only
+// overridable via MJCF <custom><numeric> entries -- see HydroParams::applyMjModelOverrides).
+constexpr double kGyroNoiseStd = 0.005;       // rad/s
+constexpr double kGyroBiasRwStd = 0.0005;     // rad/s, per-tick random-walk std
+constexpr double kAccelNoiseStd = 0.02;       // m/s^2
+constexpr double kAttNoiseStd = 0.003;        // rad, small-angle AHRS orientation noise
+constexpr double kDepthNoiseStd = 0.005;      // m
+constexpr double kDvlVelNoiseStd = 0.008;     // m/s
+constexpr double kDvlRangeNoiseStd = 0.003;   // m
+constexpr double kLoadcellNoiseStd = 0.15;    // N
+constexpr long long kDepthDecimation = 10;    // 500 / 10 = 50 Hz
+constexpr long long kDvlDecimation = 25;      // 500 / 25 = 20 Hz
+
 // Launch-time model-source override (CLAUDE.md Phase 2.12 Section 1), consulted by the next
 // configure() call. Function-local statics (lazily constructed on first call, not namespace-
 // scope globals) because they must be reachable before any AdhereMujocoHardware instance
@@ -200,6 +216,39 @@ hardware_interface::return_type AdhereMujocoHardware::configure(
     vis_bridge_->thruster_ctrl_max[i] = thruster_ctrl_max_[i];
   }
 
+  // Phase 3.5 realistic-sensor mounting sites: resolve imu_site/depth_site/dvl_site/
+  // loadcell_TL..BR exactly like the pad-site loop above, never hardcoded.
+  {
+    const auto resolveSite = [this, &mjcf_path](const char * name, Eigen::Vector3d & out) {
+      const int site_id = mj_name2id(model_, mjOBJ_SITE, name);
+      if (site_id < 0) {
+        RCLCPP_ERROR(logger(), "Site '%s' not found in MJCF '%s'", name, mjcf_path.c_str());
+        return -1;
+      }
+      out = Eigen::Vector3d(
+        model_->site_pos[3 * site_id + 0], model_->site_pos[3 * site_id + 1],
+        model_->site_pos[3 * site_id + 2]);
+      return site_id;
+    };
+    imu_site_id_ = resolveSite("imu_site", r_imu_body_);
+    depth_site_id_ = resolveSite("depth_site", r_depth_body_);
+    dvl_site_id_ = resolveSite("dvl_site", r_dvl_body_);
+    static constexpr std::array<const char *, 4> kLoadcellSiteNames = {
+      "loadcell_TL", "loadcell_TR", "loadcell_BL", "loadcell_BR"};
+    for (size_t i = 0; i < kLoadcellSiteNames.size(); ++i) {
+      loadcell_site_id_[i] = resolveSite(kLoadcellSiteNames[i], r_loadcell_body_[i]);
+    }
+    if (imu_site_id_ < 0 || depth_site_id_ < 0 || dvl_site_id_ < 0 ||
+        std::any_of(
+          loadcell_site_id_.begin(), loadcell_site_id_.end(), [](int id) { return id < 0; }))
+    {
+      mj_deleteModel(model_);
+      model_ = nullptr;
+      return hardware_interface::return_type::ERROR;
+    }
+  }
+  gyro_bias_.setZero();
+
   // Always starts in Calm Water (CLAUDE.md Phase 2.5 Stage 2.3): both plugins are constructed
   // up front and selected at runtime via setWaveMode(), never by a static launch-time param.
   calm_plugin_ = std::make_unique<CalmWaterPlugin>();
@@ -273,6 +322,31 @@ std::vector<hardware_interface::StateInterface> AdhereMujocoHardware::export_sta
     "pad_TL/v_sep", "pad_TR/v_sep", "pad_BL/v_sep", "pad_BR/v_sep"};
   for (size_t i = 0; i < kPadContactNames.size(); ++i) {
     interfaces.emplace_back("pad_contact", kPadContactNames[i], &hw_states_[kPadContact + i]);
+  }
+
+  // Phase 3.5 realistic noisy multi-rate sensors: a second, independent sensing path from the
+  // ground-truth blocks above (CLAUDE.md Stage 2.1/2.2). Never read by any FSMState directly --
+  // only RovStateEstimator inside AdhereController consumes these.
+  static constexpr std::array<const char *, 10> kImuNoisyNames = {
+    "orientation.w", "orientation.x", "orientation.y", "orientation.z",
+    "angular_velocity.x", "angular_velocity.y", "angular_velocity.z",
+    "linear_acceleration.x", "linear_acceleration.y", "linear_acceleration.z"};
+  for (size_t i = 0; i < kImuNoisyNames.size(); ++i) {
+    interfaces.emplace_back("imu_sensor_noisy", kImuNoisyNames[i], &hw_states_[kImuNoisy + i]);
+  }
+
+  interfaces.emplace_back("depth_sensor_noisy", "z", &hw_states_[kDepthNoisy]);
+
+  static constexpr std::array<const char *, 4> kDvlNoisyNames = {
+    "vel.x", "vel.y", "vel.z", "range"};
+  for (size_t i = 0; i < kDvlNoisyNames.size(); ++i) {
+    interfaces.emplace_back("dvl_sensor_noisy", kDvlNoisyNames[i], &hw_states_[kDvlNoisy + i]);
+  }
+
+  static constexpr std::array<const char *, 4> kLoadcellNoisyNames = {
+    "pad_TL/force", "pad_TR/force", "pad_BL/force", "pad_BR/force"};
+  for (size_t i = 0; i < kLoadcellNoisyNames.size(); ++i) {
+    interfaces.emplace_back("loadcell_noisy", kLoadcellNoisyNames[i], &hw_states_[kLoadcellNoisy + i]);
   }
 
   return interfaces;
@@ -467,12 +541,19 @@ hardware_interface::return_type AdhereMujocoHardware::read()
   if (step_count_ != last_accel_step_count_) {
     const double dt = model_->opt.timestep;
     Eigen::Vector3d accel_body = Eigen::Vector3d::Zero();
+    Eigen::Vector3d ang_accel_body = Eigen::Vector3d::Zero();
     if (have_prev_vel_ && dt > 0.0) {
       accel_body = R.transpose() * ((lin_vel_world - prev_lin_vel_world_) / dt);
     }
+    if (have_prev_ang_vel_ && dt > 0.0) {
+      ang_accel_body = (ang_vel_body - prev_ang_vel_body_) / dt;
+    }
     last_accel_body_ = accel_body;
+    last_ang_accel_body_ = ang_accel_body;
     prev_lin_vel_world_ = lin_vel_world;
+    prev_ang_vel_body_ = ang_vel_body;
     have_prev_vel_ = true;
+    have_prev_ang_vel_ = true;
     last_accel_step_count_ = step_count_;
   }
   hw_states_[kImu + 7] = last_accel_body_.x();
@@ -500,6 +581,73 @@ hardware_interface::return_type AdhereMujocoHardware::read()
     const double z_i = pad_yz_[i].second;
     hw_states_[kPadContact + 4 + i] =
       lin_vel_body.x() + ang_vel_body.y() * z_i - ang_vel_body.z() * y_i;
+  }
+
+  // --- Phase 3.5 realistic noisy multi-rate sensors (CLAUDE.md Stage 2.1) ---
+  // A second, independent sensing path: never derived from or fed back into the ground-truth
+  // blocks above. std::normal_distribution instances are cheap to construct (no internal
+  // state beyond the two parameters) so a single reusable standard-normal generator is used
+  // for every channel, scaled by that channel's own noise std.
+  std::normal_distribution<double> standard_normal(0.0, 1.0);
+  const auto noise = [this, &standard_normal](double std_dev) {
+    return standard_normal(rng_) * std_dev;
+  };
+
+  // IMU: gyro + accel evaluated AT the IMU mount site (lever-arm centripetal/tangential
+  // terms, zero here since r_imu_body_ == 0 for this model, but computed generally), plus
+  // slow gyro-bias random walk and small-angle-perturbed AHRS orientation.
+  gyro_bias_.x() += noise(kGyroBiasRwStd);
+  gyro_bias_.y() += noise(kGyroBiasRwStd);
+  gyro_bias_.z() += noise(kGyroBiasRwStd);
+  const Eigen::Vector3d gyro_meas = ang_vel_body + gyro_bias_ +
+    Eigen::Vector3d(noise(kGyroNoiseStd), noise(kGyroNoiseStd), noise(kGyroNoiseStd));
+  const Eigen::Vector3d lever_accel = last_ang_accel_body_.cross(r_imu_body_) +
+    ang_vel_body.cross(ang_vel_body.cross(r_imu_body_));
+  const Eigen::Vector3d accel_meas = last_accel_body_ + lever_accel +
+    Eigen::Vector3d(noise(kAccelNoiseStd), noise(kAccelNoiseStd), noise(kAccelNoiseStd));
+  const Eigen::Vector3d small_angle_eps(
+    noise(kAttNoiseStd), noise(kAttNoiseStd), noise(kAttNoiseStd));
+  const Eigen::Quaterniond dq(
+    1.0, 0.5 * small_angle_eps.x(), 0.5 * small_angle_eps.y(), 0.5 * small_angle_eps.z());
+  const Eigen::Quaterniond quat_meas = (orientation * dq).normalized();
+
+  hw_states_[kImuNoisy + 0] = quat_meas.w();
+  hw_states_[kImuNoisy + 1] = quat_meas.x();
+  hw_states_[kImuNoisy + 2] = quat_meas.y();
+  hw_states_[kImuNoisy + 3] = quat_meas.z();
+  hw_states_[kImuNoisy + 4] = gyro_meas.x();
+  hw_states_[kImuNoisy + 5] = gyro_meas.y();
+  hw_states_[kImuNoisy + 6] = gyro_meas.z();
+  hw_states_[kImuNoisy + 7] = accel_meas.x();
+  hw_states_[kImuNoisy + 8] = accel_meas.y();
+  hw_states_[kImuNoisy + 9] = accel_meas.z();
+
+  // Depth: 50Hz sample-and-hold (hw_states_ already holds the previous value between
+  // decimation boundaries -- no separate latch member needed).
+  if (step_count_ % kDepthDecimation == 0) {
+    const Eigen::Vector3d p_depth_world =
+      Eigen::Vector3d(hw_states_[kOdom + 0], hw_states_[kOdom + 1], hw_states_[kOdom + 2]) +
+      R * r_depth_body_;
+    hw_states_[kDepthNoisy] = p_depth_world.z() + noise(kDepthNoiseStd);
+  }
+
+  // DVL: 20Hz sample-and-hold, body-frame velocity at the DVL site INCLUDING the rigid-body
+  // lever-arm term v_com + omega x r_dvl, plus acoustic wall-range (world X at the DVL site).
+  if (step_count_ % kDvlDecimation == 0) {
+    const Eigen::Vector3d v_dvl_body = lin_vel_body + ang_vel_body.cross(r_dvl_body_);
+    hw_states_[kDvlNoisy + 0] = v_dvl_body.x() + noise(kDvlVelNoiseStd);
+    hw_states_[kDvlNoisy + 1] = v_dvl_body.y() + noise(kDvlVelNoiseStd);
+    hw_states_[kDvlNoisy + 2] = v_dvl_body.z() + noise(kDvlVelNoiseStd);
+    const Eigen::Vector3d p_dvl_world =
+      Eigen::Vector3d(hw_states_[kOdom + 0], hw_states_[kOdom + 1], hw_states_[kOdom + 2]) +
+      R * r_dvl_body_;
+    hw_states_[kDvlNoisy + 3] = p_dvl_world.x() + noise(kDvlRangeNoiseStd);
+  }
+
+  // Load cells: 500Hz, unilateral compression clamp (max(0, F_true + noise)).
+  for (size_t i = 0; i < kPadNames.size(); ++i) {
+    hw_states_[kLoadcellNoisy + i] =
+      std::max(0.0, hw_states_[kPadContact + i] + noise(kLoadcellNoiseStd));
   }
 
   return hardware_interface::return_type::OK;

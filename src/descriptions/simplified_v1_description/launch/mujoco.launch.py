@@ -61,6 +61,13 @@ def generate_launch_description():
         description="Generic, controller-agnostic list of controller names to load/configure/"
                      "activate in-process (CLAUDE.md Phase 3.1.1 Stage 2.2). Pass '[]' for the "
                      "former open-loop-only behavior (u=0, no FSM).")
+    declare_estimation_mode = DeclareLaunchArgument(
+        "estimation_mode", default_value="ground_truth",
+        description="Phase 3.5 dual state-acquisition mode for AdhereController's "
+                     "CtrlInterfaces::active_state: 'ground_truth' (noise-free hardware "
+                     "odometry) or 'sensor_fusion' (RovStateEstimator fusing the noisy "
+                     "multi-rate IMU/Depth/DVL/load-cell sensors; ground truth is then only "
+                     "used to fill FsmState::ground_truth_pose for offline evaluation).")
     declare_launch_teleop = DeclareLaunchArgument(
         "launch_teleop", default_value="true",
         description="If true, includes adhere_keyboard_input/launch/teleop_gcs.launch.py "
@@ -92,6 +99,7 @@ def generate_launch_description():
             "headless": headless_value,
             "pkg_description": pkg_description_value,
             "mjcf_file": mjcf_file_value,
+            "estimation_mode": context.launch_configurations["estimation_mode"],
         }
         # launch_ros cannot evaluate an empty-list ROS parameter (it can't infer the array's
         # element type with zero elements), so the key is simply omitted when empty -- the
@@ -144,6 +152,7 @@ def generate_launch_description():
             declare_xacro_file,
             declare_robot_control_yaml,
             declare_autostart_controllers,
+            declare_estimation_mode,
             declare_launch_teleop,
             adhere_mujoco_node,
             rviz,

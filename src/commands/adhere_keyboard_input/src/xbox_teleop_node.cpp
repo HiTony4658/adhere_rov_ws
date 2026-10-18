@@ -4,6 +4,7 @@
 // -- no separate timer needed, since joy_node's autorepeat_rate parameter already drives the
 // cadence (default 50Hz, see config/xbox_teleop.yaml / launch/teleop_gcs.launch.py). Also
 // edge-debounces 4 gamepad buttons into instant FsmCommand state switches on /rov/fsm_command.
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -35,6 +36,19 @@ double applyDeadzoneCurve(double raw, double deadzone, bool cubic)
   return std::copysign(scaled, raw);
 }
 
+// Phase 3.5: LT/RT trigger -> [0.0, 1.0] press magnitude with a deadzone, no sign (triggers are
+// single-sided, unlike the full-range sticks above). Most Linux xpad configs report triggers
+// resting-unpressed at +1.0 and fully-pressed at -1.0 (the same convention joy_node forwards
+// verbatim), hence the (1 - raw) / 2 remap before the deadzone.
+double applyTriggerDeadzone(double raw, double deadzone)
+{
+  const double pressed = std::clamp((1.0 - raw) / 2.0, 0.0, 1.0);
+  if (pressed <= deadzone) {
+    return 0.0;
+  }
+  return std::min((pressed - deadzone) / (1.0 - deadzone), 1.0);
+}
+
 }  // namespace
 
 class XboxTeleopNode : public rclcpp::Node
@@ -50,11 +64,15 @@ public:
     axis_yaw_ = declare_parameter<int>("axis_yaw", 0);
     axis_surge_ = declare_parameter<int>("axis_surge", 4);
     axis_sway_ = declare_parameter<int>("axis_sway", 3);
+    axis_pitch_trigger_ = declare_parameter<int>("axis_pitch_trigger", 2);  // LT
+    axis_roll_trigger_ = declare_parameter<int>("axis_roll_trigger", 5);    // RT
 
     button_passive_ = declare_parameter<int>("button_passive", 0);     // A
     button_pid_hold_ = declare_parameter<int>("button_pid_hold", 1);   // B
     button_depth_hold_ = declare_parameter<int>("button_depth_hold", 2);  // X
     button_open_loop_ = declare_parameter<int>("button_open_loop", 3);    // Y
+    button_pitch_reverse_ = declare_parameter<int>("button_pitch_reverse", 4);  // LB
+    button_roll_reverse_ = declare_parameter<int>("button_roll_reverse", 5);    // RB
 
     teleop_pub_ =
       create_publisher<adhere_control_msgs::msg::TeleopCommand>("/rov/teleop_cmd", 10);
@@ -72,6 +90,10 @@ private:
       return (index >= 0 && static_cast<size_t>(index) < msg->axes.size()) ? msg->axes[index]
                                                                             : 0.0;
     };
+    const auto buttonPressed = [&msg](int index) -> bool {
+      return index >= 0 && static_cast<size_t>(index) < msg->buttons.size() &&
+        msg->buttons[index] != 0;
+    };
 
     // Mode-2 (美国手) stick mapping (CLAUDE.md Phase 3.2 Stage 2.3): raw axis sign convention
     // matches the Linux xpad driver's default (up/left = positive) that joy_node forwards
@@ -81,13 +103,22 @@ private:
     const double heave_z = applyDeadzoneCurve(axisValue(axis_heave_), deadzone_, cubic_curve_);
     const double yaw_rate = applyDeadzoneCurve(axisValue(axis_yaw_), deadzone_, cubic_curve_);
 
+    // Phase 3.5: LT (+LB reverses) -> pitch_rate, RT (+RB reverses) -> roll_rate.
+    const double lt_val = applyTriggerDeadzone(axisValue(axis_pitch_trigger_), deadzone_);
+    const double rt_val = applyTriggerDeadzone(axisValue(axis_roll_trigger_), deadzone_);
+    const double pitch_rate = buttonPressed(button_pitch_reverse_) ? -lt_val : lt_val;
+    const double roll_rate = buttonPressed(button_roll_reverse_) ? -rt_val : rt_val;
+
     adhere_control_msgs::msg::TeleopCommand teleop_msg;
     teleop_msg.header.stamp = now();
     teleop_msg.surge_x = surge_x;
     teleop_msg.sway_y = sway_y;
     teleop_msg.heave_z = heave_z;
     teleop_msg.yaw_rate = yaw_rate;
-    teleop_msg.active = (surge_x != 0.0) || (sway_y != 0.0) || (heave_z != 0.0) || (yaw_rate != 0.0);
+    teleop_msg.pitch_rate = pitch_rate;
+    teleop_msg.roll_rate = roll_rate;
+    teleop_msg.active = (surge_x != 0.0) || (sway_y != 0.0) || (heave_z != 0.0) ||
+      (yaw_rate != 0.0) || (pitch_rate != 0.0) || (roll_rate != 0.0);
     teleop_pub_->publish(teleop_msg);
 
     publishFsmCommandOnRisingEdge(
@@ -128,10 +159,14 @@ private:
   int axis_yaw_ = 0;
   int axis_surge_ = 4;
   int axis_sway_ = 3;
+  int axis_pitch_trigger_ = 2;
+  int axis_roll_trigger_ = 5;
   int button_passive_ = 0;
   int button_pid_hold_ = 1;
   int button_depth_hold_ = 2;
   int button_open_loop_ = 3;
+  int button_pitch_reverse_ = 4;
+  int button_roll_reverse_ = 5;
 
   std::vector<int> prev_button_states_;
 

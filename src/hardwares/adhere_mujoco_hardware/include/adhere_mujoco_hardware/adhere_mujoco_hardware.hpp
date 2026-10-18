@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <memory>
+#include <random>
 #include <string>
 #include <utility>
 #include <vector>
@@ -31,8 +32,12 @@ constexpr std::array<const char *, kNumThrusters> kThrusterNames = {
   "thr_N1", "thr_N2", "thr_N3", "thr_N4", "thr_T5", "thr_T6", "thr_T7", "thr_T8"};
 constexpr std::array<const char *, 4> kPadNames = {"pad_TL", "pad_TR", "pad_BL", "pad_BR"};
 
-// 36 total state interfaces: 8 thruster readback + 10 IMU + 10 odom + 8 pad-contact.
-constexpr int kNumStates = 36;
+// 55 total state interfaces: 8 thruster readback + 10 IMU (ground truth) + 10 odom (ground
+// truth) + 8 pad-contact (ground truth) + 10 noisy IMU + 1 noisy depth + 4 noisy DVL
+// (vel xyz + range) + 4 noisy load cells (CLAUDE.md Phase 3.5 Stage 2.1 dual-mode
+// state-acquisition). The noisy blocks are a second, independent sensing path -- never
+// derived from or mixed into the ground-truth blocks above.
+constexpr int kNumStates = 55;
 
 // AdhereMujocoHardware: a 500Hz hardware_interface::SystemInterface (ROS 2 Foxy) that owns
 // the master MuJoCo mjModel/mjData, the FossenHydrodynamics port, the active
@@ -104,9 +109,13 @@ private:
   enum StateOffset
   {
     kThrusterReadback = 0,       // [0, 8)
-    kImu = kNumThrusters,        // [8, 18)
-    kOdom = kImu + 10,           // [18, 28)
-    kPadContact = kOdom + 10,    // [28, 36)
+    kImu = kNumThrusters,        // [8, 18)       ground truth
+    kOdom = kImu + 10,           // [18, 28)      ground truth
+    kPadContact = kOdom + 10,    // [28, 36)      ground truth
+    kImuNoisy = kPadContact + 8,  // [36, 46)     quat w/x/y/z, gyro x/y/z, accel x/y/z
+    kDepthNoisy = kImuNoisy + 10,  // [46, 47)    world Z, 50Hz sample-and-hold
+    kDvlNoisy = kDepthNoisy + 1,   // [47, 51)    vel x/y/z + wall range, 20Hz sample-and-hold
+    kLoadcellNoisy = kDvlNoisy + 4,  // [51, 55)  pad_TL/TR/BL/BR force, 500Hz
   };
 
   mjModel * model_ = nullptr;
@@ -144,6 +153,31 @@ private:
   // model_->site_pos[pad_*_site] instead of being hardcoded (CLAUDE.md Phase 2.6 Stage 2.1
   // bug #6): used by read()'s v_sep,i = v_x,b + omega_y*z_i - omega_z*y_i formula.
   std::array<std::pair<double, double>, 4> pad_yz_{};
+
+  // Phase 3.5 realistic-sensor mounting lever arms, body frame relative to CoM, resolved at
+  // configure() time from mjcf/rov_wall.xml's imu_site/depth_site/dvl_site/loadcell_* sites
+  // (same pattern as pad_yz_ above -- never hardcoded).
+  int imu_site_id_ = -1;
+  int depth_site_id_ = -1;
+  int dvl_site_id_ = -1;
+  std::array<int, 4> loadcell_site_id_{};
+  Eigen::Vector3d r_imu_body_ = Eigen::Vector3d::Zero();
+  Eigen::Vector3d r_depth_body_ = Eigen::Vector3d::Zero();
+  Eigen::Vector3d r_dvl_body_ = Eigen::Vector3d::Zero();
+  std::array<Eigen::Vector3d, 4> r_loadcell_body_{};
+
+  // Sensor-noise RNG (Phase 3.5): a single deterministic-seed generator shared by every noisy
+  // channel computed in read(). gyro_bias_ is a slow random-walk state (CLAUDE.md Stage 2.1
+  // `gyro_bias_rw_std`), reset to zero on configure().
+  std::mt19937 rng_{std::random_device{}()};
+  Eigen::Vector3d gyro_bias_ = Eigen::Vector3d::Zero();
+
+  // Finite-difference body-frame angular acceleration (Phase 3.5): needed for the IMU's
+  // lever-arm centripetal/tangential terms when r_imu_body_ != 0. Latched alongside
+  // last_accel_body_ under the same step_count_ paused-sim guard.
+  Eigen::Vector3d prev_ang_vel_body_ = Eigen::Vector3d::Zero();
+  Eigen::Vector3d last_ang_accel_body_ = Eigen::Vector3d::Zero();
+  bool have_prev_ang_vel_ = false;
 
   // Geometry-driven hydrodynamics engine (CLAUDE.md Phase 2.10 Section B): built once in
   // configure() from model_'s own geoms via HydroGeometryModel::buildFromMjModel(), cached

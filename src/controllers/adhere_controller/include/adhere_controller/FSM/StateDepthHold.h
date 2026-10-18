@@ -32,8 +32,8 @@ public:
 
   FSMStateName checkChange() override;
 
-  // Reports [0, 0, target_z_, 0] -- only Z is a meaningful reference for this state.
-  std::array<double, 4> targetPose() const override;
+  // Reports [0, 0, target_z_, 0, 0, 0] -- only Z is a meaningful reference for this state.
+  std::array<double, 6> targetPose() const override;
 
 private:
   // Damped Moore-Penrose pseudoinverse of the 6x8 thruster allocation matrix B (shared

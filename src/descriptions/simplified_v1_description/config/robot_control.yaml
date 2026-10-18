@@ -114,4 +114,33 @@ adhere_mujoco_node:
     pid_hold.kp_att: [40.0, 40.0, 25.0]
     pid_hold.ki_att: [2.0, 2.0, 2.0]
     pid_hold.kd_att: [15.0, 15.0, 12.0]
-    pid_hold.max_teleop_vel: [0.25, 0.25, 0.25, 0.6]  # [vx_max, vy_max, vz_max, omega_z_max]
+    # [vx_max, vy_max, vz_max, omega_x_roll_max, omega_y_pitch_max, omega_z_yaw_max]
+    pid_hold.max_teleop_vel: [0.25, 0.25, 0.25, 0.4, 0.4, 0.6]
+    pid_hold.max_tilt_deg: 45.0  # Roll/pitch target clamp (CLAUDE.md Phase 3.5 Stage 2.3)
+
+    # --- Phase 3.5: dual state-acquisition (ground_truth / sensor_fusion) ---
+    # "ground_truth": CtrlInterfaces::active_state is populated directly from noise-free
+    # hardware odometry (legacy Phase 2-3.4 behavior). "sensor_fusion": active_state comes
+    # exclusively from RovStateEstimator fusing the noisy multi-rate sensors; ground truth is
+    # then only used by AdhereController to fill FsmState::ground_truth_pose for offline
+    # evaluation, never fed into any FSMState. (Raw sensor noise std/decimation constants are
+    # NOT controller parameters -- they are generated hardware-side in
+    # AdhereMujocoHardware::read() and documented there, mirroring HydroParams' own
+    # hardcoded-default-plus-MJCF-override precedent; RovStateEstimator only needs the lever
+    # arms below, its correction gains are fixed constants tuned against the CLAUDE.md spec's
+    # noise magnitudes.)
+    #
+    # NOTE: `estimation_mode` is deliberately NOT a key in this file. mujoco.launch.py's
+    # `estimation_mode` launch argument sets it via a wildcard "/**:" parameter override, and
+    # ROS 2's parameter-merge rule gives an exact-node-name match (this file's
+    # "adhere_mujoco_node:" top-level key, after the blanket node-rename remap documented
+    # above) priority over a wildcard match REGARDLESS of command-line order -- so a key
+    # defined here would silently always win over the launch argument. ModelParams' compiled-in
+    # default ("ground_truth") is the fallback when no launch override is given.
+
+    # Sensor mounting lever arms, body frame relative to CoM (must match mjcf/rov_wall.xml
+    # imu_site/depth_site/dvl_site positions): used by RovStateEstimator's lever-arm
+    # compensation formulas.
+    sensor_mount.r_imu_xyz: [0.0, 0.0, 0.0]
+    sensor_mount.r_depth_xyz: [0.0, 0.0, 0.0]
+    sensor_mount.r_dvl_xyz: [0.0, 0.0, -0.20]

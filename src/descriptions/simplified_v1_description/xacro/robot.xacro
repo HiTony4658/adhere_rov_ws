@@ -89,4 +89,34 @@
   <xacro:thruster_marker name="thr_T7" x="0.0" y="0.25" z="-0.15"/>
   <xacro:thruster_marker name="thr_T8" x="0.0" y="-0.25" z="-0.15"/>
 
+  <!-- Phase 3.5 sensor mounting markers (TF only, no physics): matches imu_site/depth_site/
+       dvl_site/loadcell_*_site positions in mjcf/rov_wall.xml exactly. -->
+  <material name="sensor_green">
+    <color rgba="0.2 1.0 0.2 1.0"/>
+  </material>
+
+  <xacro:macro name="sensor_marker" params="name x y z">
+    <link name="${name}">
+      <visual>
+        <geometry>
+          <sphere radius="0.015"/>
+        </geometry>
+        <material name="sensor_green"/>
+      </visual>
+    </link>
+    <joint name="base_to_${name}" type="fixed">
+      <parent link="base_link"/>
+      <child link="${name}"/>
+      <origin xyz="${x} ${y} ${z}" rpy="0 0 0"/>
+    </joint>
+  </xacro:macro>
+
+  <xacro:sensor_marker name="imu_link" x="0.0" y="0.0" z="0.0"/>
+  <xacro:sensor_marker name="depth_link" x="0.0" y="0.0" z="0.0"/>
+  <xacro:sensor_marker name="dvl_link" x="0.0" y="0.0" z="-0.20"/>
+  <xacro:sensor_marker name="loadcell_TL_link" x="-0.1" y="0.25" z="0.15"/>
+  <xacro:sensor_marker name="loadcell_TR_link" x="-0.1" y="-0.25" z="0.15"/>
+  <xacro:sensor_marker name="loadcell_BL_link" x="-0.1" y="0.25" z="-0.15"/>
+  <xacro:sensor_marker name="loadcell_BR_link" x="-0.1" y="-0.25" z="-0.15"/>
+
 </robot>

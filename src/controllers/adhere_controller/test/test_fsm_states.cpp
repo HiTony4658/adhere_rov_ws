@@ -65,37 +65,17 @@ public:
       loaned_cmd_.emplace_back(cmd_handles_.back());
       ci.thruster_command_interface_.emplace_back(loaned_cmd_.back());
     }
-    // State interfaces: rov_odom/{pos.x,y,z, quat.w,x,y,z, vel_body.x,y,z} (indices 0..9,
-    // matching adhere_controller.cpp's documented CtrlInterfaces layout).
-    static constexpr std::array<const char *, 10> kOdomSuffixes = {
-      "pos.x", "pos.y", "pos.z", "quat.w", "quat.x", "quat.y", "quat.z", "vel_body.x",
-      "vel_body.y", "vel_body.z"};
-    for (int i = 0; i < 10; ++i) {
-      state_handles_.emplace_back("rov_odom", kOdomSuffixes[i], &odom_[i]);
-      loaned_state_.emplace_back(state_handles_.back());
-      ci.odom_state_interface_.emplace_back(loaned_state_.back());
-    }
-    // State interfaces: imu_sensor/{orientation.*, angular_velocity.*, linear_acceleration.*}
-    // (indices 0..9); only angular_velocity (4..6) is read by any state under test, held at 0.
-    static constexpr std::array<const char *, 10> kImuSuffixes = {
-      "orientation.w", "orientation.x", "orientation.y", "orientation.z", "angular_velocity.x",
-      "angular_velocity.y", "angular_velocity.z", "linear_acceleration.x",
-      "linear_acceleration.y", "linear_acceleration.z"};
-    for (int i = 0; i < 10; ++i) {
-      state_handles_.emplace_back("imu_sensor", kImuSuffixes[i], &imu_[i]);
-      loaned_state_.emplace_back(state_handles_.back());
-      ci.imu_state_interface_.emplace_back(loaned_state_.back());
-    }
-
-    odom_[3] = 1.0;  // quat.w = 1 (identity orientation, held fixed for the test's lifetime)
   }
 
+  // Phase 3.5: FSM states now read ONLY ctrl_interfaces_.active_state (no LoanedStateInterface
+  // handles needed for pose/velocity -- this fake plant writes straight into the same struct
+  // AdhereController would populate from ground truth or RovStateEstimator).
   void setPosition(double x, double y, double z)
   {
     pos_ = Vec3(x, y, z);
-    odom_[0] = x;
-    odom_[1] = y;
-    odom_[2] = z;
+    ci.active_state.pos_w[0] = x;
+    ci.active_state.pos_w[1] = y;
+    ci.active_state.pos_w[2] = z;
   }
 
   // Advances the point-mass plant by dt using the thruster commands the state under test just
@@ -117,12 +97,12 @@ public:
     vel_ += accel * dt;
     pos_ += vel_ * dt;
 
-    odom_[0] = pos_.x();
-    odom_[1] = pos_.y();
-    odom_[2] = pos_.z();
-    odom_[7] = vel_.x();
-    odom_[8] = vel_.y();
-    odom_[9] = vel_.z();
+    ci.active_state.pos_w[0] = pos_.x();
+    ci.active_state.pos_w[1] = pos_.y();
+    ci.active_state.pos_w[2] = pos_.z();
+    ci.active_state.vel_body[0] = vel_.x();
+    ci.active_state.vel_body[1] = vel_.y();
+    ci.active_state.vel_body[2] = vel_.z();
   }
 
   const Vec3 & position() const { return pos_; }
@@ -131,13 +111,9 @@ public:
 
 private:
   std::array<double, 8> thr_cmd_{};
-  std::array<double, 10> odom_{};
-  std::array<double, 10> imu_{};
 
   std::deque<CommandInterface> cmd_handles_;
-  std::deque<StateInterface> state_handles_;
   std::deque<LoanedCommandInterface> loaned_cmd_;
-  std::deque<LoanedStateInterface> loaned_state_;
 
   Vec3 pos_ = Vec3::Zero();
   Vec3 vel_ = Vec3::Zero();

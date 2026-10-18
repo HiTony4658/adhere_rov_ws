@@ -22,7 +22,7 @@ void StateDepthHold::enter()
   // Phase 3.1 Stage 2.2 says must reset the integrator; live target_z_ updates while already in
   // this state never call enter() again. Seeds target_z_ from the ROV's current world Z so the
   // hull does not lurch toward a stale leftover setpoint on entry.
-  target_z_ = ctrl_interfaces_.odom_state_interface_[2].get().get_value();
+  target_z_ = ctrl_interfaces_.active_state.pos_w[2];
   integral_z_ = 0.0;
 }
 
@@ -30,23 +30,16 @@ void StateDepthHold::run(const rclcpp::Time & /*time*/, const rclcpp::Duration &
 {
   const double dt = period.seconds();
 
-  const double pos_z = ctrl_interfaces_.odom_state_interface_[2].get().get_value();
-  const Quat quat(
-    ctrl_interfaces_.odom_state_interface_[3].get().get_value(),
-    ctrl_interfaces_.odom_state_interface_[4].get().get_value(),
-    ctrl_interfaces_.odom_state_interface_[5].get().get_value(),
-    ctrl_interfaces_.odom_state_interface_[6].get().get_value());
-  const Vec3 vel_body(
-    ctrl_interfaces_.odom_state_interface_[7].get().get_value(),
-    ctrl_interfaces_.odom_state_interface_[8].get().get_value(),
-    ctrl_interfaces_.odom_state_interface_[9].get().get_value());
-  const Vec3 omega_body(
-    ctrl_interfaces_.imu_state_interface_[4].get().get_value(),
-    ctrl_interfaces_.imu_state_interface_[5].get().get_value(),
-    ctrl_interfaces_.imu_state_interface_[6].get().get_value());
+  // Phase 3.5 strict ground-truth isolation: reads ONLY ctrl_interfaces_.active_state, which
+  // AdhereController populates from either ground truth or RovStateEstimator depending on
+  // estimation_mode -- this state has no way to tell which.
+  const auto & active = ctrl_interfaces_.active_state;
+  const double pos_z = active.pos_w[2];
+  const Vec3 rpy(active.rpy[0], active.rpy[1], active.rpy[2]);
+  const Vec3 vel_body(active.vel_body[0], active.vel_body[1], active.vel_body[2]);
+  const Vec3 omega_body(active.omega_body[0], active.omega_body[1], active.omega_body[2]);
 
-  const RotMat r = quatToRotMat(quat);
-  const Vec3 rpy = rotMatToRPY(r);
+  const RotMat r = rpyToRotMat(rpy);
   const double vel_z_world = (r * vel_body)(2);
 
   // Discrete setpoint (CLAUDE.md Phase 3.2 Stage 2.1): edge-detected via setpoint_seq so the
@@ -105,9 +98,9 @@ FSMStateName StateDepthHold::checkChange()
   return checkFsmCommandChange();
 }
 
-std::array<double, 4> StateDepthHold::targetPose() const
+std::array<double, 6> StateDepthHold::targetPose() const
 {
-  return {0.0, 0.0, target_z_, 0.0};
+  return {0.0, 0.0, target_z_, 0.0, 0.0, 0.0};
 }
 
 }  // namespace adhere_controller

@@ -11,8 +11,12 @@ xbox_teleop_node:
     axis_yaw: 0     # Left stick horizontal (LX): left(+) -> yaw_rate > 0 (+omega_z, CCW)
     axis_surge: 4   # Right stick vertical (RY):  up(+)   -> surge_x > 0 (toward the wall, -X body)
     axis_sway: 3    # Right stick horizontal (RX): right/left -> sway_y
+    axis_pitch_trigger: 2  # LT (Phase 3.5): pressed -> pitch_rate > 0 (+omega_y); LB reverses sign
+    axis_roll_trigger: 5   # RT (Phase 3.5): pressed -> roll_rate > 0 (+omega_x); RB reverses sign
 
     button_passive: 0     # A -> PASSIVE (instant safety zero-thrust)
     button_pid_hold: 1    # B -> PID_HOLD
     button_depth_hold: 2  # X -> DEPTH_HOLD
     button_open_loop: 3   # Y -> OPEN_LOOP
+    button_pitch_reverse: 4  # LB (Phase 3.5): held while pressing LT -> pitch_rate < 0
+    button_roll_reverse: 5   # RB (Phase 3.5): held while pressing RT -> roll_rate < 0

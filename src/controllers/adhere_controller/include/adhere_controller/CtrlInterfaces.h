@@ -32,6 +32,8 @@ struct ControlInputs
   std::atomic<double> setpoint_target_x{0.0};    // m, world frame
   std::atomic<double> setpoint_target_y{0.0};    // m, world frame
   std::atomic<double> setpoint_target_z{0.5};    // m, world frame
+  std::atomic<double> setpoint_target_roll{0.0};   // rad (Phase 3.5)
+  std::atomic<double> setpoint_target_pitch{0.0};  // rad (Phase 3.5)
   std::atomic<double> setpoint_target_yaw{0.0};  // rad
 
   // /rov/teleop_cmd (TeleopCommand.msg): continuous Mode-2 (美国手) joystick inputs in
@@ -43,30 +45,45 @@ struct ControlInputs
   std::atomic<double> teleop_sway_y{0.0};
   std::atomic<double> teleop_heave_z{0.0};
   std::atomic<double> teleop_yaw_rate{0.0};
+  std::atomic<double> teleop_pitch_rate{0.0};  // Phase 3.5: Xbox LT/LB
+  std::atomic<double> teleop_roll_rate{0.0};   // Phase 3.5: Xbox RT/RB
   std::atomic<bool> teleop_active{false};
   std::atomic<double> teleop_last_rx_time_sec{0.0};
 };
 
+// Phase 3.5 strict ground-truth isolation (CLAUDE.md Stage 2.3): the ONLY pose/velocity/
+// contact data any FSMState may read. Populated once per 500Hz tick by AdhereController,
+// either copied directly from ground-truth hardware state interfaces ("ground_truth" mode) or
+// from RovStateEstimator's fused output ("sensor_fusion" mode) -- FSMState has no way to tell
+// which, and no access to the raw ground-truth hardware interfaces at all.
+struct ActiveState
+{
+  double pos_w[3] = {0.0, 0.0, 0.0};        // world-frame CoM position [x, y, z]
+  double rpy[3] = {0.0, 0.0, 0.0};          // [roll, pitch, yaw], rad
+  double vel_body[3] = {0.0, 0.0, 0.0};     // body-frame linear velocity
+  double omega_body[3] = {0.0, 0.0, 0.0};   // body-frame angular velocity
+  double pad_force[4] = {0.0, 0.0, 0.0, 0.0};  // TL, TR, BL, BR normal contact force
+  double v_sep[4] = {0.0, 0.0, 0.0, 0.0};      // TL, TR, BL, BR separation velocity
+};
+
 // Zero-copy FSM/hardware bridge, modeled after quadruped_ros2_control's CtrlInterfaces: holds
-// LoanedCommandInterface/LoanedStateInterface references bound by AdhereController's
-// on_activate(), read/written directly by FSMState::run() implementations with no DDS
-// round-trip. Slot order within each vector matches adhere_mujoco_hardware's documented layout
-// (CLAUDE.md Sec.3/6): thrusters as thr_N1..thr_N4, thr_T5..thr_T8; imu as orientation.w/x/y/z,
-// angular_velocity.x/y/z, linear_acceleration.x/y/z; odom as pos.x/y/z, quat.w/x/y/z,
-// vel_body.x/y/z; pad_contact as force TL/TR/BL/BR then v_sep TL/TR/BL/BR.
+// LoanedCommandInterface references bound by AdhereController's on_activate(), written
+// directly by FSMState::run() implementations with no DDS round-trip. Slot order within
+// thruster_command_interface_ matches adhere_mujoco_hardware's documented layout (CLAUDE.md
+// Sec.3/6): thr_N1..thr_N4, thr_T5..thr_T8. Ground-truth hardware state interfaces
+// (imu_state_interface_/odom_state_interface_/pad_contact_state_interface_) are deliberately
+// NOT members of this struct -- they are bound as private AdhereController members instead
+// (see adhere_controller.hpp) and never handed to any FSMState; active_state below is the sole
+// read path.
 struct CtrlInterfaces
 {
   std::vector<std::reference_wrapper<hardware_interface::LoanedCommandInterface>>
     thruster_command_interface_;  // size 8
 
   std::vector<std::reference_wrapper<hardware_interface::LoanedStateInterface>>
-    thruster_state_interface_;  // size 8
-  std::vector<std::reference_wrapper<hardware_interface::LoanedStateInterface>>
-    imu_state_interface_;  // size 10
-  std::vector<std::reference_wrapper<hardware_interface::LoanedStateInterface>>
-    odom_state_interface_;  // size 10
-  std::vector<std::reference_wrapper<hardware_interface::LoanedStateInterface>>
-    pad_contact_state_interface_;  // size 8
+    thruster_state_interface_;  // size 8 (effort readback only, not pose/velocity -- harmless)
+
+  ActiveState active_state;
 
   ControlInputs control_inputs_;
   int frequency_ = 500;
@@ -77,9 +94,6 @@ struct CtrlInterfaces
   {
     thruster_command_interface_.clear();
     thruster_state_interface_.clear();
-    imu_state_interface_.clear();
-    odom_state_interface_.clear();
-    pad_contact_state_interface_.clear();
   }
 };
 

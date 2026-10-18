@@ -1626,3 +1626,158 @@ use_rviz:=false launch_teleop:=false`（默认 `autostart_controllers`）真实
 --controller-manager /adhere_mujoco_node` 显示 `active`），全部 4 个
 `/rov/*` 话题存在。追加 `autostart_controllers:="[]"` 覆盖后同一条命令同样
 无错误启动且 0 个控制器加载，确认两种历史行为都可从这一份启动文件复现。
+
+## Phase 3.5（2026-10-18）：双重状态获取模式（`ground_truth` / `sensor_fusion`）与 Xbox 扳机俯仰/横滚遥操作
+
+### 动机
+
+此前 `AdhereMujocoHardware` 只暴露无噪声地面真值（`imu_sensor`/`rov_odom`/
+`pad_contact`），`CtrlInterfaces` 把这份地面真值原样交给每一个 `FSMState`。
+真实 Jetson 部署时不存在地面真值——只有安装在不同机体位置、采样率各异、带
+噪声的 IMU/深度计/DVL/接触垫载荷传感器。本阶段新增与地面真值完全独立的第二
+条噪声多速率传感路径，新增 `RovStateEstimator` 500Hz 融合，并**严格禁止**
+地面真值在 `sensor_fusion` 模式下进入任何 `FSMState::run()`；同时把 Xbox
+遥操作从 4-DOF 补全为 6-DOF（左扳机 LT/LB 控制俯仰角速度，右扳机 RT/RB
+控制横滚角速度）。
+
+### `adhere_control_msgs`：消息 4 话题契约扩展为 6-DOF
+
+`TeleopCommand.msg` 新增 `float64 pitch_rate`/`float64 roll_rate`；
+`SetpointCommand.msg` 新增 `float64 target_roll`/`float64 target_pitch`；
+`FsmState.msg` 把原 4 维 `target_pose`/`actual_pose` 重做为 `string
+estimation_mode` + `float64[6] target_pose` + `float64[6] estimated_pose`
++ `float64[6] ground_truth_pose`（均为 `[x,y,z,roll,pitch,yaw]`）——
+`estimated_pose` 是控制器实际使用的状态（地面真值或融合估计，取决于
+`estimation_mode`），`ground_truth_pose` 仅供离线评估参考，从不反馈进控制环。
+
+### `simplified_v1_description`：传感器安装位 + 启动参数
+
+`mjcf/rov_wall.xml` 新增 7 个 `<site>`：`imu_site`/`depth_site`（质心
+`(0,0,0)`）、`dvl_site`（机体底面 `(0,0,-0.20)`）、`loadcell_TL/TR/BL/BR`
+（与贴垫同坐标 `(-0.10,±0.25,±0.15)`）；`xacro/robot.xacro` 新增对应的
+`imu_link`/`depth_link`/`dvl_link`/`loadcell_*_link` 静态 TF 标记（纯可视化，
+无物理）。`config/robot_control.yaml` 新增 `sensor_mount.r_imu_xyz/
+r_depth_xyz/r_dvl_xyz`（供 `RovStateEstimator` 的杠杆臂补偿公式使用）、
+`pid_hold.max_teleop_vel` 由 4 元扩展为 6 元（含俯仰/横滚速率上限）、
+`pid_hold.max_tilt_deg: 45.0`。**关键发现**：`estimation_mode` 最初也被写进
+`robot_control.yaml`（顶层键 `adhere_mujoco_node:`），导致 `mujoco.launch.py`
+的 `estimation_mode:=sensor_fusion` 启动参数被静默忽略——ROS 2
+参数合并规则是"精确节点名匹配优先于通配符 `/**:` 匹配，且与命令行顺序无关"，
+而 `ros2 launch` 的 `Node` 动作把 Python dict 形式的覆盖参数编译成通配符
+`/**:` 临时 YAML，天然在精确匹配面前总是输（无论列表顺序）。修复方式：把
+`estimation_mode` 从 `robot_control.yaml` 中整条删除（只保留在 YAML 里写明
+"为什么不能写在这里"的说明注释），改为完全依赖
+`mujoco.launch.py` 新增的 `estimation_mode` 启动参数（默认
+`"ground_truth"`）与 `ModelParams` 的编译期默认值。该发现同时解释了为什么
+`headless`/`pkg_description`/`mjcf_file` 这几个既有的 launch 覆盖参数从未
+触发过同样的 bug——它们从未在 `robot_control.yaml` 里重复声明过同名键。
+
+### `adhere_mujoco_hardware`：独立的噪声多速率传感路径
+
+`hw_states_` 从 36 维扩容到 55 维：新增 `kImuNoisy`（10：四元数+陀螺+加计）、
+`kDepthNoisy`（1）、`kDvlNoisy`（4：速度 xyz + 声学测距）、`kLoadcellNoisy`
+（4）。`configure()` 新增 `imu_site_id_`/`depth_site_id_`/`dvl_site_id_`/
+`loadcell_site_id_[4]` 解析（与既有 `pad_yz_` 解析完全同构，从不硬编码）。
+`read()` 新增：IMU 陀螺=真值角速度+随机游走偏置+高斯噪声（`gyro_bias_rw_std`
+每 tick 游走一次）、加计=既有有限差分线加速度（含杠杆臂离心/切向项，当前模型
+`r_imu=0` 故恒为零，但公式保持通用）+噪声、姿态=真值四元数叠加小角度高斯
+扰动四元数；深度计/DVL 按 `step_count_ % decimation == 0`（`50Hz`/`20Hz`）
+采样保持（ZOH，直接复用 `hw_states_` 自身做保持存储，无需额外成员）；
+载荷传感器=既有真值贴垫力+高斯噪声，钳制 `max(0, ·)`。噪声标准差/偏置游走
+标准差/采样保持周期全部硬编码在 `adhere_mujoco_hardware.cpp` 匿名命名空间常量
+里（镜像 `HydroParams` 的"编译期默认值 + 可选 MJCF 覆盖"先例的文档注释，本阶段
+未实现覆盖机制），因为这个硬件插件本身不是 `rclcpp::Node`，没有 ROS 参数
+读取能力。`xacro/ros2_control.xacro` 新增 `imu_sensor_noisy`/
+`depth_sensor_noisy`/`dvl_sensor_noisy`/`loadcell_noisy` 4 个 `<sensor>`
+声明（8 command + 55 state interface）。**调试记录**：该文件顶部注释里用
+`--` 分隔小标题（如 `"... ground truth"`），触发了 XML 规范对注释内容禁止
+出现字面 `--` 的硬性限制（`xml.dom.minidom`/`xacro` 解析报
+`not well-formed (invalid token)`），改用 `,` 分隔后解决——纯 XML/MJCF 文件的
+注释与 YAML `#` 注释的转义规则不同，不能混用习惯写法。
+
+### `adhere_controller`：`RovStateEstimator` + 严格地面真值隔离
+
+新增 `include/adhere_controller/estimator/RovStateEstimator.h`（纯数学头文件，
+无 ROS/MuJoCo 依赖，风格与 `MultiRateDecimator.h` 一致）：持有
+`p_hat_world_/v_hat_body_/omega_hat_body_/q_hat_` 四元数姿态表示；
+`predict()` 用噪声陀螺积分四元数+噪声加计死推算机体速度/世界位置；
+`correctAttitude()` 每 tick 用噪声 IMU 姿态四元数做符号对齐的 nlerp 互补修正；
+`correctDepth()`/`correctDvl()`（含精确杠杆臂补偿
+`y_v_com = v_dvl_meas - omega_hat x r_dvl`）仅在采样保持值真正变化时触发修正
+（内部自带"新样本"边沿检测，调用方无需知道硬件侧的 `50Hz`/`20Hz` 抽取相位）。
+**设计取舍（已记录供复核）**：实现的是按通道解耦的固定增益（指数滑动平均
+稳态 Kalman 形式）滤波器，而非单一联合协方差 EKF——增益用稳态方差公式
+`Var(y_hat) = K/(2-K) * Var(meas)` 从 CLAUDE.md 给定的噪声标准差解析选取
+（如 DVL `K=0.5` 对 `0.008 m/s` 输入噪声给出约 `0.0046 m/s` 稳态输出标准差），
+在 `test_sensor_fusion_and_teleop.cpp` 中验证满足 `<0.015 m/s`/`<15mm`/
+`<1.0deg` RMSE 契约，用户已确认该工程简化可接受。
+
+`CtrlInterfaces.h` 删除 `odom_state_interface_`/`imu_state_interface_`/
+`pad_contact_state_interface_`（地面真值）三个成员，新增 `ActiveState`
+（`pos_w/rpy/vel_body/omega_body/pad_force/v_sep`）结构体与
+`active_state` 公开成员——这是 `FSMState` 能读到的唯一位姿/速度/接触力来源。
+`adhere_controller.hpp` 把原本写进 `CtrlInterfaces` 的地面真值
+`LoanedStateInterface` 绑定改为 `AdhereController` 自己的私有成员
+（`gt_imu_state_interface_`/`gt_odom_state_interface_`/
+`gt_pad_contact_state_interface_`），并新增 4 个噪声传感器私有绑定
+（`noisy_*_state_interface_`）。`update()` 在每个 500Hz tick 的内环门控**之前**
+读取地面真值到局部变量；若 `estimation_mode=="sensor_fusion"`，驱动
+`estimator_.predict()/correctAttitude()/correctDepth()/correctDvl()` 并把
+融合结果写入 `active_state`；否则直接拷贝地面真值。地面真值局部变量**只**
+用于填充外环发布的 `FsmState::ground_truth_pose`，从不写入 `active_state`。
+`FsmState` 发布块新增 `estimation_mode` 字符串与 6 维 `estimated_pose`/
+`ground_truth_pose`。
+
+`FSMState.h::targetPose()` 从 4 维扩为 6 维；`StateDepthHold`/`StatePidHold`
+的所有位姿/速度读取从 `ci.odom_state_interface_[i].get().get_value()` 改为
+`ci.active_state.pos_w[i]`/`.rpy[i]` 等（新增 `mathTools.h::rpyToRotMat()`，
+因为 `ActiveState` 存 RPY 而非四元数）。`StateOpenLoop` 把
+`teleop_roll_rate`/`teleop_pitch_rate` 映射为 `Tx=max_wrench[3]*roll_rate`/
+`Ty=max_wrench[4]*pitch_rate`（这两个 `max_wrench` 分量此前已存在但从未使用）。
+`StatePidHold` 新增 `phi_d_`/`theta_d_` 保持目标，摇杆/扳机推动期间按
+`max_teleop_vel[3]/[4]` 积分并钳制在 `±pid_hold.max_tilt_deg`，姿态误差项从
+仅含 yaw 扩展为全部 3 轴；`SetpointCommand` 的 `mode==4` 边沿检测同时消费
+`setpoint_target_roll/pitch`。`ModelParams.h` 新增 `SensorMount`
+（`r_imu/r_depth/r_dvl`）、`PidHoldGains::max_tilt_deg`，
+`max_teleop_vel` 由 `std::array<double,4>` 扩为 `<double,6>`。
+
+### `adhere_keyboard_input`：LT/RT 俯仰/横滚遥操作 + 控制台 roll/pitch/reset
+
+`xbox_teleop_node.cpp` 新增 `applyTriggerDeadzone()`（扳机单侧行程 `[静止
++1.0, 完全按下-1.0]` 先做 `(1-raw)/2` 归一化到 `[0,1]` 再应用死区，与摇杆的
+双侧 `[-1,1]` 约定不同）、`axis_pitch_trigger`(LT,默认2)/`axis_roll_trigger`
+(RT,默认5)/`button_pitch_reverse`(LB,默认4)/`button_roll_reverse`(RB,默认5)
+5 个新参数；`pitch_rate`/`roll_rate` = LB/RB 按住时取负、否则取正的 LT/RT
+幅值。`state_cmd_console_node.cpp` 的 `mode==4` 分支扩展 `roll <deg>`/
+`pitch <deg>`/`reset`（roll/pitch 归零，x/y/z/yaw 原样保留）输入解析，
+"Actual"/"Target" 显示扩展为 6 项；`FsmState` 订阅回调改用
+`msg->estimated_pose`（而非已删除的 `actual_pose`）填充本地显示缓存。
+
+### 验证结果
+
+`export PATH=/usr/bin:$PATH && colcon build --symlink-install`（全部 5 个包）
+**零警告零错误**。`colcon test`：新增的 `test_sensor_fusion_and_teleop`
+（8/8：DVL 杠杆臂补偿收敛性、`StateDepthHold`/`StatePidHold` 纯
+`sensor_fusion` 闭环跟踪、LT/RT 触发器映射单元测试、`StateOpenLoop`/
+`StatePidHold` 俯仰/横滚映射）与既有 `test_fsm_states`（3/3，已改写为直接写
+`ci.active_state` 而非假 `LoanedStateInterface`）、`test_multirate_decimator`
+（4/4）、`test_thruster_allocator`（3/3）、`test_fossen_hydrodynamics_geometry`
+（26/26）、`test_rhombic_kern_and_thruster_model`（9/9）**全部通过**；仅剩
+Phase 2.14 起已记录的"全仓库缺版权头"等预先存在的
+`copyright`/`cpplint`/`cppcheck`/`uncrustify`/`flake8`/`pep257`/`xmllint`
+（`adhere_control_msgs/package.xml` 的既有 schema 问题，与本阶段无关）
+style-lint 失败。
+
+真实 MuJoCo 闭环（`ros2 launch simplified_v1_description mujoco.launch.py
+headless:=true use_rviz:=false launch_teleop:=false
+estimation_mode:=sensor_fusion`，经 `rclpy` 脚本驱动）：`DEPTH_HOLD` +
+`SetpointCommand{target_z=-3.5}` 收敛后 `estimated_pose.z`/`ground_truth_pose.z`
+均稳定在 `-3.50 ±0.01m` 附近且彼此互差 `<3mm`，`/rov/fsm_state` 的
+`estimation_mode` 字段正确报告 `"sensor_fusion"`（未传参时默认
+`"ground_truth"`），确认本阶段的 dual-mode 契约与 `estimation_mode` 启动参数
+均在真实闭环中生效，而非仅通过纯 C++ 单元测试验证。
+
+`grep -rn "gt_odom_state_interface_\|gt_imu_state_interface_\|
+gt_pad_contact_state_interface_" src/controllers/adhere_controller/{src,
+include}` 隔离审计：全部匹配均位于 `adhere_controller.cpp`/`.hpp`，
+`FSM/*.cpp`/`FSM/*.h` 零匹配，确认地面真值隔离契约在代码层面成立。

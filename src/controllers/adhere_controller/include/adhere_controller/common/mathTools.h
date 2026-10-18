@@ -34,6 +34,24 @@ inline Vec3 rotMatToRPY(const RotMat & r)
   return rpy;
 }
 
+// Inverse of rotMatToRPY() above: builds R = Rz(yaw)*Ry(pitch)*Rx(roll) from the same
+// extrinsic-ZYX (roll, pitch, yaw) convention. Used wherever a state is driven from
+// CtrlInterfaces::ActiveState's rpy[3] (Phase 3.5) instead of a raw quaternion.
+inline RotMat rpyToRotMat(const Vec3 & rpy)
+{
+  const double sr = std::sin(rpy(0));
+  const double cr = std::cos(rpy(0));
+  const double sp = std::sin(rpy(1));
+  const double cp = std::cos(rpy(1));
+  const double sy = std::sin(rpy(2));
+  const double cy = std::cos(rpy(2));
+  RotMat r;
+  r << cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr,
+    sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr,
+    -sp, cp * sr, cp * cr;
+  return r;
+}
+
 template <typename T>
 inline T saturation(T value, T min, T max)
 {

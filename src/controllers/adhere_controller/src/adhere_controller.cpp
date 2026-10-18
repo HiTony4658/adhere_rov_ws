@@ -53,6 +53,23 @@ std::vector<std::string> stateInterfaceNames()
     names.emplace_back(std::string("pad_contact/") + pad + "/v_sep");
   }
 
+  // Phase 3.5 realistic noisy multi-rate sensors (CLAUDE.md Stage 2.1/2.2): a second,
+  // independent sensing path, bound to PRIVATE AdhereController members (never
+  // CtrlInterfaces), consumed exclusively by RovStateEstimator.
+  for (const char * suffix :
+       {"orientation.w", "orientation.x", "orientation.y", "orientation.z",
+        "angular_velocity.x", "angular_velocity.y", "angular_velocity.z",
+        "linear_acceleration.x", "linear_acceleration.y", "linear_acceleration.z"}) {
+    names.emplace_back(std::string("imu_sensor_noisy/") + suffix);
+  }
+  names.emplace_back("depth_sensor_noisy/z");
+  for (const char * suffix : {"vel.x", "vel.y", "vel.z", "range"}) {
+    names.emplace_back(std::string("dvl_sensor_noisy/") + suffix);
+  }
+  for (const auto * pad : kPadNames) {
+    names.emplace_back(std::string("loadcell_noisy/") + pad + "/force");
+  }
+
   return names;
 }
 
@@ -182,6 +199,14 @@ CallbackReturn AdhereController::on_configure(const rclcpp_lifecycle::State & /*
 CallbackReturn AdhereController::on_activate(const rclcpp_lifecycle::State & /*previous_state*/)
 {
   ctrl_interfaces_.clear();
+  gt_imu_state_interface_.clear();
+  gt_odom_state_interface_.clear();
+  gt_pad_contact_state_interface_.clear();
+  noisy_imu_state_interface_.clear();
+  noisy_depth_state_interface_.clear();
+  noisy_dvl_state_interface_.clear();
+  noisy_loadcell_state_interface_.clear();
+  estimator_initialized_ = false;
 
   for (const auto * name : kThrusterNames) {
     findAndAppend(
@@ -195,24 +220,41 @@ CallbackReturn AdhereController::on_activate(const rclcpp_lifecycle::State & /*p
        {"orientation.w", "orientation.x", "orientation.y", "orientation.z",
         "angular_velocity.x", "angular_velocity.y", "angular_velocity.z",
         "linear_acceleration.x", "linear_acceleration.y", "linear_acceleration.z"}) {
-    findAndAppend(
-      state_interfaces_, std::string("imu_sensor/") + suffix, ctrl_interfaces_.imu_state_interface_);
+    findAndAppend(state_interfaces_, std::string("imu_sensor/") + suffix, gt_imu_state_interface_);
   }
   for (const char * suffix :
        {"pos.x", "pos.y", "pos.z", "quat.w", "quat.x", "quat.y", "quat.z", "vel_body.x",
         "vel_body.y", "vel_body.z"}) {
-    findAndAppend(
-      state_interfaces_, std::string("rov_odom/") + suffix, ctrl_interfaces_.odom_state_interface_);
+    findAndAppend(state_interfaces_, std::string("rov_odom/") + suffix, gt_odom_state_interface_);
   }
   for (const auto * pad : kPadNames) {
     findAndAppend(
       state_interfaces_, std::string("pad_contact/") + pad + "/force",
-      ctrl_interfaces_.pad_contact_state_interface_);
+      gt_pad_contact_state_interface_);
   }
   for (const auto * pad : kPadNames) {
     findAndAppend(
       state_interfaces_, std::string("pad_contact/") + pad + "/v_sep",
-      ctrl_interfaces_.pad_contact_state_interface_);
+      gt_pad_contact_state_interface_);
+  }
+
+  // Phase 3.5 realistic noisy multi-rate sensors: also private, never handed to CtrlInterfaces.
+  for (const char * suffix :
+       {"orientation.w", "orientation.x", "orientation.y", "orientation.z",
+        "angular_velocity.x", "angular_velocity.y", "angular_velocity.z",
+        "linear_acceleration.x", "linear_acceleration.y", "linear_acceleration.z"}) {
+    findAndAppend(
+      state_interfaces_, std::string("imu_sensor_noisy/") + suffix, noisy_imu_state_interface_);
+  }
+  findAndAppend(state_interfaces_, "depth_sensor_noisy/z", noisy_depth_state_interface_);
+  for (const char * suffix : {"vel.x", "vel.y", "vel.z", "range"}) {
+    findAndAppend(
+      state_interfaces_, std::string("dvl_sensor_noisy/") + suffix, noisy_dvl_state_interface_);
+  }
+  for (const auto * pad : kPadNames) {
+    findAndAppend(
+      state_interfaces_, std::string("loadcell_noisy/") + pad + "/force",
+      noisy_loadcell_state_interface_);
   }
 
   state_list_.passive = std::make_shared<StatePassive>(ctrl_interfaces_, model_params_);
@@ -242,6 +284,13 @@ CallbackReturn AdhereController::on_deactivate(const rclcpp_lifecycle::State & /
 {
   release_interfaces();
   ctrl_interfaces_.clear();
+  gt_imu_state_interface_.clear();
+  gt_odom_state_interface_.clear();
+  gt_pad_contact_state_interface_.clear();
+  noisy_imu_state_interface_.clear();
+  noisy_depth_state_interface_.clear();
+  noisy_dvl_state_interface_.clear();
+  noisy_loadcell_state_interface_.clear();
   return CallbackReturn::SUCCESS;
 }
 
@@ -272,6 +321,85 @@ controller_interface::return_type AdhereController::update()
 
   const rclcpp::Time time = get_node()->now();
 
+  // --- Phase 3.5: 500Hz dual state-acquisition, every physics tick, ahead of the inner-loop
+  // gate (CLAUDE.md Stage 2.2/2.3). Ground truth is read here purely for FsmState::
+  // ground_truth_pose evaluation (and for "ground_truth" mode's active_state copy) -- it is
+  // NEVER itself assigned into ctrl_interfaces_.active_state while in "sensor_fusion" mode, so
+  // no FSMState ever observes it.
+  const Vec3 gt_pos(
+    gt_odom_state_interface_[0].get().get_value(), gt_odom_state_interface_[1].get().get_value(),
+    gt_odom_state_interface_[2].get().get_value());
+  const Quat gt_quat(
+    gt_odom_state_interface_[3].get().get_value(), gt_odom_state_interface_[4].get().get_value(),
+    gt_odom_state_interface_[5].get().get_value(), gt_odom_state_interface_[6].get().get_value());
+  const Vec3 gt_vel_body(
+    gt_odom_state_interface_[7].get().get_value(), gt_odom_state_interface_[8].get().get_value(),
+    gt_odom_state_interface_[9].get().get_value());
+  const Vec3 gt_omega_body(
+    gt_imu_state_interface_[4].get().get_value(), gt_imu_state_interface_[5].get().get_value(),
+    gt_imu_state_interface_[6].get().get_value());
+  const Vec3 gt_rpy = rotMatToRPY(quatToRotMat(gt_quat));
+
+  if (model_params_.estimation_mode == "sensor_fusion") {
+    if (!estimator_initialized_) {
+      // Latch the estimator to ground truth once on the first sensor_fusion tick (e.g. right
+      // after on_activate()) purely so it does not have to converge from zero -- this is the
+      // ONLY place ground truth touches the estimator's internal state, not an ongoing feed.
+      estimator_.reset(gt_pos, gt_vel_body, gt_quat);
+      estimator_initialized_ = true;
+    }
+
+    const double dt_phys = 1.0 / static_cast<double>(cm_update_rate_);
+    const Quat noisy_quat(
+      noisy_imu_state_interface_[0].get().get_value(), noisy_imu_state_interface_[1].get().get_value(),
+      noisy_imu_state_interface_[2].get().get_value(), noisy_imu_state_interface_[3].get().get_value());
+    const Vec3 gyro_meas(
+      noisy_imu_state_interface_[4].get().get_value(), noisy_imu_state_interface_[5].get().get_value(),
+      noisy_imu_state_interface_[6].get().get_value());
+    const Vec3 accel_meas(
+      noisy_imu_state_interface_[7].get().get_value(), noisy_imu_state_interface_[8].get().get_value(),
+      noisy_imu_state_interface_[9].get().get_value());
+
+    estimator_.predict(gyro_meas, accel_meas, dt_phys);
+    estimator_.correctAttitude(noisy_quat);
+    estimator_.correctDepth(
+      noisy_depth_state_interface_[0].get().get_value(), model_params_.sensor_mount.r_depth);
+    const Vec3 dvl_vel(
+      noisy_dvl_state_interface_[0].get().get_value(), noisy_dvl_state_interface_[1].get().get_value(),
+      noisy_dvl_state_interface_[2].get().get_value());
+    estimator_.correctDvl(
+      dvl_vel, noisy_dvl_state_interface_[3].get().get_value(), model_params_.sensor_mount.r_dvl);
+
+    const Vec3 est_pos = estimator_.positionWorld();
+    const Vec3 est_vel = estimator_.velocityBody();
+    const Vec3 est_omega = estimator_.angularVelocityBody();
+    const Vec3 est_rpy = estimator_.rpy();
+    for (int i = 0; i < 3; ++i) {
+      ctrl_interfaces_.active_state.pos_w[i] = est_pos(i);
+      ctrl_interfaces_.active_state.rpy[i] = est_rpy(i);
+      ctrl_interfaces_.active_state.vel_body[i] = est_vel(i);
+      ctrl_interfaces_.active_state.omega_body[i] = est_omega(i);
+    }
+    for (size_t i = 0; i < kPadNames.size(); ++i) {
+      ctrl_interfaces_.active_state.pad_force[i] = noisy_loadcell_state_interface_[i].get().get_value();
+      ctrl_interfaces_.active_state.v_sep[i] =
+        est_vel.x() + est_omega.y() * model_params_.pad_pos[i].z() -
+        est_omega.z() * model_params_.pad_pos[i].y();
+    }
+  } else {
+    estimator_initialized_ = false;
+    for (int i = 0; i < 3; ++i) {
+      ctrl_interfaces_.active_state.pos_w[i] = gt_pos(i);
+      ctrl_interfaces_.active_state.rpy[i] = gt_rpy(i);
+      ctrl_interfaces_.active_state.vel_body[i] = gt_vel_body(i);
+      ctrl_interfaces_.active_state.omega_body[i] = gt_omega_body(i);
+    }
+    for (size_t i = 0; i < kPadNames.size(); ++i) {
+      ctrl_interfaces_.active_state.pad_force[i] = gt_pad_contact_state_interface_[i].get().get_value();
+      ctrl_interfaces_.active_state.v_sep[i] = gt_pad_contact_state_interface_[4 + i].get().get_value();
+    }
+  }
+
   if (tick.inner_due) {
     // 0.25s /rov/teleop_cmd staleness watchdog (CLAUDE.md Phase 3.2 Stage 2.3): forces teleop
     // inputs to a safe all-zero/inactive state centrally, so no FSMState implementation needs
@@ -283,6 +411,8 @@ controller_interface::return_type AdhereController::update()
       ci.teleop_sway_y.store(0.0);
       ci.teleop_heave_z.store(0.0);
       ci.teleop_yaw_rate.store(0.0);
+      ci.teleop_pitch_rate.store(0.0);
+      ci.teleop_roll_rate.store(0.0);
     }
 
     if (mode_ == FSMMode::NORMAL) {
@@ -315,21 +445,17 @@ controller_interface::return_type AdhereController::update()
     fsm_state_msg.header.stamp = time;
     fsm_state_msg.current_state = fsmStateNameToInt(current_state_->state_name);
     fsm_state_msg.state_name = current_state_->state_name_string;
+    fsm_state_msg.estimation_mode = model_params_.estimation_mode;
 
     const auto target_pose = current_state_->targetPose();
     std::copy(target_pose.begin(), target_pose.end(), fsm_state_msg.target_pose.begin());
 
-    const double x = ctrl_interfaces_.odom_state_interface_[0].get().get_value();
-    const double y = ctrl_interfaces_.odom_state_interface_[1].get().get_value();
-    const double z = ctrl_interfaces_.odom_state_interface_[2].get().get_value();
-    const Quat quat(
-      ctrl_interfaces_.odom_state_interface_[3].get().get_value(),
-      ctrl_interfaces_.odom_state_interface_[4].get().get_value(),
-      ctrl_interfaces_.odom_state_interface_[5].get().get_value(),
-      ctrl_interfaces_.odom_state_interface_[6].get().get_value());
-    const double yaw =
-      rotMatToRPY(quatToRotMat(quat))(2);
-    fsm_state_msg.actual_pose = {x, y, z, yaw};
+    const auto & active = ctrl_interfaces_.active_state;
+    fsm_state_msg.estimated_pose = {
+      active.pos_w[0], active.pos_w[1], active.pos_w[2],
+      active.rpy[0], active.rpy[1], active.rpy[2]};
+    fsm_state_msg.ground_truth_pose = {
+      gt_pos.x(), gt_pos.y(), gt_pos.z(), gt_rpy(0), gt_rpy(1), gt_rpy(2)};
 
     fsm_state_publisher_->publish(fsm_state_msg);
   }
