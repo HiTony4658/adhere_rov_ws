@@ -100,6 +100,9 @@ void spawnStateConsole(int mode)
     case adhere_control_msgs::msg::FsmCommand::ADHERE_SMC:
       title = "ROV ADHERE_SMC Setpoint Console";
       break;
+    case adhere_control_msgs::msg::FsmCommand::BASELINE_MPPI:
+      title = "ROV BASELINE_MPPI Setpoint Console";
+      break;
     default:
       title = "ROV PID_HOLD Setpoint Console";
       break;
@@ -141,6 +144,7 @@ void printMenu()
             << "  [4] state_pid_hold   (6DOF 位置+航向保持，自动弹出设定终端)\n"
             << "  [5] state_adhere_pid (贴壁 PID 基线：两阶段靠壁+法向力 PI 保压)\n"
             << "  [6] state_adhere_smc (贴壁 SMC 基线：6DOF 滑模控制+法向预压)\n"
+            << "  [7] state_baseline_mppi (纯 CUDA 外环 MPPI，250Hz 零阶保持)\n"
             << "  [q] Quit Console     (退出控制台)\n"
             << "------------------------------------------------------------\n"
             << "Current State: " << stateLabel(g_current_state.load()) << " (" << state_name
@@ -153,7 +157,7 @@ void printMenu()
     std::lock_guard<std::mutex> lock(g_metrics_mutex);
     std::cout << g_metrics_line << "\n";
   }
-  std::cout << "Select state (1/2/3/4/5/6/q): " << std::flush;
+  std::cout << "Select state (1/2/3/4/5/6/7/q): " << std::flush;
 }
 
 }  // namespace
@@ -188,7 +192,8 @@ int main(int argc, char ** argv)
         if (msg->current_state == adhere_control_msgs::msg::FsmCommand::DEPTH_HOLD ||
             msg->current_state == adhere_control_msgs::msg::FsmCommand::PID_HOLD ||
             msg->current_state == adhere_control_msgs::msg::FsmCommand::ADHERE_PID ||
-            msg->current_state == adhere_control_msgs::msg::FsmCommand::ADHERE_SMC) {
+            msg->current_state == adhere_control_msgs::msg::FsmCommand::ADHERE_SMC ||
+            msg->current_state == adhere_control_msgs::msg::FsmCommand::BASELINE_MPPI) {
           spawnStateConsole(msg->current_state);
         } else {
           killChildConsole();
@@ -240,9 +245,11 @@ int main(int argc, char ** argv)
       command = adhere_control_msgs::msg::FsmCommand::ADHERE_PID;
     } else if (line == "6") {
       command = adhere_control_msgs::msg::FsmCommand::ADHERE_SMC;
+    } else if (line == "7") {
+      command = adhere_control_msgs::msg::FsmCommand::BASELINE_MPPI;
     } else {
       std::cout << "Unrecognized selection \"" << line
-                << "\", expected 1, 2, 3, 4, 5, 6, or q.\n\n";
+                << "\", expected 1, 2, 3, 4, 5, 6, 7, or q.\n\n";
       continue;
     }
 

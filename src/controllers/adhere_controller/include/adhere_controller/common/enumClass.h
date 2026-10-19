@@ -12,7 +12,8 @@ enum class FSMStateName
   OPEN_LOOP,
   PID_HOLD,
   ADHERE_PID,
-  ADHERE_SMC
+  ADHERE_SMC,
+  BASELINE_MPPI
 };
 
 enum class FSMMode

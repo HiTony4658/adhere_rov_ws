@@ -117,6 +117,8 @@ int32_t fsmStateNameToInt(FSMStateName name)
       return 5;
     case FSMStateName::ADHERE_SMC:
       return 6;
+    case FSMStateName::BASELINE_MPPI:
+      return 7;
     default:
       return 0;
   }
@@ -210,6 +212,9 @@ CallbackReturn AdhereController::on_configure(const rclcpp_lifecycle::State & /*
   // Model-decoupled parameters (CLAUDE.md Phase 3.3 Sec.3): loaded exactly once per configure,
   // same lifecycle point as cm_update_rate_/inner_decimation_/outer_decimation_ above.
   model_params_ = ModelParams::loadFromNode(get_node());
+  // Phase 4.1: algorithm-scoped config, loaded independently of ModelParams (CLAUDE.md Sec.6 of
+  // this phase's task spec) -- same lifecycle point, own parser (BaselineMppiConfig.cpp).
+  baseline_mppi_config_ = baseline_mppi::BaselineMppiConfig::loadFromNode(get_node());
 
   decimator_ = std::make_shared<MultiRateDecimator>(
     cm_update_rate_, inner_decimation_, outer_decimation_);
@@ -301,22 +306,28 @@ CallbackReturn AdhereController::on_activate(const rclcpp_lifecycle::State & /*p
   // Pre-MPPI A_contact/C_kern precompute (CLAUDE.md Phase 3.6 Stage 2.2): same lifecycle point
   // every FSMState builds its own B/B^dagger, from the same model_params_ geometry.
   {
-    const Mat68 b =
-      buildThrusterAllocationMatrix(model_params_.thruster_pos, model_params_.thruster_dir);
+    b_ = buildThrusterAllocationMatrix(model_params_.thruster_pos, model_params_.thruster_dir);
+    b_pinv_ = buildThrusterAllocationPseudoInverse(b_);
     const Mat34 g = buildPadNormalMap(model_params_.pad_pos);
     const Mat43 g_pinv = buildPadNormalMapPseudoInverse(g);
-    a_contact_ = buildContactMap(g_pinv, b);
+    a_contact_ = buildContactMap(g_pinv, b_);
     const auto spans = padHalfSpans(model_params_.pad_pos);
     kern_l_y_ = spans.first;
     kern_l_z_ = spans.second;
-    c_kern_ = buildKernConstraintMatrix(b, kern_l_y_, kern_l_z_, model_params_.kern_eps_margin);
+    c_kern_ = buildKernConstraintMatrix(b_, kern_l_y_, kern_l_z_, model_params_.kern_eps_margin);
   }
+
+  // Phase 4.1: one-time GPU buffer allocation for the Baseline MPPI engine, same lifecycle point
+  // as the A_contact/C_kern precompute above (on_activate(), using the SAME B/B^dagger).
+  baseline_mppi_.init(model_params_, b_, b_pinv_, baseline_mppi_config_);
 
   // Async outer-loop worker skeleton (CLAUDE.md Phase 3.6 Stage 2.2): started here so a
   // deactivate/reactivate cycle always gets a fresh thread, joined in on_deactivate() below.
   outer_worker_seq_ = 0;
   outer_worker_has_work_ = false;
   outer_worker_running_.store(true);
+  baseline_mppi_solve_ms_ = 0.0;
+  ctrl_interfaces_.outer_loop_cmd_.valid.store(false);
   outer_worker_thread_ = std::thread(&AdhereController::outerWorkerLoop, this);
 
   state_list_.passive = std::make_shared<StatePassive>(ctrl_interfaces_, model_params_);
@@ -325,6 +336,8 @@ CallbackReturn AdhereController::on_activate(const rclcpp_lifecycle::State & /*p
   state_list_.pid_hold = std::make_shared<StatePidHold>(ctrl_interfaces_, model_params_);
   state_list_.adhere_pid = std::make_shared<StateAdherePid>(ctrl_interfaces_, model_params_);
   state_list_.adhere_smc = std::make_shared<StateAdhereSmc>(ctrl_interfaces_, model_params_);
+  state_list_.baseline_mppi =
+    std::make_shared<StateBaselineMppi>(ctrl_interfaces_, model_params_, baseline_mppi_);
 
   // Default-boots in PASSIVE (CLAUDE.md Phase 3.1 Stage 2.3): launching mujoco_sim.launch.py
   // immediately brings up the FSM in the safe zero-thrust state.
@@ -626,9 +639,25 @@ controller_interface::return_type AdhereController::update()
       outer_worker_input_.target_pos = target.pos;
       outer_worker_input_.target_quat = target.quat;
       outer_worker_input_.seq = ++outer_worker_seq_;
+      // Phase 4.1: only the async worker's Baseline MPPI branch actually spends GPU time -- every
+      // other FSM state keeps the original trivial pass-through (see outerWorkerLoop()).
+      outer_worker_input_.run_baseline_mppi = current_state_->state_name == FSMStateName::BASELINE_MPPI;
       outer_worker_has_work_ = true;
     }
     outer_worker_cv_.notify_one();
+
+    // Phase 4.1: copies the worker's latest output into ctrl_interfaces_.outer_loop_cmd_ (lock-free
+    // bridge StateBaselineMppi::run() reads, see CtrlInterfaces.h) and into the 500Hz-thread-owned
+    // baseline_mppi_solve_ms_ (for publishRuntimeDiagnostics() below) -- cheap mutex-guarded copy,
+    // every outer_due tick, same mutex the snapshot hand-off above already uses.
+    {
+      std::lock_guard<std::mutex> lock(outer_worker_mutex_);
+      for (int i = 0; i < 8; ++i) {
+        ctrl_interfaces_.outer_loop_cmd_.u_star[i].store(outer_worker_output_.u_star[i]);
+      }
+      ctrl_interfaces_.outer_loop_cmd_.valid.store(outer_worker_output_.valid);
+      baseline_mppi_solve_ms_ = outer_worker_output_.solve_latency_ms;
+    }
 
     controller_state_msg.estimated_pose.position.x = active.pos_w[0];
     controller_state_msg.estimated_pose.position.y = active.pos_w[1];
@@ -732,6 +761,10 @@ void AdhereController::publishRuntimeDiagnostics(const rclcpp::Time & time)
   diag.inner_loop_overruns = inner_profiler_.overruns();
   diag.outer_loop_overruns = outer_profiler_.overruns();
 
+  // Phase 4.1: 0 whenever no GPU outer-loop planner is active (baseline_mppi_solve_ms_ is only
+  // ever updated by update()'s outer_due block above when run_baseline_mppi was set).
+  diag.outer_planner_solve_ms = baseline_mppi_solve_ms_;
+
   // timing_healthy (CLAUDE.md Phase 3.6 Stage 1.2): all measured frequencies within 10% of
   // their target AND latest inner/outer exec <= budget. estimator_hz is deliberately excluded
   // from the frequency check -- it legitimately reports 0 whenever estimation_mode ==
@@ -808,10 +841,19 @@ void AdhereController::outerWorkerLoop()
       outer_worker_has_work_ = false;
     }
 
-    // Placeholder "solve": Phase 4's MPPI sampling/rollout/cost-evaluation goes here. For now
-    // just echoes the sequence number so a future test can verify the hand-off round-trips.
+    // Phase 4.1: real async CUDA MPPI rollout, gated on run_baseline_mppi (set by update() from
+    // current_state_->state_name, CLAUDE.md Sec.3.3) -- every other FSM state still gets the
+    // original trivial pass-through, since they never read ctrl_interfaces_.outer_loop_cmd_ at
+    // all (only StateBaselineMppi::run() does).
     OuterLoopOutput output;
     output.seq = input.seq;
+    if (input.run_baseline_mppi) {
+      output.u_star = baseline_mppi_.solve(
+        input.pos_w, input.quat_w, input.vel_body, input.omega_body, input.target_pos,
+        input.target_quat);
+      output.valid = true;
+      output.solve_latency_ms = baseline_mppi_.lastSolveMs();
+    }
 
     {
       std::lock_guard<std::mutex> lock(outer_worker_mutex_);
@@ -836,6 +878,8 @@ std::shared_ptr<FSMState> AdhereController::getNextState(
       return state_list_.adhere_pid;
     case FSMStateName::ADHERE_SMC:
       return state_list_.adhere_smc;
+    case FSMStateName::BASELINE_MPPI:
+      return state_list_.baseline_mppi;
     default:
       return state_list_.passive;
   }

@@ -5,7 +5,14 @@ if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 17)
 endif()
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-  add_compile_options(-Wall -Wextra -Wpedantic)
+  # CLAUDE.md Phase 4.1: scoped to CXX only via COMPILE_LANGUAGE -- nvcc (the CUDA compiler
+  # enabled further below for baseline_mppi_kernels.cu) does not understand -Wall/-Wextra/
+  # -Wpedantic directly and would need them wrapped in -Xcompiler.
+  add_compile_options(
+    $<$<COMPILE_LANGUAGE:CXX>:-Wall>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wpedantic>
+  )
 endif()
 
 find_package(ament_cmake REQUIRED)
@@ -21,10 +28,28 @@ find_package(visualization_msgs REQUIRED)
 
 include_directories(include)
 
-# TODO(Phase 2): enable CUDA language once outer_mppi_cuda/*.cu kernels are authored.
-# enable_language(CUDA)
-# set(CMAKE_CUDA_ARCHITECTURES "72;75")
-# find_package(CUDAToolkit REQUIRED)
+# Pure-CUDA Baseline MPPI (CLAUDE.md Phase 4.1): CMAKE_CUDA_ARCHITECTURES matches Sec.2's target
+# hardware exactly (Jetson AGX Xavier sm_72 + RTX5000 workstation sm_75) -- do not widen this to
+# include newer architectures the project does not target. nvcc is not on this workstation's
+# default $PATH (mandated build command only prepends /usr/bin, CLAUDE.md Sec.0), so fall back to
+# the known CUDA 11.4 toolkit location if CMAKE_CUDA_COMPILER was not already set externally.
+if(NOT DEFINED CMAKE_CUDA_COMPILER AND EXISTS "/usr/local/cuda/bin/nvcc")
+  set(CMAKE_CUDA_COMPILER "/usr/local/cuda/bin/nvcc")
+endif()
+enable_language(CUDA)
+set(CMAKE_CUDA_ARCHITECTURES "72;75")
+if(NOT CMAKE_CUDA_STANDARD)
+  # CMake 3.16 on this workstation does not recognize CUDA_STANDARD 17 (added in later CMake);
+  # CUDA 11.4's nvcc itself supports C++17, but the project-wide language standard is left at 14
+  # here to keep cmake_minimum_required(3.8) buildable on this host.
+  set(CMAKE_CUDA_STANDARD 14)
+endif()
+# CMake 3.16 on this workstation predates FindCUDAToolkit (needs 3.17+) -- the legacy FindCUDA
+# module still works fine alongside enable_language(CUDA) above and provides
+# CUDA_INCLUDE_DIRS/CUDA_LIBRARIES (cudart)/CUDA_curand_LIBRARY for the plain-g++-compiled host
+# .cpp files (BaselineMppiController.cpp) that include <cuda_runtime.h> directly.
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3 --use_fast_math")
+find_package(CUDA REQUIRED)
 
 # TODO(Phase 3.2+/KAMR-MPPI): find osqp / osqp-eigen once the 12D Elastic Rhombic-Kern QP is
 # implemented.
@@ -38,6 +63,9 @@ include_directories(include)
 # package split added pure linking overhead with no decoupling benefit.
 add_library(${PROJECT_NAME} SHARED
   src/adhere_controller.cpp
+  src/algorithms/baseline_mppi/BaselineMppiConfig.cpp
+  src/algorithms/baseline_mppi/BaselineMppiController.cpp
+  src/algorithms/baseline_mppi/baseline_mppi_kernels.cu
   src/algorithms/pid/AdherePidController.cpp
   src/algorithms/pid/SixDofPidController.cpp
   src/algorithms/smc/SixDofSmcController.cpp
@@ -48,15 +76,19 @@ add_library(${PROJECT_NAME} SHARED
   src/FSM/StatePassive.cpp
   src/FSM/StateAdherePid.cpp
   src/FSM/StateAdhereSmc.cpp
+  src/FSM/StateBaselineMppi.cpp
   src/FSM/StateDepthHold.cpp
   src/FSM/StateOpenLoop.cpp
   src/FSM/StatePidHold.cpp
 )
+set_target_properties(${PROJECT_NAME} PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 target_include_directories(${PROJECT_NAME} PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
   ${EIGEN3_INCLUDE_DIR}
+  ${CUDA_INCLUDE_DIRS}
 )
+target_link_libraries(${PROJECT_NAME} ${CUDA_LIBRARIES} ${CUDA_curand_LIBRARY})
 ament_target_dependencies(${PROJECT_NAME}
   rclcpp
   rclcpp_lifecycle
@@ -178,6 +210,17 @@ if(BUILD_TESTING)
   )
   target_include_directories(test_controller_metrics PRIVATE include)
   target_link_libraries(test_controller_metrics ${PROJECT_NAME})
+
+  # Phase 4.1 verification: exercises the real CUDA kernels on this workstation's GPU (no mock) --
+  # determinism/latency/thruster-bound safety, directional cost-gradient sanity, and closed-loop
+  # position tracking through StateBaselineMppi's 250Hz ZOH against a fake point-mass plant (same
+  # idiom as test_fsm_states.cpp).
+  ament_add_gtest(test_baseline_mppi
+    test/test_baseline_mppi.cpp
+  )
+  target_include_directories(test_baseline_mppi PRIVATE include)
+  target_link_libraries(test_baseline_mppi ${PROJECT_NAME} Eigen3::Eigen)
+  ament_target_dependencies(test_baseline_mppi rclcpp hardware_interface)
 endif()
 
 ament_package()

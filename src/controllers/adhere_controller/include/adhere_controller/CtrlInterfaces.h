@@ -75,6 +75,27 @@ struct ActiveState
   double v_sep[4] = {0.0, 0.0, 0.0, 0.0};      // TL, TR, BL, BR separation velocity
 };
 
+// Lock-free bridge from AdhereController's async 25Hz outer-loop worker (Phase 3.6 Stage 2.2,
+// extended Phase 4.1) to whichever FSMState is currently acting as a Zero-Order-Hold pass-through
+// for that worker's output (StateBaselineMppi today). AdhereController::update() copies the
+// worker's latest OuterLoopOutput here once per 500Hz tick (briefly under outer_worker_mutex_, on
+// the 500Hz thread only) -- FSMState::run() then reads it lock-free, same isolation discipline as
+// ActiveState above (no FSMState ever touches the worker thread/mutex directly).
+struct OuterLoopCommand
+{
+  std::array<std::atomic<double>, 8> u_star;
+  std::atomic<bool> valid{false};
+
+  // std::atomic<double>'s default constructor leaves the value indeterminate pre-C++20, so each
+  // array element is explicitly zeroed here rather than relying on `= {}` aggregate init.
+  OuterLoopCommand()
+  {
+    for (auto & u : u_star) {
+      u.store(0.0);
+    }
+  }
+};
+
 // Zero-copy FSM/hardware bridge, modeled after quadruped_ros2_control's CtrlInterfaces: holds
 // LoanedCommandInterface references bound by AdhereController's on_activate(). Slot order
 // within thruster_command_interface_ matches adhere_mujoco_hardware's documented layout
@@ -102,6 +123,10 @@ struct CtrlInterfaces
   // (common/OutputSafety.h::sanitizeAndWriteThrusterCommands()) before the value ever reaches
   // hardware.
   std::array<double, 8> pending_thruster_cmd = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+
+  // Phase 4.1: async outer-loop (25Hz CUDA Baseline MPPI) -> StateBaselineMppi's 250Hz
+  // Zero-Order-Hold bridge (see OuterLoopCommand's doc comment above).
+  OuterLoopCommand outer_loop_cmd_;
 
   CtrlInterfaces() = default;
 

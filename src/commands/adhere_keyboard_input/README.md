@@ -3,22 +3,25 @@
 ## 职责
 
 人机交互终端 + Xbox 手柄遥操作桥接层（CLAUDE.md Phase 3.2，四元数消息 +
-实时诊断于 Phase 3.6 更新，贴壁基线状态切换/遥测/离线评估于 Phase 3.8 更新）。
+实时诊断于 Phase 3.6 更新，贴壁基线状态切换/遥测/离线评估于 Phase 3.8 更新，
+`BASELINE_MPPI` 状态切换/GPU 规划器延迟遥测于 Phase 4.1 更新）。
 通过 `adhere_control_msgs` 定义的 5 话题，以标准 ROS 2 话题（非实时路径）
 与 `AdhereController` 异步通信，五个可执行文件各自职责正交：
 
 - `fsm_console_node`：主控 FSM 状态切换终端，**仅**发布 `/rov/fsm_command`，
   并订阅 `/rov/runtime_diagnostics` 显示单行计时摘要、订阅
   `/rov/controller_state` 显示单行效率/安全遥测摘要（Phase 3.8）；
-- `state_cmd_console_node`：`DEPTH_HOLD`/`PID_HOLD`/`ADHERE_PID`/`ADHERE_SMC`
-  专属数值设定终端，**仅**发布 `/rov/setpoint_cmd`，由 `fsm_console_node`
-  按需自动弹出，也可手动单独运行；
+- `state_cmd_console_node`：`DEPTH_HOLD`/`PID_HOLD`/`ADHERE_PID`/`ADHERE_SMC`/
+  `BASELINE_MPPI` 专属数值设定终端，**仅**发布 `/rov/setpoint_cmd`，由
+  `fsm_console_node` 按需自动弹出，也可手动单独运行；
 - `xbox_teleop_node`：订阅官方 ROS 2 `joy` 包的 `/joy`（`sensor_msgs/msg/Joy`），
   转换为 `/rov/teleop_cmd`（美国手/Mode 2 连续摇杆，`geometry_msgs/Vector3
   linear`/`angular`）与手柄按键边沿触发的 `/rov/fsm_command`（瞬时状态切换）；
-- `rt_monitor_node`（Phase 3.6 新增，Phase 3.8 扩展）：订阅
+- `rt_monitor_node`（Phase 3.6 新增，Phase 3.8/4.1 扩展）：订阅
   `/rov/runtime_diagnostics` 与 `/rov/controller_state`，用 ANSI 彩色实时
-  刷新一张 9 路频率/延迟表格 + 一张效率/安全表格，超时/饱和/偏离目标值标红；
+  刷新一张 9 路频率/延迟表格（末行追加 GPU 规划器求解延迟
+  `outer_planner_solve_ms`，Phase 4.1）+ 一张效率/安全表格，超时/饱和/
+  偏离目标值标红；
 - `benchmark_evaluator_node`（Phase 3.8 新增）：离线评估节点，订阅
   `/rov/controller_state`/`/rov/ground_truth_odom`/`/rov/runtime_diagnostics`，
   在一个滚动窗口（默认 `12.0s`）上聚合出跟踪精度/能耗/平顺性/贴壁安全性的
@@ -34,7 +37,7 @@
 ```text
 src/
 ├── fsm_console_node.cpp          # 主控 FSM 状态切换终端 + 动态子终端生命周期管理 + 计时/效率摘要
-├── state_cmd_console_node.cpp    # DEPTH_HOLD/PID_HOLD/ADHERE_PID/ADHERE_SMC 专属设定终端（ROS 参数 mode=2|4|5|6）
+├── state_cmd_console_node.cpp    # DEPTH_HOLD/PID_HOLD/ADHERE_PID/ADHERE_SMC/BASELINE_MPPI 专属设定终端（ROS 参数 mode=2|4|5|6|7）
 ├── xbox_teleop_node.cpp          # /joy -> TeleopCommand/FsmCommand 桥接
 ├── rt_monitor_node.cpp           # /rov/runtime_diagnostics + /rov/controller_state 实时 ANSI 终端表格（Phase 3.6/3.8）
 └── benchmark_evaluator_node.cpp  # 滚动窗口跟踪/能耗/平顺性/贴壁安全性 Markdown 对比评估（Phase 3.8）
@@ -56,11 +59,12 @@ launch/
   [4] state_pid_hold   (6DOF 位置+航向保持，自动弹出设定终端)
   [5] state_adhere_pid (贴壁 PID 基线：两阶段靠壁+法向力 PI 保压)
   [6] state_adhere_smc (贴壁 SMC 基线：6DOF 滑模控制+法向预压)
+  [7] state_baseline_mppi (纯 CUDA 外环 MPPI，250Hz 零阶保持)
   [q] Quit Console     (退出控制台)
 ------------------------------------------------------------
 Current State: [1] state_passive (state_passive)
 ||u||: --N  Power: --  Slew: --N/s  E: --N^2s  Sat: --/8  Pads: --/4  Kern: --
-Select state (1/2/3/4/5/6/q):
+Select state (1/2/3/4/5/6/7/q):
 ```
 
 - 订阅 `/rov/controller_state`（`adhere_control_msgs::msg::ControllerState`，
@@ -68,16 +72,17 @@ Select state (1/2/3/4/5/6/q):
   等原始硬件话题）与 `/rov/runtime_diagnostics` 在独立的 ROS executor 线程上
   持续更新菜单中显示的当前状态与计时摘要，主线程阻塞在 `std::cin` 上读取
   用户选择，两者互不阻塞。
-- 输入 `1`/`2`/`3`/`4`/`5`/`6`：发布对应的 `FsmCommand{command=...}` 到
+- 输入 `1`/`2`/`3`/`4`/`5`/`6`/`7`：发布对应的 `FsmCommand{command=...}` 到
   `/rov/fsm_command`；**不**携带任何数值设定点。
 - 输入 `q`：退出控制台（不影响已激活的 FSM 状态）。
 - **动态子终端生命周期管理**：只要 `/rov/controller_state::current_state` 发生变化
   （无论切换来自本控制台的键盘输入还是 Xbox 手柄按键），就先终止上一个已弹出
   的 `state_cmd_console_node` 子终端，再视新状态决定：
-  - 新状态是 `DEPTH_HOLD`（`2`）、`PID_HOLD`（`4`）、`ADHERE_PID`（`5`）或
-    `ADHERE_SMC`（`6`）：以 `fork()` + `setsid()` + `execl()` 启动一个新的
-    `gnome-terminal --wait`（未安装则回退 `xterm`）窗口运行
-    `ros2 run adhere_keyboard_input state_cmd_console_node --ros-args -p mode:=<2|4|5|6>`；
+  - 新状态是 `DEPTH_HOLD`（`2`）、`PID_HOLD`（`4`）、`ADHERE_PID`（`5`）、
+    `ADHERE_SMC`（`6`）或 `BASELINE_MPPI`（`7`）：以 `fork()` + `setsid()` +
+    `execl()` 启动一个新的 `gnome-terminal --wait`（未安装则回退 `xterm`）
+    窗口运行
+    `ros2 run adhere_keyboard_input state_cmd_console_node --ros-args -p mode:=<2|4|5|6|7>`；
     `setsid()` 使子进程自成一个进程组，之后 `killpg()` 才能把该终端窗口与其内部
     的 `ros2 run` 进程一并清理干净（`--wait` 使 gnome-terminal 客户端进程的
     生命周期跟随内部命令，否则裸 `gnome-terminal` 客户端在请求常驻服务端开窗后
@@ -85,11 +90,12 @@ Select state (1/2/3/4/5/6/q):
   - 新状态是 `PASSIVE`（`1`）、`OPEN_LOOP`（`3`）或其他：只清理旧子终端，
     不弹出新的。
 
-## `state_cmd_console_node`：`DEPTH_HOLD`/`PID_HOLD`/`ADHERE_PID`/`ADHERE_SMC` 专属设定终端
+## `state_cmd_console_node`：`DEPTH_HOLD`/`PID_HOLD`/`ADHERE_PID`/`ADHERE_SMC`/`BASELINE_MPPI` 专属设定终端
 
-ROS 参数 `mode`（`int`，`2`/`4`/`5`/`6`）决定界面；`4`/`5`/`6` 三者共用完全
-相同的 `z/y/x/roll/pitch/yaw/all/reset/h` 命令语法（`ADHERE_PID`/`ADHERE_SMC`
-贴壁后在 FSM 层直接忽略 `x` 分量，终端侧无需区分）。订阅 `/rov/controller_state`
+ROS 参数 `mode`（`int`，`2`/`4`/`5`/`6`/`7`）决定界面；`4`/`5`/`6`/`7` 四者
+共用完全相同的 `z/y/x/roll/pitch/yaw/all/reset/h` 命令语法（`ADHERE_PID`/
+`ADHERE_SMC` 贴壁后在 FSM 层直接忽略 `x` 分量，`BASELINE_MPPI` 则始终是
+自由 6DOF 目标，终端侧无需区分）。订阅 `/rov/controller_state`
 实时显示 Actual/Target，**仅**发布 `/rov/setpoint_cmd`（线上协议是
 `command_type` + `geometry_msgs/Pose target_pose` 四元数，本终端自带一套
 不依赖 Eigen 的 RPY↔四元数小工具，只在界面层保持人类友好的角度输入/显示，

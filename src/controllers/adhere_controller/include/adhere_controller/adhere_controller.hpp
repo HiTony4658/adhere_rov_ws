@@ -1,6 +1,7 @@
 #ifndef ADHERE_CONTROLLER__ADHERE_CONTROLLER_HPP_
 #define ADHERE_CONTROLLER__ADHERE_CONTROLLER_HPP_
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <memory>
@@ -21,12 +22,15 @@
 #include "adhere_controller/common/enumClass.h"
 #include "adhere_controller/common/LoopProfiler.h"
 #include "adhere_controller/common/MultiRateDecimator.h"
+#include "adhere_controller/algorithms/baseline_mppi/BaselineMppiConfig.h"
+#include "adhere_controller/algorithms/baseline_mppi/BaselineMppiController.h"
 #include "adhere_controller/CtrlInterfaces.h"
 #include "adhere_controller/dynamics/ModelParams.h"
 #include "adhere_controller/estimator/RovStateEstimator.h"
 #include "adhere_controller/FSM/FSMState.h"
 #include "adhere_controller/FSM/StateAdherePid.h"
 #include "adhere_controller/FSM/StateAdhereSmc.h"
+#include "adhere_controller/FSM/StateBaselineMppi.h"
 #include "adhere_controller/FSM/StateDepthHold.h"
 #include "adhere_controller/FSM/StateOpenLoop.h"
 #include "adhere_controller/FSM/StatePassive.h"
@@ -98,6 +102,7 @@ private:
     std::shared_ptr<StatePidHold> pid_hold;
     std::shared_ptr<StateAdherePid> adhere_pid;
     std::shared_ptr<StateAdhereSmc> adhere_smc;
+    std::shared_ptr<StateBaselineMppi> baseline_mppi;
   };
 
   std::shared_ptr<FSMState> getNextState(
@@ -222,6 +227,17 @@ private:
   Mat48 c_kern_ = Mat48::Zero();
   double kern_l_y_ = 1.0;
   double kern_l_z_ = 1.0;
+  // Phase 4.1: cached alongside a_contact_/c_kern_ above (same on_activate() precompute site) so
+  // BaselineMppiController::init() doesn't have to rebuild B/B^dagger itself.
+  Mat68 b_ = Mat68::Zero();
+  Mat86 b_pinv_ = Mat86::Zero();
+
+  // Phase 4.1: pure-CUDA outer-loop-only Baseline MPPI engine (algorithms/baseline_mppi/), owned
+  // here (not by StateBaselineMppi) because outerWorkerLoop() below -- running on its own thread,
+  // independent of which FSMState is currently active -- is what actually calls solve().
+  // baseline_mppi_config_ is loaded once in on_configure(), same lifecycle point as model_params_.
+  baseline_mppi::BaselineMppiConfig baseline_mppi_config_;
+  baseline_mppi::BaselineMppiController baseline_mppi_;
 
   // Phase 3.8 centralized efficiency/chattering/safety telemetry: updated at the 250Hz
   // inner-loop rate from the actually-sent thruster commands, published on ControllerState.msg
@@ -245,10 +261,21 @@ private:
     Vec3 target_pos = Vec3::Zero();
     Quat target_quat = Quat(1.0, 0.0, 0.0, 0.0);
     uint64_t seq = 0;
+    // Phase 4.1: set from current_state_->state_name at the same 500Hz-thread snapshot site
+    // (update()'s tick.outer_due block) that fills the fields above -- tells outerWorkerLoop()
+    // whether to actually run baseline_mppi_.solve() this cycle, or keep the original trivial
+    // pass-through (e.g. while PASSIVE/PID_HOLD/ADHERE_* are active).
+    bool run_baseline_mppi = false;
   };
   struct OuterLoopOutput
   {
     uint64_t seq = 0;  // echoes OuterLoopInput::seq this output was computed from
+    // Phase 4.1: BaselineMppiController::solve()'s result, copied into
+    // ctrl_interfaces_.outer_loop_cmd_ every 500Hz tick (see update()) for StateBaselineMppi's
+    // ZOH run() to read lock-free.
+    std::array<double, 8> u_star{};
+    bool valid = false;
+    double solve_latency_ms = 0.0;
   };
 
   void outerWorkerLoop();
@@ -261,6 +288,11 @@ private:
   bool outer_worker_has_work_ = false;
   std::atomic<bool> outer_worker_running_{false};
   uint64_t outer_worker_seq_ = 0;
+
+  // Phase 4.1: 500Hz-thread-owned copy of OuterLoopOutput::solve_latency_ms (read under
+  // outer_worker_mutex_ alongside the ctrl_interfaces_.outer_loop_cmd_ copy in update(), never
+  // touched by outerWorkerLoop() itself) -- feeds RuntimeDiagnostics::outer_planner_solve_ms.
+  double baseline_mppi_solve_ms_ = 0.0;
 };
 
 }  // namespace adhere_controller

@@ -29,3 +29,8 @@ float64 outer_loop_budget_ms    # 40.0 ms (for 25 Hz)
 uint64 inner_loop_overruns      # Count of ticks where inner_loop_exec_ms > inner_loop_budget_ms
 uint64 outer_loop_overruns      # Count of ticks where outer_loop_exec_ms > outer_loop_budget_ms
 bool timing_healthy             # True if all frequencies are within 10% of target and latest exec <= budget
+
+# Phase 4.1: pure-CUDA outer-loop planner (Baseline MPPI today, KAMR-MPPI later) GPU solve
+# latency, 0.0 whenever no such planner is the active FSM state (outer_loop_exec_ms above still
+# measures update()'s own 25Hz hand-off cadence, not the worker thread's actual GPU solve time).
+float64 outer_planner_solve_ms

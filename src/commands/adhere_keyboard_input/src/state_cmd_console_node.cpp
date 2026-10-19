@@ -104,11 +104,12 @@ void printDepthHoldPrompt()
                "depth: " << std::flush;
 }
 
-// mode 4=PID_HOLD, 5=ADHERE_PID, 6=ADHERE_SMC -- all three share the exact same command grammar
-// below (y/z/roll/pitch/yaw/all/reset/h), since sliding along the wall in Y/Z/attitude while
-// ADHERE_PID/ADHERE_SMC maintain wall-normal preload is identical in shape to PID_HOLD's free
-// 6-DOF setpoint move -- the FSM states themselves simply ignore the X component of
-// target_pose.position once docked (CLAUDE.md Phase 3.8).
+// mode 4=PID_HOLD, 5=ADHERE_PID, 6=ADHERE_SMC, 7=BASELINE_MPPI -- all four share the exact same
+// command grammar below (y/z/roll/pitch/yaw/all/reset/h), since sliding along the wall in
+// Y/Z/attitude while ADHERE_PID/ADHERE_SMC maintain wall-normal preload (or BASELINE_MPPI tracks
+// a free 6DOF reference via its CUDA rollout) is identical in shape to PID_HOLD's free 6-DOF
+// setpoint move -- the FSM states themselves simply ignore the X component of
+// target_pose.position once docked (CLAUDE.md Phase 3.8/4.1).
 void printPidHoldPrompt(int mode)
 {
   PoseDisplay target, actual;
@@ -121,6 +122,7 @@ void printPidHoldPrompt(int mode)
   const auto target_rpy = rpyFromQuat(target.quat);
   const char * title = mode == 5 ? "[ADHERE_PID] Setpoint Console (贴壁 PID 基线设定终端)"
     : mode == 6 ? "[ADHERE_SMC] Setpoint Console (贴壁 SMC 基线设定终端)"
+    : mode == 7 ? "[BASELINE_MPPI] Setpoint Console (纯 CUDA 外环 MPPI 设定终端)"
     : "[PID_HOLD] Setpoint Console (6DOF 位置+姿态保持设定终端)";
   // CLAUDE.md Phase 3.3 tank geometry: water surface at world Z=0.0m, so depth = -Z. Phase 3.6:
   // displays both the wire-format quaternion and the human-friendly RPY(deg) derived from it.
@@ -153,9 +155,9 @@ int main(int argc, char ** argv)
   auto node = std::make_shared<rclcpp::Node>("state_cmd_console_node");
 
   const int mode = node->declare_parameter<int>("mode", 2);
-  if (mode != 2 && mode != 4 && mode != 5 && mode != 6) {
+  if (mode != 2 && mode != 4 && mode != 5 && mode != 6 && mode != 7) {
     std::cerr << "state_cmd_console_node: unsupported mode " << mode
-               << " (expected 2, 4, 5, or 6)\n";
+               << " (expected 2, 4, 5, 6, or 7)\n";
     rclcpp::shutdown();
     return 1;
   }
@@ -218,7 +220,7 @@ int main(int argc, char ** argv)
         }
       }
     } else {
-      // mode == 4/5/6 (PID_HOLD/ADHERE_PID/ADHERE_SMC): parse 'z <val>' / 'y <val>' /
+      // mode == 4/5/6/7 (PID_HOLD/ADHERE_PID/ADHERE_SMC/BASELINE_MPPI): parse 'z <val>' / 'y <val>' /
       // 'x <val>' / 'roll <deg>' / 'pitch <deg>' / 'yaw <deg>' /
       // 'all <x> <y> <z> <yaw_deg>' / 'reset' / 'h'. Partial updates carry the
       // CURRENTLY known target pose forward (decomposed to x/y/z/roll/pitch/yaw), so e.g.

@@ -7,11 +7,15 @@
 `adhere_controller_common` + `adhere_kamr_controller` 两个包）。承载 FSM 管理、
 生命周期管理、接口装配、均匀整数抽取多速率调度、4 话题订阅/发布、Xbox 手柄
 `0.25s` 失联看门狗与状态切换，以及 `PASSIVE`/`DEPTH_HOLD`/`OPEN_LOOP`/
-`PID_HOLD`/`ADHERE_PID`/`ADHERE_SMC` 六个 FSM 状态的完整实现，外加集中式
-推力器效率/啁啾/安全遥测（`ControllerMetrics.h`）。未来阶段将在本包内继续
-承载 `KAMR-MPPI`（`pr_wbc_mppi_v4`）算法的完整实现：250Hz 内环（Planar
-Impedance PD + Pad-Force DOB + 12D Elastic Rhombic-Kern OSQP）、25Hz 异步 CUDA
-MPPI 外环。
+`PID_HOLD`/`ADHERE_PID`/`ADHERE_SMC`/`BASELINE_MPPI` 七个 FSM 状态的完整实现，
+外加集中式推力器效率/啁啾/安全遥测（`ControllerMetrics.h`）。`BASELINE_MPPI`
+（Phase 4.1）是第一个纯 CUDA 采样式规划器：`algorithms/baseline_mppi/` 下的
+`BaselineMppiController` 在既有的 25Hz 异步外环工作线程上跑完整的 MPPI
+采样/代价/软最大值加权/分配流水线，`StateBaselineMppi` 在 250Hz 内环侧只做
+严格的零阶保持（Zero-Order Hold）直通，不含任何 PID/DOB/QP。未来阶段将在
+本包内继续承载 `KAMR-MPPI`（`pr_wbc_mppi_v4`）算法的完整实现：250Hz 内环
+（Planar Impedance PD + Pad-Force DOB + 12D Elastic Rhombic-Kern OSQP）、
+复用同一套异步外环工作线程架构的接触耦合 CUDA MPPI 外环。
 
 ## 目录结构
 
@@ -34,9 +38,15 @@ include/adhere_controller/
 │   ├── smc/
 │   │   └── SixDofSmcController.h    # 贴壁 6-DOF 滑模控制器（Phase 3.8）
 │   ├── wbc/
-│   │   └── WbcAllocatorBase.h     # Phase 4 12D OSQP 分配器的纯数据契约抽象基类（Phase 3.7）
-│   └── mppi/
-│       └── MppiPlannerBase.h      # Phase 4 异步 CUDA MPPI 外环规划器的纯数据契约抽象基类（Phase 3.7）
+│   │   └── WbcAllocatorBase.h     # Phase 4 12D OSQP 分配器的纯数据契约抽象基类（Phase 3.7，KAMR-MPPI 专用）
+│   ├── mppi/
+│   │   └── MppiPlannerBase.h      # Phase 4 KAMR-MPPI 外环规划器的纯数据契约抽象基类（Phase 3.7；
+│   │                              # BaselineMppiController 不实现它——直接输出 8 推力器指令）
+│   └── baseline_mppi/             # 纯 CUDA 外环 MPPI（Phase 4.1），零 Eigen/ROS 依赖的 GPU 类型独立成子目录
+│       ├── BaselineCudaTypes.h       # POD float 结构体：CudaState6Dof/CudaBaselineModelParams/CudaBaselineRuntimeConfig
+│       ├── BaselineMppiConfig.h      # host 侧超参数 + loadFromNode()（独立于 ModelParams 的解析器）
+│       ├── BaselineMppiKernels.h     # host<->nvcc 共享的核函数包装声明（仅 cudaStream_t + POD 类型）
+│       └── BaselineMppiController.h  # 引擎：init()/warmStart()/solve()，持久化设备/锁页缓冲区
 ├── FSM/
 │   ├── FSMState.h               # 抽象基类（checkFsmCommandChange()/targetPose() 共享实现）
 │   ├── StatePassive.h
@@ -44,9 +54,11 @@ include/adhere_controller/
 │   ├── StateOpenLoop.h
 │   ├── StatePidHold.h           # 仅保留设定点积分，误差->力矩律委托给 SixDofPidController（Phase 3.7）
 │   ├── StateAdherePid.h         # 两阶段贴壁 PID 基线：APPROACH 位置保持 + ADHERED 法向力 PI（Phase 3.8）
-│   └── StateAdhereSmc.h         # 两阶段贴壁 SMC 基线：全程单一滑模控制器 + 贴壁后压墙偏置（Phase 3.8）
+│   ├── StateAdhereSmc.h         # 两阶段贴壁 SMC 基线：全程单一滑模控制器 + 贴壁后压墙偏置（Phase 3.8）
+│   └── StateBaselineMppi.h      # 250Hz 严格零阶保持直通 + StatePidHold 同构的设定点/摇杆积分（Phase 4.1）
 └── common/
-    ├── enumClass.h              # FSMStateName（PASSIVE/DEPTH_HOLD/OPEN_LOOP/PID_HOLD/ADHERE_PID/ADHERE_SMC）/ FSMMode
+    ├── enumClass.h              # FSMStateName（PASSIVE/DEPTH_HOLD/OPEN_LOOP/PID_HOLD/ADHERE_PID/
+    │                            # ADHERE_SMC/BASELINE_MPPI）/ FSMMode
     ├── mathTypes.h              # Eigen 类型别名（Vec3/Vec6/Vec8/Mat68/Mat86/Mat34/Mat43/Mat48/RotMat）
     ├── mathTools.h              # quatToRotMat / rpyToRotMat / rotMatToRPY / quatMul / quatInverse /
     │                            # quatFromRPY / quatError / smallAngleQuat / saturation /
@@ -70,15 +82,20 @@ src/
 │   ├── pid/
 │   │   ├── SixDofPidController.cpp
 │   │   └── AdherePidController.cpp
-│   └── smc/
-│       └── SixDofSmcController.cpp
+│   ├── smc/
+│   │   └── SixDofSmcController.cpp
+│   └── baseline_mppi/
+│       ├── BaselineMppiConfig.cpp      # loadFromNode() 实现
+│       ├── BaselineMppiController.cpp  # 引擎：设备/锁页缓冲区管理 + 4 个核函数的编排调用（纯 g++ 编译）
+│       └── baseline_mppi_kernels.cu    # 4 个 CUDA 核函数 + stepBaselineFossen6Dof 设备端动力学（nvcc 编译）
 └── FSM/
     ├── StatePassive.cpp
     ├── StateDepthHold.cpp
     ├── StateOpenLoop.cpp
     ├── StatePidHold.cpp
     ├── StateAdherePid.cpp
-    └── StateAdhereSmc.cpp
+    ├── StateAdhereSmc.cpp
+    └── StateBaselineMppi.cpp
 
 launch/mujoco.launch.py          # 闭环启动文件：robot_state_publisher + adhere_mujoco_node
                                   # (autostart_controllers=['adhere_controller']) + RViz2
@@ -94,8 +111,11 @@ test/
 ├── test_dynamics_and_pid.cpp         # FossenDynamics/SixDofPidController/接触辅助估计/输出安全闸门（Phase 3.7）
 ├── test_adhere_wall_states.cpp       # 假单边弹簧贴墙模型：StateAdherePid/StateAdhereSmc 收敛性 +
 │                                      # Rhombic Kern 约束 + PID-vs-SMC 抗扰/啁啾对比（Phase 3.8）
-└── test_controller_metrics.cpp       # 纯逻辑 gtest：ControllerMetricsAccumulator 能耗/啁啾/
-                                       # 饱和/接触垫计数契约（Phase 3.8）
+├── test_controller_metrics.cpp       # 纯逻辑 gtest：ControllerMetricsAccumulator 能耗/啁啾/
+│                                      # 饱和/接触垫计数契约（Phase 3.8）
+└── test_baseline_mppi.cpp             # 真实 GPU gtest（本工作站 RTX5000，非 CPU mock）：
+                                        # K=1024/H=30 确定性+延迟+推力器界限、目标方向代价梯度
+                                        # 合理性、StateBaselineMppi ZOH 闭环位置跟踪（Phase 4.1）
 ```
 
 注：`config/controllers.yaml`（历史上的 `controller_manager` 参数文档）与
@@ -201,7 +221,7 @@ struct CtrlInterfaces {
 地面真值改由 `adhere_mujoco_node` 单独发布在 `/rov/ground_truth_odom`
 （`nav_msgs/Odometry`），仅供离线评估参考。
 
-## 当前状态（6 态，CLAUDE.md Phase 3.2/3.3/3.5/3.8）
+## 当前状态（7 态，CLAUDE.md Phase 3.2/3.3/3.5/3.8/4.1）
 
 | 状态 | ID | 职责 |
 |---|---|---|
@@ -211,6 +231,7 @@ struct CtrlInterfaces {
 | `PID_HOLD` (`state_pid_hold`) | 4 | `enter()` 锁存当前 `(x,y,z,roll,pitch,yaw)` 为保持点；摇杆/扳机推动期间按机体对齐速度平移/旋转该设定点（增益来自 `pid_hold.*`，roll/pitch 目标钳制在 `±max_tilt_deg`），松手瞬间冻结；6-DOF PID + 浮力/科氏力/阻力前馈 |
 | `ADHERE_PID` (`state_adhere_pid`) | 5 | 贴壁 PID 基线（Phase 3.8）：未贴壁时 `AdherePidController` 之外的 Y/Z/姿态+X 全部由 `SixDofPidController` 驱动，X 向设定点以 `adhere_pid.approach_speed` 匀速逼近 `adhere_pid.x_wall`；一旦 4 垫估计法向力之和超过 `adhere_pid.dock_force_thresh` 且位置进入 `adhere_pid.x_dock_eps`，粘滞切换为贴壁态：X 向改由专用 `AdherePidController` 的法向力 PI 律覆盖，Y/Z/姿态仍由 `SixDofPidController` 保持 |
 | `ADHERE_SMC` (`state_adhere_smc`) | 6 | 贴壁 SMC 基线（Phase 3.8）：全程只用一个 `SixDofSmcController` 实例驱动全部 6DOF（不为逼近阶段单独构造位置控制器），贴壁判定与 `ADHERE_PID` 相同，贴壁后额外叠加常值压墙偏置 `adhere_smc.wall_preload_fx` |
+| `BASELINE_MPPI` (`state_baseline_mppi`) | 7 | 纯 CUDA 外环 MPPI 基线（Phase 4.1）：`enter()` 锁存当前位姿为目标并调用 `BaselineMppiController::warmStart()`；设定点/摇杆设定点积分与 `PID_HOLD` 同构；`run()` 在 250Hz 严格零阶保持（ZOH），只把 `CtrlInterfaces::outer_loop_cmd_`（25Hz 异步工作线程最新一次 `solve()` 的输出）逐值写入 `pending_thruster_cmd`，不含任何内环 PID/DOB/QP |
 
 ## `MultiRateDecimator`：均匀整数抽取多速率调度
 
@@ -250,6 +271,57 @@ on_activate()`（与各 `FSMState` 构造 `B`/`B^+` 同一时机）预计算：
 `kern_margin` 由**已下达的推力指令**估计出来（而非直接读测量贴垫力
 传感器），与未来 KAMR-MPPI 约束用的是同一套准静态预测模型。
 
+## 纯 CUDA 外环 Baseline MPPI：`algorithms/baseline_mppi/`（CLAUDE.md Phase 4.1）
+
+`AdhereController::on_activate()` 用与 `a_contact_`/`c_kern_` 相同的
+`B`/`B^+`（新增成员 `b_`/`b_pinv_`）调用一次
+`BaselineMppiController::init()`，一次性分配全部设备/锁页宿主内存
+（`cudaMalloc`/`cudaHostAlloc`，K×H×6 的 `eps`、K 的 `costs`/`weights`、
+H×6 的 `tau_bar`/`tau_bar_new`、8 维 `u0`），`solve()` 之后再无任何运行时
+分配。`algorithms/baseline_mppi/BaselineCudaTypes.h` 定义零 Eigen/ROS 依赖
+的 `float` POD 结构体，供 `baseline_mppi_kernels.cu`（nvcc 编译）与
+`BaselineMppiController.cpp`（纯 g++ 编译，仅通过 `<cuda_runtime.h>` 的
+host API 操作设备指针/流）共同使用；两者之间唯一的共享头是
+`BaselineMppiKernels.h`，故意不出现任何 `curand_kernel.h` 类型或核函数
+启动语法——Philox RNG 状态数组对 host 侧始终是不透明的 `void*`。
+
+四个核函数按 `BaselineMppiController::solve()` 固定顺序在一条
+`cudaStreamNonBlocking` 流上依次提交，最终 `cudaStreamSynchronize()`
+一次性等待并把结果拷回锁页内存（`solve()` 本身是同步调用，但调用方始终
+是已经异步的 25Hz 外环工作线程，从不阻塞 500Hz/250Hz 的 ROS 线程）：
+
+1. `rolloutBaselineMppiKernel`（每 rollout 一个线程，`K` 路并行）：用
+   `curand_normal` 采样 `eps_{k,t} ~ N(0, diag(sigma_tau))`，经
+   `B^+`/`clamp`/`B` 往返得到 8 推力器指令与"已分配"机体力矩，RK2（显式
+   中点法）积分 `stepBaselineFossen6Dof`（对角 Fossen 刚体+附加质量+
+   科氏力+阻尼+静水恢复力模型，外加单边 Kelvin-Voigt 式贴墙接触罚函数），
+   累积四元数代价（位置/姿态/速度误差 + 控制量/控制增量代价 + MPPI
+   信息论交叉项）。**数值安全网**：每步后速度/角速度钳制在 `±50`，终值
+   `isfinite()` 兜底替换为大而有限的哨兵值——极端采样下某条 rollout 的
+   RK2 积分发散绝不会把 `NaN`/`Inf` 带进后续所有 `K` 条 rollout 共享的
+   `softmax`/加权归约。
+2. `softmaxWeightsKernel`（单 block）：共享内存 + warp shuffle 两段式
+   归约求 `rho=min(S)`、`eta=sum(exp(-(S-rho)/lambda))`，写出归一化权重
+   `w_k`。
+3. `updateNominalKernel`（每个时域步一个 block）：对 `K` 条 rollout 做
+   `sum_k w_k * eps_{k,t}` 的网格跨步归约，更新 `tau_bar_new[t] = tau_bar[t]
+   + (...)`。
+4. `finalizeNominalKernel`（单 block，`H` 线程）：3 点平滑 `tau_bar_new`，
+   热启动右移一拍写回 `tau_bar`（下次 `solve()` 的初值），并用平滑后的
+   `tau_bar_new[0]` 经 `B^+`/`clamp` 算出 `u_0*` 写入设备端 `u0` 缓冲——
+   CUDA 核函数之间没有跨 block 的全局屏障，这是把"平滑+右移+求输出"拆成
+   独立第 4 个核函数（而非任务原文的 3 个）的原因。
+
+`BaselineMppiConfig`（`K/H/dt/lambda/sigma_tau/Q_*/R_*/x_wall/wall_k/
+wall_b/preload_fx/seed`）故意**不**挂在 `ModelParams` 下——它是算法专属
+超参数，由独立的 `BaselineMppiConfig::loadFromNode()` 解析
+`robot_control.yaml` 的 `baseline_mppi.*` 键，与 `ModelParams` 只保留物理
+真值的原则一致，方便未来 `algorithms/kamr_mppi/` 落地时拥有自己的一套
+配置/动力学表示而不触碰这里的任何代码。`BaselineMppiController::solve()`
+直接返回 8 维推力器指令（不经过 `MppiPlannerBase`/`WbcAllocatorBase` 这两
+个 Phase-4-KAMR 专用的纯数据契约抽象类）——Baseline MPPI 明确更简单，
+是未来 KAMR-MPPI 的消融对照基线，从不经过 WBC 分配器。
+
 ## 效率/啁啾/安全遥测：`ControllerMetrics.h`（CLAUDE.md Phase 3.8）
 
 `common/ControllerMetrics.h::ControllerMetricsAccumulator`（头文件式实现，
@@ -270,13 +342,20 @@ on_activate()`（与各 `FSMState` 构造 `B`/`B^+` 同一时机）预计算：
 `/rov/controller_state` 上，供 `adhere_keyboard_input` 的
 `fsm_console_node`/`rt_monitor_node`/`benchmark_evaluator_node` 消费。
 
-`AdhereController` 新增一个真实的异步外环工作**线程**
-（`outerWorkerLoop()`，`on_activate()` 启动、`on_deactivate()`/析构函数
-`join()`），通过 `mutex`+`condition_variable` 保护的 `OuterLoopInput`/
-`OuterLoopOutput` 双缓冲结构体与 500Hz 物理线程非阻塞握手：每个
-`tick.outer_due` 把当前 `active_state`+`targetPose()` 快照写入输入缓冲并
-`notify_one()`。目前 worker 只做"回传序号，不做任何真实求解"的占位
-处理——Phase 4 只需替换 worker 循环体，线程生命周期/握手架构本身不用再改。
+`AdhereController` 有一个真实的异步外环工作**线程**（`outerWorkerLoop()`，
+`on_activate()` 启动、`on_deactivate()`/析构函数 `join()`），通过
+`mutex`+`condition_variable` 保护的 `OuterLoopInput`/`OuterLoopOutput`
+双缓冲结构体与 500Hz 物理线程非阻塞握手：每个 `tick.outer_due` 把当前
+`active_state`+`targetPose()` 快照（及一个 `run_baseline_mppi` 布尔位,
+由 `current_state_->state_name` 决定）写入输入缓冲并 `notify_one()`。
+`BASELINE_MPPI` 激活时 worker 调用 `baseline_mppi_.solve()`（Phase 4.1,
+见下一节）；其余状态仍是"只回传序号，不做真实求解"的占位处理——未来
+`KAMR_MPPI` 落地时同样只需在这个 `if` 分支旁再加一条分支，线程生命周期/
+握手架构本身始终不用再改。`OuterLoopOutput::u_star`/`solve_latency_ms`
+由 `update()` 每个 500Hz tick 以同一把互斥锁拷贝进
+`ctrl_interfaces_.outer_loop_cmd_`（`StateBaselineMppi::run()` 的无锁读取
+桥）与 `baseline_mppi_solve_ms_`（下方 `outer_planner_solve_ms` 的数据
+来源）。
 
 ## 实时诊断：`LoopProfiler` + `RuntimeDiagnostics`（CLAUDE.md Phase 3.6）
 
@@ -295,7 +374,10 @@ tick（固定 10Hz，独立于 `inner_decimation_`/`outer_decimation_`）汇总�
 `MujocoVisBridge` 既有的物理线程 EMA 遥测，本包不反向依赖
 `adhere_mujoco_hardware` 内部类型）。`estimator_hz` 在
 `estimation_mode=="ground_truth"` 时合法地报 `0Hz`（估计器本就没跑），
-因此被排除在 `timing_healthy` 的频率检查之外。
+因此被排除在 `timing_healthy` 的频率检查之外。`outer_planner_solve_ms`
+（Phase 4.1 新增字段）在没有任何 GPU 外环规划器激活时恒为 `0`，
+`BASELINE_MPPI` 激活时反映 `BaselineMppiController::solve()` 的真实 GPU
+墙钟延迟（典型 `<0.5ms`，远低于 `40ms` 外环预算）。
 
 ### `robot_control.yaml` 参数文件与节点重映射陷阱
 
@@ -313,9 +395,23 @@ tick（固定 10Hz，独立于 `inner_decimation_`/`outer_decimation_`）汇总�
 
 ## 线程安全
 
-本包所有类均**不**自带线程同步原语，仅 `ControlInputs` 使用
-`std::atomic<T>`；`CtrlInterfaces` 的读写发生在 `controller_manager` 的单一
-物理线程（500Hz）内，天然串行。
+本包所有类均**不**自带线程同步原语，仅 `ControlInputs`/`OuterLoopCommand`
+（Phase 4.1 新增，供 `StateBaselineMppi::run()` 无锁读取异步工作线程输出）
+使用 `std::atomic<T>`；`CtrlInterfaces` 的读写发生在 `controller_manager`
+的单一物理线程（500Hz）内，天然串行；`BaselineMppiController::solve()`
+仅由专用的 `outerWorkerLoop()` 线程调用，与 500Hz 线程之间只通过
+`outer_worker_mutex_` 做极短暂的快照拷贝同步（GPU 计算本身在锁外进行）。
+
+## CUDA 构建依赖（CLAUDE.md Phase 4.1）
+
+`algorithms/baseline_mppi/baseline_mppi_kernels.cu` 需要 `nvcc`
+（`CMAKE_CUDA_ARCHITECTURES "72;75"`，匹配 Jetson AGX Xavier/RTX5000）。本
+工作站 CMake 3.16 早于 `FindCUDAToolkit`（需 3.17+），`CMakeLists.txt`
+改用传统 `find_package(CUDA REQUIRED)`；若 `nvcc` 不在 `$PATH`（本机
+`/usr/local/cuda-11.4/bin/nvcc`，而 CLAUDE.md 第 0 节的构建命令只前置了
+`/usr/bin`），`CMakeLists.txt` 会在 `CMAKE_CUDA_COMPILER` 未被外部设置时
+自动回退到 `/usr/local/cuda/bin/nvcc`，因此 Phase 4.1 之后的
+`colcon build` 不需要修改既有构建命令。
 
 ## 运行
 

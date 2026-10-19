@@ -177,14 +177,14 @@ adhere_robot_ws/
 
 **Always re-read the last 2 sections of `PROGRESS.md` after every `/clear`** (Sec.0's startup protocol) before trusting this snapshot — it is a point-in-time summary, `PROGRESS.md` is the authoritative chronological record. Whenever a `/clear` session completes a major architectural change (package merge/split, new topic, new coordinate convention, new FSM state), **update this section in the same commit**.
 
-### Exact 5-Package Workspace Layout (as of Phase 3.8)
+### Exact 5-Package Workspace Layout (as of Phase 4.1)
 ```text
 src/
 ├── interfaces/adhere_control_msgs/        # FsmCommand, SetpointCommand, TeleopCommand, ControllerState, RuntimeDiagnostics (zero MuJoCo/CUDA/ros2_control deps)
 ├── descriptions/simplified_v1_description/ # URDF/Xacro + mjcf/rov_wall.xml + config/robot_control.yaml (single source of model params) + config/mujoco_sim.rviz
 ├── hardwares/adhere_mujoco_hardware/       # AdhereMujocoHardware (500Hz SystemInterface) + FossenHydrodynamics + dual ground-truth/noisy sensor paths + runtime diagnostics mirror + MujocoViewer + adhere_mujoco_node (zero config/ files)
-├── controllers/adhere_controller/          # AdhereController plugin (FSM: PASSIVE/DEPTH_HOLD/OPEN_LOOP/PID_HOLD/ADHERE_PID/ADHERE_SMC) in modular dynamics/allocation/estimator/algorithms{pid,smc,wbc,mppi}/FSM/common subdirs (Phase 3.7/3.8) + async outer-loop worker skeleton + centralized efficiency/chattering/safety telemetry (Phase 3.8)
-└── commands/adhere_keyboard_input/         # fsm_console_node + state_cmd_console_node + xbox_teleop_node + rt_monitor_node + benchmark_evaluator_node (Phase 3.8) (zero MuJoCo/CUDA/ros2_control deps)
+├── controllers/adhere_controller/          # AdhereController plugin (FSM: PASSIVE/DEPTH_HOLD/OPEN_LOOP/PID_HOLD/ADHERE_PID/ADHERE_SMC/BASELINE_MPPI) in modular dynamics/allocation/estimator/algorithms{pid,smc,wbc,mppi,baseline_mppi}/FSM/common subdirs (Phase 3.7/3.8/4.1) + async outer-loop worker now running a real pure-CUDA Baseline MPPI solve (Phase 4.1, first concrete occupant of that skeleton) + centralized efficiency/chattering/safety telemetry (Phase 3.8)
+└── commands/adhere_keyboard_input/         # fsm_console_node + state_cmd_console_node + xbox_teleop_node + rt_monitor_node + benchmark_evaluator_node (Phase 3.8), all extended for BASELINE_MPPI (Phase 4.1) (zero MuJoCo/CUDA/ros2_control deps)
 ```
 `adhere_controller_common` and `adhere_kamr_controller` NO LONGER EXIST (merged into `adhere_controller` in Phase 3.3) — do not recreate them or reference their names in new code. `FsmState.msg` NO LONGER EXISTS (replaced by `ControllerState.msg` in Phase 3.6) — do not recreate it. `adhere_controller/include/adhere_controller/common/{ModelParams.h,ThrusterAllocator.h}` NO LONGER EXIST (moved to `dynamics/ModelParams.h`/`allocation/ThrusterAllocator.h` in Phase 3.7, now declaration-only with `.cpp` implementations) — update any stale `#include` to the new paths. `adhere_controller/config/controllers.yaml` and `adhere_mujoco_hardware/config/mujoco_sim.rviz` NO LONGER EXIST (Phase 3.7: the former was dead/unused, the latter moved to `simplified_v1_description/config/`).
 
@@ -203,8 +203,65 @@ Water surface at world `Z=0.0m`; tank floor at world `Z=-10.0m` (10m depth); wal
 ### Model-Decoupling Status (Sec.3.3)
 `ModelParams::loadFromNode()` (`adhere_controller/include/adhere_controller/dynamics/ModelParams.h`, Phase 3.7: moved out of `common/`) loads ALL thruster/pad geometry, Fossen hydro params, workspace bounds, per-FSM-state gains, `estimation_mode`, and sensor mounting lever arms from `simplified_v1_description/config/robot_control.yaml` at `on_configure()`. `allocation/ThrusterAllocator.h::buildThrusterAllocationMatrix()` builds `B` dynamically from `ModelParams`' loaded geometry (no hardcoded corner coordinates). `robot_control.yaml`'s `thruster_pos_xyz`/`thruster_dir_xyz` encode `rov_wall.xml`'s REAL geometry (all 8 thruster sites at body `X=0.0`, zero lever arm) — a documented, user-confirmed deviation from this file's own Sec.4.3 illustrative placeholder. `estimation_mode` is deliberately NOT a `robot_control.yaml` key (see that file's inline comment on the wildcard-vs-exact-node-name parameter-precedence gotcha) — it is set only via `mujoco.launch.py`'s `estimation_mode` launch argument (default `ground_truth`) or `ModelParams`' compiled-in default.
 
-### FSM States Implemented (Phase 3.2/3.3/3.5/3.6/3.7/3.8, `adhere_controller`)
-`PASSIVE` (zero-thrust safe default), `DEPTH_HOLD` (Phase 3.7: delegates to `algorithms::pid::SixDofPidController` in a reduced "depth-only" mode — lateral X/Y setpoint re-latched to the current estimate every tick, attitude setpoint identity, equivalent to the pre-3.7 `-kp_att*rpy` small-angle Euler damping law at this state's operating point, now with buoyancy feedforward via `FossenDynamics` that the pre-3.7 law never had), `OPEN_LOOP` (direct teleop-to-wrench, no memory, 6-DOF with Tx/Ty from roll_rate/pitch_rate), `PID_HOLD` (Phase 3.7: keeps setpoint integration — stick-driven advancement, discrete `MODE_*` handling — in the FSM layer, delegates the error→wrench PID + hydrostatic/drag feedforward law to the same `SixDofPidController`, quaternion attitude setpoint `q_d_` integrated via quaternion kinematics and tracked via the singularity-free SO(3) error `mathTools.h::quatError()` with hemisphere alignment, roll/pitch clamped to `±pid_hold.max_tilt_deg` via an RPY round-trip). `ADHERE_PID`/`ADHERE_SMC` (Phase 3.8, see dedicated subsection below) are the first classical wall-adhesion baselines. `KAMR-MPPI`'s 250Hz inner loop (Impedance PD + Pad-Force DOB + 12D OSQP) is NOT yet implemented — `algorithms/wbc/WbcAllocatorBase.h` and `algorithms/mppi/MppiPlannerBase.h` (Phase 3.7) are pure data-contract abstract headers marking its Phase 4 landing point. The 25Hz outer loop now has a real async worker THREAD (`AdhereController::outerWorkerLoop()`, started in `on_activate()`/joined in `on_deactivate()`/dtor, hand-off via a mutex+condition_variable-guarded `OuterLoopInput`/`OuterLoopOutput` pair) but still only does a trivial pass-through "solve" — Phase 4 replaces the worker body with the real async CUDA MPPI rollout without touching this threading/hand-off architecture. Every FSM state writes its computed command into `CtrlInterfaces::pending_thruster_cmd` (never `.set_value()` directly) — `AdhereController::update()` runs the centralized `common/OutputSafety.h::sanitizeAndWriteThrusterCommands()` NaN/Inf-sanitize + saturation gate on it before it reaches hardware (Phase 3.7).
+### FSM States Implemented (Phase 3.2/3.3/3.5/3.6/3.7/3.8/4.1, `adhere_controller`)
+`PASSIVE` (zero-thrust safe default), `DEPTH_HOLD` (Phase 3.7: delegates to `algorithms::pid::SixDofPidController` in a reduced "depth-only" mode — lateral X/Y setpoint re-latched to the current estimate every tick, attitude setpoint identity, equivalent to the pre-3.7 `-kp_att*rpy` small-angle Euler damping law at this state's operating point, now with buoyancy feedforward via `FossenDynamics` that the pre-3.7 law never had), `OPEN_LOOP` (direct teleop-to-wrench, no memory, 6-DOF with Tx/Ty from roll_rate/pitch_rate), `PID_HOLD` (Phase 3.7: keeps setpoint integration — stick-driven advancement, discrete `MODE_*` handling — in the FSM layer, delegates the error→wrench PID + hydrostatic/drag feedforward law to the same `SixDofPidController`, quaternion attitude setpoint `q_d_` integrated via quaternion kinematics and tracked via the singularity-free SO(3) error `mathTools.h::quatError()` with hemisphere alignment, roll/pitch clamped to `±pid_hold.max_tilt_deg` via an RPY round-trip). `ADHERE_PID`/`ADHERE_SMC` (Phase 3.8, see dedicated subsection below) are the first classical wall-adhesion baselines. `BASELINE_MPPI` (ID `7`, Phase 4.1, see dedicated subsection below) is the first sampling-based planner: outer-loop-only, pure CUDA, with `StateBaselineMppi`'s 250Hz `run()` doing a strict Zero-Order-Hold pass-through of the async worker's latest output (no inner-loop PID/DOB/QP at all). `KAMR-MPPI`'s 250Hz inner loop (Impedance PD + Pad-Force DOB + 12D OSQP) is NOT yet implemented — `algorithms/wbc/WbcAllocatorBase.h` and `algorithms/mppi/MppiPlannerBase.h` (Phase 3.7) remain pure data-contract abstract headers marking its Phase 4.2 landing point (`BaselineMppiController` deliberately does NOT implement either — it returns raw allocated thruster commands, not a `NominalWrenchCmd` for a WBC to consume). The 25Hz outer loop's async worker THREAD (`AdhereController::outerWorkerLoop()`, started in `on_activate()`/joined in `on_deactivate()`/dtor, hand-off via a mutex+condition_variable-guarded `OuterLoopInput`/`OuterLoopOutput` pair, Phase 3.6) now runs a real solve — `baseline_mppi_.solve()` — whenever `run_baseline_mppi` is set (i.e. `BASELINE_MPPI` is the active state), and still falls back to the original trivial pass-through otherwise; `KAMR_MPPI` lands with another branch alongside it, Phase 4.2, without touching this threading/hand-off architecture. Every FSM state writes its computed command into `CtrlInterfaces::pending_thruster_cmd` (never `.set_value()` directly) — `AdhereController::update()` runs the centralized `common/OutputSafety.h::sanitizeAndWriteThrusterCommands()` NaN/Inf-sanitize + saturation gate on it before it reaches hardware (Phase 3.7).
+
+### Pure-CUDA Outer-Loop-Only `BASELINE_MPPI` Baseline (Phase 4.1)
+
+First landing point for a sampling-based planner, and the template for `KAMR-MPPI`'s eventual
+async CUDA outer loop. `algorithms/baseline_mppi/` (new subdirectory alongside `pid/`/`smc/`/
+`wbc/`/`mppi/`) is deliberately **not** scoped under `dynamics/ModelParams` — each planning
+algorithm owns its own dynamics representation/config (`BaselineMppiConfig`, loaded independently
+by its own `loadFromNode()` from `robot_control.yaml`'s `baseline_mppi.*` block) so `kamr_mppi`
+can later land with a different (contact-coupled) rollout model without touching this one.
+`BaselineCudaTypes.h` defines zero-Eigen/zero-ROS `float` POD structs (`CudaState6Dof`,
+`CudaBaselineModelParams`, `CudaBaselineRuntimeConfig`) shared between `baseline_mppi_kernels.cu`
+(nvcc) and `BaselineMppiController.cpp` (plain g++, host-side buffer/stream ownership via
+`<cuda_runtime.h>`'s host API) through the equally dependency-free `BaselineMppiKernels.h` — the
+Philox RNG state array stays an opaque `void*` on the host side, with `<curand_kernel.h>` and its
+device types confined entirely to the `.cu` file. `BaselineMppiController::init()` (called once
+from `AdhereController::on_activate()`, using the SAME `B`/`B^dagger` every FSMState already
+builds, cached as new members `b_`/`b_pinv_`) allocates every device/pinned buffer for the
+controller's lifetime (`cudaMalloc`/`cudaHostAlloc`) — `solve()` performs zero runtime allocation.
+
+Four kernels run in fixed order on one `cudaStreamNonBlocking` stream per `solve()` call
+(synchronous from the caller's perspective, but the caller is always the already-async 25Hz
+worker thread, never a 500Hz/250Hz ROS thread): (1) `rolloutBaselineMppiKernel` — one thread per
+rollout (`K=1024` default), samples `eps_{k,t} ~ N(0,diag(sigma_tau))` via `curand_normal`,
+allocates through `B^dagger`/clamp/`B` to get the actually-realized wrench, RK2-integrates
+`stepBaselineFossen6Dof` (diagonal Fossen rigid-body+added-mass+Coriolis+damping+hydrostatic
+model, mirroring `dynamics::FossenDynamics` in `float`, plus a unilateral Kelvin-Voigt-style wall
+contact penalty so a rollout cannot tunnel through `x_wall`), accumulates a quaternion-based
+running+terminal cost (position/attitude/velocity error + control effort/rate + MPPI
+information-theoretic cross term) — **no** Rhombic Kern safety term (this is the ablation
+baseline, never goes through a WBC/OSQP allocator); velocities are clamped (`±50`) each step and
+the final cost is `isfinite()`-sanitized to a large finite sentinel, so one numerically divergent
+rollout out of `K` can never poison the shared softmax/weighted-update reduction with NaN/Inf
+(a real bug hit and fixed during Phase 4.1 development — the stiff wall-contact spring-damper
+combined with large exploration noise occasionally diverged under explicit RK2 within the
+30-step/1.2s horizon). (2) `softmaxWeightsKernel` — single block, two-pass shared-mem+warp-shuffle
+reduction for `rho=min(S)`/`eta=sum(exp(-(S-rho)/lambda))`/normalized weights. (3)
+`updateNominalKernel` — one block per horizon step, grid-stride weighted-sum reduction of
+`w_k*eps_{k,t}`. (4) `finalizeNominalKernel` — a 4th kernel (the task spec's literal 3-kernel count
+is not portably achievable: CUDA has no grid-wide barrier across kernel-3's independent
+per-horizon-step blocks) that 3-tap-smooths the updated sequence, warm-start-shifts it by one step
+for the next `solve()` call, and computes `u_0* = clamp(B^dagger * tau_bar_0)` into a device buffer
+the host then `cudaMemcpyAsync`s back to pinned memory. `StateBaselineMppi::enter()` calls
+`warmStart()` (resets the nominal sequence to the constant hydrostatic hover wrench `-g(q_d)` via
+`FossenDynamics`, evaluated once host-side) and zeros `pending_thruster_cmd` so no stale command
+from the previous FSM state leaks through before the worker's first valid solve arrives.
+`CtrlInterfaces::OuterLoopCommand outer_loop_cmd_` (new lock-free `std::atomic<double>[8]` +
+`valid` bridge, same isolation discipline as `ActiveState`) is how `StateBaselineMppi::run()`'s
+250Hz ZOH reads the worker's latest `u_star` without ever touching
+`AdhereController::outer_worker_mutex_` directly. `RuntimeDiagnostics.msg` gained
+`outer_planner_solve_ms` (0 when no GPU planner is active; typically `<0.5ms` for `BASELINE_MPPI`,
+far under the `40ms` outer-loop budget), sourced from `BaselineMppiController`'s own
+`LoopProfiler`. `CMAKE_CUDA_ARCHITECTURES` is pinned to `"72;75"` (Sec.2's actual target hardware,
+not the wider `72;75;80;86` a literal reading of a looser task spec might suggest) in
+`adhere_controller/CMakeLists.txt`, which also falls back to `/usr/local/cuda/bin/nvcc` when
+`CMAKE_CUDA_COMPILER` is unset (this workstation's CUDA 11.4 toolkit is not on the mandated build
+command's `$PATH`) and uses the legacy `find_package(CUDA REQUIRED)` module (this workstation's
+CMake 3.16 predates `FindCUDAToolkit`, which needs 3.17+).
 
 ### Wall-Adhesion `ADHERE_PID`/`ADHERE_SMC` Baselines & Efficiency/Safety Telemetry (Phase 3.8)
 

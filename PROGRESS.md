@@ -2194,3 +2194,118 @@ estimation_mode:=ground_truth`，经 `ros2 topic pub/echo` 驱动）确认：
 0 增长到正值（该 ROV 默认出生点 `X=0.125m` 本就非常接近墙面
 `x_wall=0.0m`，APPROACH 阶段耗时很短），新增的 7 个效率遥测字段与
 `kern_margin` 均正常输出合理数值；进程通过 `SIGTERM` 干净退出。
+
+## Phase 4.1（2026-10-18）：纯 CUDA 外环 Baseline MPPI (`BASELINE_MPPI`) + 算法专属动力学架构
+
+### 动机
+
+Phase 4 要落地完整的 `KAMR-MPPI` 之前，需要先有一个干净的纯 CUDA 采样式规划器
+基线，用作消融对照：`BASELINE_MPPI`（ID `7`）是**仅外环**（无 250Hz 内环 PID/
+DOB/QP）的 CUDA MPPI 实现，同时借此确立"每种规划算法拥有自己的动力学/配置
+表示"的架构模式（`dynamics/ModelParams` 只保留物理真值，不再被某个具体算法
+的超参数污染），为下一阶段 `kamr_mppi` 落地接触耦合动力学铺路。
+
+### `algorithms/baseline_mppi/`：零 Eigen/ROS 依赖的 GPU 类型 + 独立配置解析器
+
+新增子目录，与既有 `pid/`/`smc/`/`wbc/`/`mppi/` 并列：`BaselineCudaTypes.h`
+定义纯 `float` POD 结构体（`CudaState6Dof`/`CudaBaselineModelParams`/
+`CudaBaselineRuntimeConfig`），`BaselineMppiKernels.h` 是 host（g++）与
+device（nvcc，`baseline_mppi_kernels.cu`）之间唯一共享的头文件——故意不含任何
+`curand_kernel.h` 类型或核函数启动语法，Philox RNG 状态数组对 host 侧始终是
+不透明的 `void*`。`BaselineMppiConfig`（`K/H/dt/lambda/sigma_tau/Q_*/R_*/
+x_wall/wall_k/wall_b/preload_fx/seed`）由独立的 `BaselineMppiConfig::
+loadFromNode()` 解析 `robot_control.yaml` 新增的 `baseline_mppi.*` 键块，
+**不**挂在 `ModelParams` 下，与 `ModelParams` 只保留物理真值参数的既有原则
+一致。
+
+### `BaselineMppiController`：持久化设备缓冲区 + 4 核函数流水线
+
+`BaselineMppiController::init()`（`AdhereController::on_activate()` 中与
+`a_contact_`/`c_kern_` 同一时机调用，复用同一套 `B`/`B^+`，新增成员
+`b_`/`b_pinv_` 缓存）一次性 `cudaMalloc`/`cudaHostAlloc` 全部设备/锁页宿主
+缓冲区（`eps`/`costs`/`weights`/`tau_bar`/`tau_bar_new`/`u0`），`solve()`
+之后零运行时分配。4 个核函数（而非任务原文的 3 个——CUDA 核函数之间没有
+跨 block 的全局屏障，"平滑+右移+求输出"必须拆成独立的第 4 个
+`finalizeNominalKernel`）在一条 `cudaStreamNonBlocking` 流上依序提交：
+`rolloutBaselineMppiKernel`（K=1024 路并行 RK2 积分 `stepBaselineFossen6Dof`
++ 四元数代价累积）→ `softmaxWeightsKernel`（两段式 shared-mem+warp-shuffle
+归约）→ `updateNominalKernel`（每时域步一个 block 的加权求和归约）→
+`finalizeNominalKernel`（3 点平滑 + 热启动右移 + `B^+` 求 `u_0*`）。
+`StateBaselineMppi`（`FSM/StateBaselineMppi.{h,cpp}`）的 `enter()` 锁存当前
+位姿为目标并调用 `warmStart()`（重置内部名义序列为静水恢复力前馈
+`-g(q_d)`），设定点/摇杆积分与 `StatePidHold` 同构；`run()` 在 250Hz 严格零阶
+保持，只把 `CtrlInterfaces::outer_loop_cmd_`（新增的无锁 `OuterLoopCommand`
+桥，与 `ActiveState` 同样的隔离纪律）逐值写入 `pending_thruster_cmd`，不含
+任何内环控制律。`BaselineMppiController::solve()` 直接返回 8 维推力器指令，
+**不**实现 `MppiPlannerBase`/`WbcAllocatorBase`（这两个纯数据契约抽象类仍
+专属 Phase 4.2 的 `KAMR-MPPI`）。
+
+### 调试记录：softmax 归约对单条 rollout 发散的脆弱性（真实 bug，已修复）
+
+开发过程中在真实 GPU（本工作站 RTX5000）上复现过一次严重 bug：切换到
+`BASELINE_MPPI` 后，无论目标位姿如何变化，8 个推力器指令恒为 `-40N`
+（全饱和、与目标无关）。逐层打桩定位（CPU 侧重新计算 `eta` 并与 GPU 结果
+比对）确认：`K=1024` 条 rollout 里只要有**一条**在显式 RK2 积分下数值发散
+（陡峭的贴墙弹簧阻尼 `wall_k=4000`/二次阻尼与较大的探索噪声 `sigma_tau`
+叠加，在 `H=30`/`dt=0.04s` 的时域内小概率发散到 `Inf`/`NaN`），其 `cost`
+变为 `NaN` 后会通过 `costs[k]-rho`/`expf()` 污染 `softmaxWeightsKernel`
+里**所有** `K` 条 rollout 共享的 `eta` 累加——`fmaxf(NaN, 1e-30f)` 悄悄把
+`NaN` 吞成 `1e-30`，看起来像"正常但权重异常尖锐"，实际上整条
+`tau_bar_new` 变成 `NaN`，经 `clamp()` 后又被 IEEE `fmin`/`fmax` 的 NaN
+处理规则统一钳到 `u_min=-40N`。修复为双重数值安全网：`rolloutBaselineMppi
+Kernel` 每步后把速度/角速度钳制在 `±50`（物理上远超这台 ROV 的任何正常
+工况），且终值用 `isfinite()` 兜底替换为大而有限的哨兵代价（`1e12`）——
+两者任一生效都能保证单条发散的 rollout 只会被软最大值赋予趋近于零的权重，
+而不会把 `NaN`/`Inf` 带进所有 `K` 条共享的归约。此 bug 修复后 `test_baseline_
+mppi.cpp` 的三个 gtest 从全部失败转为全部通过。
+
+### 诊断集成与 CMake CUDA 构建
+
+`RuntimeDiagnostics.msg` 新增 `outer_planner_solve_ms`（无 GPU 规划器激活时
+恒为 `0`），数据来自 `BaselineMppiController` 自带的 `LoopProfiler`，经
+`AdhereController::update()` 在 `outer_worker_mutex_` 保护下与
+`ctrl_interfaces_.outer_loop_cmd_` 一起拷贝到 500Hz 线程侧；
+`rt_monitor_node` 的诊断表格新增一行展示该延迟。`adhere_controller/
+CMakeLists.txt` 新增 `enable_language(CUDA)` + `CMAKE_CUDA_ARCHITECTURES
+"72;75"`（严格匹配 CLAUDE.md 第 2 节的 Jetson AGX Xavier/RTX5000 目标，不
+采用任务描述字面更宽的 `72;75;80;86`）；本工作站 `nvcc` 不在
+`$PATH`（CLAUDE.md 第 0 节的构建命令只前置 `/usr/bin`），故在
+`CMAKE_CUDA_COMPILER` 未被外部设置时自动回退到 `/usr/local/cuda/bin/nvcc`；
+本工作站 CMake 3.16 早于 `FindCUDAToolkit`（需 3.17+），改用传统
+`find_package(CUDA REQUIRED)` 模块提供 `CUDA_INCLUDE_DIRS`/
+`CUDA_LIBRARIES`/`CUDA_curand_LIBRARY`。`-Wall`/`-Wextra`/`-Wpedantic`
+通过 `$<COMPILE_LANGUAGE:CXX>` 生成器表达式限定只作用于 C++ 源文件，避免
+nvcc 收到它不认识的 host 编译器选项直接报错退出。
+
+### `adhere_keyboard_input` 扩展
+
+`fsm_console_node` 的菜单/键盘解析/动态子终端弹出逻辑扩展支持 `7`
+（`BASELINE_MPPI`）；`state_cmd_console_node` 的 `mode` 参数扩展接受 `7`，
+与既有 `mode==4/5/6` 完全复用同一套 `z/y/x/roll/pitch/yaw/all/reset/h`
+命令语法；`rt_monitor_node` 新增 GPU 规划器求解延迟行。`xbox_teleop_node`
+的 4 个面板按键（A/B/X/Y）已被 `PASSIVE`/`PID_HOLD`/`DEPTH_HOLD`/
+`OPEN_LOOP` 占满——与 Phase 3.8 的 `ADHERE_PID`/`ADHERE_SMC` 保持一致，
+`BASELINE_MPPI` 同样不绑定手柄按键，只能通过 `fsm_console_node` 键盘切换。
+
+### 验证结果
+
+`export PATH=/usr/bin:/usr/local/cuda/bin:$PATH && colcon build --symlink-
+install`（5 个包，含新增 CUDA 编译步骤）零警告零错误。`colcon test`：
+`adhere_controller` 新增 `test_baseline_mppi`（3 个用例，真实调用本工作站
+GPU、非 CPU mock：①`K=1024/H=30` 单次 `solve()` 延迟 `<5ms`、零 NaN/Inf、
+严格遵守每个推力器自己的 `thruster_max` 边界，且两个独立初始化、相同种子
+的 `BaselineMppiController` 对相同输入给出可复现输出；②目标深度上移/
+目标朝向偏航±90°的方向性代价梯度合理性检验（多次 receding-horizon 迭代
+而非单次 MPPI 更新，避免被采样噪声掩盖真实梯度）；③`StateBaselineMppi`
+250Hz ZOH 驱动假质点平面"虚拟物理"对 8s 模拟窗口的闭环位置跟踪收敛性，
+同 `test_fsm_states.cpp` 的测试范式）全部通过，加上既有全部套件共 55/55
+（9 个 gtest 可执行文件）零回归；lint 结果与既有基线完全一致（仅剩全仓库
+预先存在的缺版权头/cppcheck 对 `.h` 误判为 C 代码等 Phase 2.14 起已记录的
+失败，新增文件未引入任何新增 lint 回归）。真实 MuJoCo 闭环（`mujoco.
+launch.py headless:=true use_rviz:=false estimation_mode:=ground_truth`，
+经 `ros2 topic pub` 驱动）确认：切换到 `BASELINE_MPPI`（`command:=7`）不
+崩溃，`/rov/controller_state` 正确发布 `current_state=7`、
+`state_name=state_baseline_mppi`，推力器指令始终有限且在 `±40N` 范围内，
+`/rov/runtime_diagnostics` 显示 `outer_loop_hz≈25.0`、
+`outer_planner_solve_ms≈0.17~0.3ms`（远低于 `40ms` 外环预算）、
+`timing_healthy=true`；进程通过 `SIGTERM` 干净退出，无残留进程。

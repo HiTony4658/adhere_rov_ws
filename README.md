@@ -194,7 +194,7 @@ ros2 launch simplified_v1_description visualize.launch.py
 # 3b. 完整 FSM 闭环仿真（默认行为）：adhere_controller 自动加载/配置/激活（默认
 # PASSIVE 态，250Hz 均匀内环 / 25Hz 均匀外环），MuJoCo 窗口 + RViz2 双可视化同步，
 # 并自动弹出 Xbox 手柄遥操作 + FSM 终端控制台
-# （PASSIVE/DEPTH_HOLD/OPEN_LOOP/PID_HOLD/ADHERE_PID/ADHERE_SMC 六态）
+# （PASSIVE/DEPTH_HOLD/OPEN_LOOP/PID_HOLD/ADHERE_PID/ADHERE_SMC/BASELINE_MPPI 七态）
 ros2 launch simplified_v1_description mujoco.launch.py
 
 # 3c. 纯开环硬件仿真：覆盖为 0 个控制器加载（u=0 被动漂移验证场景），不弹出遥操作
@@ -227,9 +227,10 @@ ros2 launch adhere_keyboard_input teleop_gcs.launch.py
 | **Phase 2** | `AdhereMujocoHardware` 500Hz 读写循环 + Fossen 水动力 + 可插拔水流环境 + `MujocoViewer`/RViz2 双可视化 | ✅ 完成 |
 | **Phase 3.1** | `adhere_controller_common`（`CtrlInterfaces`/FSM/数学工具）+ `PASSIVE`/`DEPTH_HOLD` 两态 + `AdhereKamrController` 插件 + FSM 终端控制台 | ✅ 完成 |
 | **Phase 3.1.1** | 均匀整数抽取多速率（500Hz→250Hz 内环/25Hz 外环，`MultiRateDecimator`）+ `adhere_mujoco_hardware`/`adhere_kamr_controller` 严格包解耦（独立 `mujoco_sim.launch.py` / `mujoco.launch.py`） | ✅ 完成 |
-| **Phase 3.2** | 4 话题解耦通信契约（`FsmCommand`/`SetpointCommand`/`TeleopCommand`/`FsmState`）+ 共享 `ThrusterAllocator` + `OPEN_LOOP`/`PID_HOLD` 两态 + 官方 `joy` 包 Xbox 手柄遥操作 + 上位机（GCS）独立部署 | ✅ 当前阶段 |
-| **Phase 4** | `AdhereKamrController` 250Hz 内环（PD + DOB + 12D OSQP） | 待开始 |
-| **Phase 5** | 25Hz 异步 CUDA MPPI 外环滚动线程（`sm_72`/`sm_75` 双架构） | 待开始 |
+| **Phase 3.2** | 4 话题解耦通信契约（`FsmCommand`/`SetpointCommand`/`TeleopCommand`/`FsmState`）+ 共享 `ThrusterAllocator` + `OPEN_LOOP`/`PID_HOLD` 两态 + 官方 `joy` 包 Xbox 手柄遥操作 + 上位机（GCS）独立部署 | ✅ 完成 |
+| **Phase 3.3–3.8** | 单一 `adhere_controller` 包合并 + 模型解耦 `ModelParams`/`ThrusterAllocator` + 500Hz 多速率传感器融合 + Sim-to-Real 纯净 `ControllerState`/`RuntimeDiagnostics` + `FossenDynamics`/`SixDofPidController` 模块化 + `ADHERE_PID`/`ADHERE_SMC` 贴壁基线 + 效率/啁啾/安全遥测 | ✅ 完成 |
+| **Phase 4.1** | 纯 CUDA 外环 `BASELINE_MPPI`（`algorithms/baseline_mppi/`，`sm_72`/`sm_75` 双架构，25Hz 异步工作线程滚动采样 + 250Hz 严格零阶保持） | ✅ 完成 |
+| **Phase 4.2** | `KAMR-MPPI` 250Hz 内环（Planar Impedance PD + Pad-Force DOB + 12D Elastic Rhombic-Kern OSQP）+ 接触耦合 CUDA MPPI 外环 | 待开始 |
 | **Phase 6** | 与 Python/JAX 基准（`mujoco_mppi_ws`）数值对齐验证 + 论文实验复现 | 待开始 |
 | **Phase 7** | Jetson AGX Xavier Sim-to-Real 真实硬件接口 `adhere_real_hardware` | 未来阶段 |
 

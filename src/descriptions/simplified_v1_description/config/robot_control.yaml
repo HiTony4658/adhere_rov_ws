@@ -170,6 +170,27 @@ adhere_mujoco_node:
     adhere_smc.x_dock_eps: 0.02
     adhere_smc.wall_preload_fx: 30.0     # N magnitude; applied as -wall_preload_fx wrench
 
+    # Baseline MPPI (CLAUDE.md Phase 4.1): algorithm-scoped config, parsed independently of
+    # ModelParams by baseline_mppi::BaselineMppiConfig::loadFromNode() (not ModelParams::
+    # loadFromNode()) -- still lives under this same flat adhere_mujoco_node.ros__parameters
+    # block per the single-top-level-key gotcha documented above.
+    baseline_mppi.num_rollouts: 1024       # K
+    baseline_mppi.horizon: 30              # H
+    baseline_mppi.dt: 0.04                 # s, matches the 25Hz outer loop (outer_decimation=20)
+    baseline_mppi.lambda: 10.0             # MPPI inverse temperature
+    baseline_mppi.sigma_tau: [40.0, 30.0, 30.0, 8.0, 8.0, 8.0]  # [Fx,Fy,Fz,Tx,Ty,Tz] exploration std
+    baseline_mppi.q_pos: [800.0, 800.0, 800.0]
+    baseline_mppi.q_quat: 40.0
+    baseline_mppi.q_vel: [8.0, 8.0, 8.0, 1.0, 1.0, 1.0]
+    baseline_mppi.r_u: 0.001
+    baseline_mppi.r_dtau: [0.005, 0.005, 0.005, 0.005, 0.005, 0.005]
+    baseline_mppi.terminal_mult: 5.0
+    baseline_mppi.x_wall: 0.0              # m, world X of the wall plane (CLAUDE.md Sec.4.1)
+    baseline_mppi.wall_k: 4000.0           # N/m, rollout-only unilateral contact penalty stiffness
+    baseline_mppi.wall_b: 200.0            # N*s/m, rollout-only contact penalty damping
+    baseline_mppi.preload_fx: 30.0         # N, constant pressing bias once a rollout nears the wall
+    baseline_mppi.seed: 88172645463325252  # curand Philox seed (fixed -> deterministic solve())
+
     # --- Phase 3.5: dual state-acquisition (ground_truth / sensor_fusion) ---
     # "ground_truth": CtrlInterfaces::active_state is populated directly from noise-free
     # hardware odometry (legacy Phase 2-3.4 behavior). "sensor_fusion": active_state comes

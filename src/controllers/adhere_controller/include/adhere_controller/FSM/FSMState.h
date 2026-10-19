@@ -47,7 +47,7 @@ public:
 
   // Default implementation (CLAUDE.md Phase 3.2 Stage 2.2, extended Phase 3.8): maps the live
   // control_inputs_.command atomic (set by AdhereController's /rov/fsm_command
-  // subscription, 0=NO_CHANGE..6=ADHERE_SMC) onto the requested FSMStateName, or this state's own
+  // subscription, 0=NO_CHANGE..7=BASELINE_MPPI) onto the requested FSMStateName, or this state's own
   // name if no change is requested. All concrete states share this identical mapping, so each
   // one's checkChange() override is just `return checkFsmCommandChange();` -- replaces the
   // Phase 3.1 pattern of each state hardcoding its own `== 1`/`== 2` comparison, which does not
@@ -67,6 +67,8 @@ public:
         return FSMStateName::ADHERE_PID;
       case 6:
         return FSMStateName::ADHERE_SMC;
+      case 7:
+        return FSMStateName::BASELINE_MPPI;
       default:
         return state_name;
     }
