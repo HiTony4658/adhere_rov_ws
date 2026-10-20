@@ -24,6 +24,12 @@ find_package(visualization_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
+# Phase 4.2: adhere_mujoco_node only (never the hardware_interface library target below) listens
+# to AdhereController's /rov/controller_state so the embedded MuJoCo viewer + RViz2 markers can
+# mirror the live FSM target pose/adhere stage. A plain message-only dependency, not a MuJoCo/
+# CUDA/ros2_control coupling in the other direction (CLAUDE.md Sec.3.3's decoupling rule governs
+# adhere_controller linking against adhere_mujoco_hardware, not this).
+find_package(adhere_control_msgs REQUIRED)
 
 # ---------------------------------------------------------------------------------------
 # MuJoCo discovery. No official find_package(mujoco) CMake-config is assumed to be
@@ -104,6 +110,7 @@ ament_target_dependencies(adhere_mujoco_node
   visualization_msgs
   geometry_msgs
   std_msgs
+  adhere_control_msgs
 )
 
 install(TARGETS ${PROJECT_NAME}

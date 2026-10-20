@@ -186,6 +186,13 @@ ModelParams ModelParams::loadFromNode(const rclcpp::Node::SharedPtr & node)
   p.adhere_smc.wall_preload_fx =
     autoDeclareDouble("adhere_smc.wall_preload_fx", p.adhere_smc.wall_preload_fx);
 
+  p.adhere_stage.target_depth_m =
+    autoDeclareDouble("adhere_target_depth_m", p.adhere_stage.target_depth_m);
+  p.adhere_stage.target_y = autoDeclareDouble("adhere_target_y", p.adhere_stage.target_y);
+  p.adhere_stage.standoff_x = autoDeclareDouble("adhere_standoff_x", p.adhere_stage.standoff_x);
+  p.adhere_stage.depth_tol = autoDeclareDouble("adhere_depth_tol", p.adhere_stage.depth_tol);
+  p.adhere_stage.vz_tol = autoDeclareDouble("adhere_vz_tol", p.adhere_stage.vz_tol);
+
   p.estimation_mode = autoDeclareString("estimation_mode", p.estimation_mode);
   declareVec3("sensor_mount.r_imu_xyz", p.sensor_mount.r_imu);
   declareVec3("sensor_mount.r_depth_xyz", p.sensor_mount.r_depth);

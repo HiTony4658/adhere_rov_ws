@@ -85,7 +85,8 @@ struct MujocoVisBridge
   std::atomic<double> step_work_ms{0.0};  // EMA of read()+update()+write() pure compute time
   std::atomic<double> sim_time{0.0};
   std::atomic<int> flow_mode_active{1};
-  std::atomic<double> wave_tau{0.0};
+  std::atomic<double> wave_tau{0.0};      // uncapped total relative clock since gust trigger
+  std::atomic<double> wave_tau_mod{0.0};  // Phase 4.2: wave_tau wrapped mod the 12.0s gust cycle
   std::atomic<int> hydro_patch_count{0};   // HydroGeometryModel::patches.size()
   std::atomic<double> kern_val{0.0};       // Rhombic Kern K_val
   std::atomic<double> m_kern{0.0};         // Rhombic Kern margin, 1 - K_val
@@ -110,6 +111,22 @@ struct MujocoVisBridge
   std::atomic<double> hydro_f_venturi_x{0.0};
   std::atomic<double> hydro_f_squeeze_x{0.0};
   std::atomic<double> hydro_f_fk_am_y{0.0};
+
+  // Phase 4.2: AdhereController's live target pose/FSM state/adhere stage, forwarded here by
+  // adhere_mujoco_node's /rov/controller_state subscription callback (ROS executor thread) so
+  // MujocoViewer's overlay/green target sphere and the RViz2 /rov/environment_markers publisher
+  // both reflect the exact same live reference pose. Plain lock-free atomics, same pattern as
+  // the other hardware->GUI telemetry above; fsm_current_state_code mirrors
+  // ControllerState::current_state's int32 encoding (0 = no controller active yet) and
+  // adhere_stage_code is 0=not an adhere state / 1=DEPTH_ALIGN / 2=WALL_ADHERE -- both plain
+  // integer codes (not strings) to stay lock-free-atomic-friendly; human-readable names are
+  // derived locally by each consumer from these codes.
+  std::atomic<int> fsm_current_state_code{0};
+  std::atomic<int> adhere_stage_code{0};
+  std::atomic<double> adhere_target_x{0.0};
+  std::atomic<double> adhere_target_y{0.0};
+  std::atomic<double> adhere_target_z{0.0};
+  std::atomic<double> adhere_target_yaw_deg{0.0};
 };
 
 }  // namespace adhere_mujoco_hardware

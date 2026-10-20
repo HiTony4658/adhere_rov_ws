@@ -336,6 +336,11 @@ liftoff_ratio`/`corner_trap_ratio`/`liftoff_events`/`active_pads`——这是
   `d->time`；之后水动力评估改用相对时间 `τ = t_sim - t_trigger >= 0` 查询
   `StationKeepingGustPlugin`，而不是原始仿真时间——这样无论用户在第几秒按下
   `2`，两段阵风都会从造浪开始的那一刻重新播放，不会被仿真已运行的时长"吃掉"。
+  Phase 4.2：水动力积分（`applyHydrodynamics()`）与 `write()` 的流速箭头/
+  遥测快照两处都改用 `τ_mod = fmod(τ, 12.0)` 查询该插件，使这套 `12.0s` 两段
+  阵风模式在模式 `2` 保持激活期间**永久循环重放**（而非仅播放一次后归于平
+  静）；叠加层/`ControllerState`-驱动的遥测同时展示未取模的总 `τ` 与取模后
+  的周期相位 `τ_mod`。
 - **切回模式 `1`** 时立即恢复零环境流速（`v_flow = 0`），不经过任何过渡。
 - 两个等价的指令入口，都会调用同一个 `AdhereMujocoHardware::setFlowMode(int)`：
   - **`MujocoViewer`**（主要入口）：按 `1`/`2` 键或点击左侧边栏 "Wave Environment"
@@ -397,6 +402,15 @@ GLFW 窗口创建，仅空转等待停止信号。
 复选框、单选按钮、按钮）与 3D 视口的相机/扰动操作互不干扰，由
 `MujocoViewer` 按点击位置落在哪个 `mjrRect` 自动路由。
 
+Phase 4.2：20m×20m×10m 水箱把 MuJoCo 自动估算的 `model_->stat.meansize`/
+`extent` 放大了约 10 倍，而 `mjv_applyPerturbForce()`/`mjv_updateScene()`
+的扰动弹簧刚度与力箭头粗细/长度都按 `meansize` 缩放，导致轻微拖拽即可产生
+巨大的扰动力与夸张的箭头。`configure()` 中把 `model_->stat.meansize` 钳回
+`0.25`（匹配 ROV 壳体尺度而非水箱尺度）并相应缩小 `vis.scale.forcewidth`/
+`vis.map.force`；`applyHydrodynamics()` 中额外对 `xfrc_perturb` 的力/力矩
+范数做硬钳位（`<=40.0N`/`<=8.0N*m`），作为不依赖 GUI 侧视觉缩放公式的权威
+最后防线。
+
 **键盘（任意焦点下）**：
 
 | 按键 | 效果 |
@@ -453,9 +467,10 @@ GLFW 窗口创建，仅空转等待停止信号。
 | 分组 | 控件 | 说明 |
 |---|---|---|
 | Thrusters (Manual)（自定义） | `Zero All` 按钮 | 一键将全部 8 个滑条归零 |
+| | `Manual Override` 复选框（Phase 4.2） | 默认关闭：8 个滑条每帧被 `d_vis_->ctrl[i]` 覆盖，变成控制器实际输出的**只读实时镜像**（滑条/数值框随 FSM 状态动态摆动），同时 `manual_ctrl` 强制清零；勾选后恢复原始行为——拖动滑条把值写入 `MujocoVisBridge::manual_ctrl`（与上层控制器指令相加）|
 | | `Thruster Deadzone (2.0N)` 复选框 | 默认关闭；勾选后钳位到轨道极限的目标推力若 `\|u_target\|<2.0N` 则强制归零（先于下方的 Lag 滤波生效），模拟真实 ESC 最小 PWM 空当（`CLAUDE.md` §3.1，占位量级，待真实推力器标定） |
 | | `Thruster Lag (15ms)` 复选框 | 默认关闭（直通，钳位/死区处理后立即写入 `ctrl`）；勾选后对处理后的目标推力额外叠加一阶 ESC 惯性延迟滤波（`tau_T=0.015s`，`alpha_T = 1-exp(-dt/tau_T)`），仅在物理确实前进一拍时积分，暂停时保持上次值不变 |
-| | `thr_N1..4` / `thr_T5..8` 滑条 | `[-40, 40] N`，叠加写入
+| | `thr_N1..4` / `thr_T5..8` 滑条 | `[-40, 40] N`。`Manual Override` 关闭时为实时只读镜像（见上）；勾选后叠加写入
   `MujocoVisBridge::manual_ctrl`（与上层控制器指令相加）后统一钳位到
   `±40.0 N` 硬件轨道极限，可在未挂载控制器时手动测试单个推力器——例如把 4 个
   `thr_N*` 拉到正值可将 ROV 压向壁面，用于验证接触力/`Pad Contact Forces`
@@ -487,7 +502,17 @@ GLFW 窗口创建，仅空转等待停止信号。
   `M_kern`、当前接触垫数（`Active Pads`，0-4）、**500Hz 真实时基累积**的
   脱离时间比例（`Liftoff Ratio`）、角三角陷阱时间比例（`Corner-Trap Ratio`）
   与离散脱离事件数（`Liftoff Events`，上升沿计数）——均每个物理步累加，不受
-  60Hz 渲染快照节流影响，可被 `Reset Stats` 按钮清零重新统计 |
+  60Hz 渲染快照节流影响，可被 `Reset Stats` 按钮清零重新统计；Phase 4.2
+  新增 `Target Pos (X Y Z Yaw)`（当前激活 FSM 状态的参考位姿，经
+  `adhere_mujoco_node` 订阅 `/rov/controller_state` 转发写入
+  `MujocoVisBridge`）与 `FSM State / Adhere Stage`（FSM 状态名 + `DEPTH_
+  ALIGN`/`WALL_ADHERE`/`n/a`） |
+
+Phase 4.2：`ADHERE_PID`/`ADHERE_SMC`/`BASELINE_MPPI` 任一贴壁状态激活时，
+视口内额外渲染一个亮绿色目标球（`mjGEOM_SPHERE`，半径 `0.035m`，RGBA
+`{0.1, 1.0, 0.2, 0.9}`），固定在世界 `(X=0, Y=Y_target, Z=Z_target)`——即
+该状态当前的贴壁目标点；非贴壁状态下不渲染。`adhere_mujoco_node.cpp` 的
+`/rov/environment_markers` 同步发布等价的 RViz2 `SPHERE` Marker。
 
 `Visualize`/`Render Flags`/`Label`/`Visibility Groups` 四个原生 MuJoCo 开关组
 默认折叠（点击分组标题即可展开），为新增的 `Sim Speed`/相机预设/`Hydro Model`/

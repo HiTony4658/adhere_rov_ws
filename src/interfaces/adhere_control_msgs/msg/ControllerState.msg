@@ -10,6 +10,7 @@ int32 current_state                      # 1=PASSIVE, 2=DEPTH_HOLD, 3=OPEN_LOOP,
 string state_name
 string estimation_mode                   # "ground_truth" or "sensor_fusion" (CtrlInterfaces::active_state source)
 geometry_msgs/Pose target_pose           # Active reference pose (World frame, Quaternion), meaning is per-state
+string adhere_stage                      # "" except for ADHERE_PID/ADHERE_SMC/BASELINE_MPPI: "DEPTH_ALIGN" or "WALL_ADHERE" (Phase 4.2)
 geometry_msgs/Pose estimated_pose        # Active pose used by the controller (World frame, Quaternion)
 geometry_msgs/Twist estimated_twist_body # Active body-frame linear (m/s) & angular (rad/s) velocity
 float64[4] contact_forces                # Active 4 pad normal forces [TL, TR, BL, BR] (N), estimated via A_contact*u

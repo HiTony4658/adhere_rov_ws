@@ -35,12 +35,25 @@ public:
 
   PoseTarget targetPose() const override;
 
+  // Phase 4.2: whether Stage 1 (DEPTH_ALIGN) has completed and Stage 2 (WALL_ADHERE) has begun.
+  // Unlike StateAdherePid/StateAdhereSmc, there is no separate docked_/force-threshold gate here
+  // -- once depth_aligned_, the target simply moves to the wall plane and the CUDA planner's own
+  // rollout cost (wall contact penalty + preload_fx, CLAUDE.md Phase 4.1 Sec.3.1) handles the
+  // actual approach/press, same as it already does for any other target near the wall.
+  bool isDepthAligned() const { return depth_aligned_; }
+
+  const char * adhereStageName() const override
+  {
+    return depth_aligned_ ? "WALL_ADHERE" : "DEPTH_ALIGN";
+  }
+
 private:
   baseline_mppi::BaselineMppiController & planner_;
 
   Vec3 p_d_world_ = Vec3::Zero();
   Quat q_d_ = Quat(1.0, 0.0, 0.0, 0.0);
 
+  bool depth_aligned_ = false;
   uint64_t last_seen_setpoint_seq_ = 0;
 };
 

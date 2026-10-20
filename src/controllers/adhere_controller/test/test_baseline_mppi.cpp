@@ -50,6 +50,13 @@ constexpr double kNetBuoyancyZ = 1.962;  // N, rho*g*V - m_dry*g (matches test_f
 const Vec3 kDLin(30.0, 20.0, 25.0);
 const Vec3 kDQuad(140.0, 50.0, 70.0);
 
+// Phase 4.2: one-sided wall-contact spring (same idiom as test_adhere_wall_states.cpp's
+// FakeWallPlant) -- needed now that Test 3 below drives the target all the way onto the wall
+// plane (WALL_ADHERE), not just an arbitrary free-swimming setpoint; without it there is nothing
+// to stop the point-mass coasting straight through x=0.
+constexpr double kWallStiffness = 4000.0;
+constexpr double kContactStartX = 0.05;
+
 Mat68 buildB()
 {
   return adhere_controller::buildThrusterAllocationMatrix(
@@ -217,7 +224,12 @@ public:
     const Vec3 buoy(0.0, 0.0, kNetBuoyancyZ);
     const Vec3 drag =
       kDLin.cwiseProduct(vel_) + kDQuad.cwiseProduct(vel_.cwiseProduct(vel_.cwiseAbs()));
-    const Vec3 accel = (f + buoy - drag) / kMass;
+    double f_contact_x = 0.0;
+    if (pos_.x() < kContactStartX) {
+      f_contact_x = kWallStiffness * (kContactStartX - pos_.x());
+    }
+    const Vec3 contact(f_contact_x, 0.0, 0.0);
+    const Vec3 accel = (f + buoy - drag + contact) / kMass;
     vel_ += accel * dt;
     pos_ += vel_ * dt;
 
@@ -256,29 +268,23 @@ TEST(BaselineMppi, ClosedLoopPositionTrackingWithin15cm)
   BaselineMppiController planner;
   planner.init(kModelParams, b, b_pinv, cfg);
 
+  // Phase 4.2 two-stage adhere sequence: BASELINE_MPPI is now also a wall-adhesion FSM state
+  // (same as ADHERE_PID/ADHERE_SMC) -- StateBaselineMppi::run() ignores/overrides any
+  // setpoint-driven target until DEPTH_ALIGN completes, then re-targets onto the wall plane for
+  // WALL_ADHERE (CLAUDE.md Phase 4.2 Sec.3). This test therefore exercises the full two-stage
+  // sequence (not an arbitrary free-swimming setpoint, which Test 2 above already covers via
+  // direct solve() calls) and checks convergence to the shared adhere_stage target, same idiom
+  // as test_adhere_wall_states.cpp's StateAdherePid/StateAdhereSmc tests.
   FakePlant plant;
-  plant.setPosition(0.0, 0.0, -2.0);
+  plant.setPosition(1.0, 0.1, -2.1);
 
   adhere_controller::StateBaselineMppi state(plant.ci, kModelParams, planner);
   state.enter();
 
-  // MODE_FULL_POSE setpoint: target [0.2, 0.15, -2.3], identity attitude (same edge-detected
-  // setpoint grammar every other FSM state test drives, CLAUDE.md Phase 3.2 Stage 2.1).
-  auto & ci = plant.ci.control_inputs_;
-  ci.setpoint_command_type.store(2);
-  ci.setpoint_target_pos_x.store(0.2);
-  ci.setpoint_target_pos_y.store(0.15);
-  ci.setpoint_target_pos_z.store(-2.3);
-  ci.setpoint_target_quat_w.store(1.0);
-  ci.setpoint_target_quat_x.store(0.0);
-  ci.setpoint_target_quat_y.store(0.0);
-  ci.setpoint_target_quat_z.store(0.0);
-  ci.setpoint_seq.store(1);
-
   const rclcpp::Time t0(0, 0, RCL_ROS_TIME);
   const rclcpp::Duration period = rclcpp::Duration::from_seconds(kDt);
 
-  const int kOuterSteps = static_cast<int>(8.0 / kOuterDt);  // 8.0s simulated
+  const int kOuterSteps = static_cast<int>(20.0 / kOuterDt);  // 20.0s simulated
   for (int outer = 0; outer < kOuterSteps; ++outer) {
     const auto target = state.targetPose();
     const Vec3 pos(
@@ -303,9 +309,10 @@ TEST(BaselineMppi, ClosedLoopPositionTrackingWithin15cm)
     }
   }
 
-  EXPECT_NEAR(plant.position().x(), 0.2, 0.15);
-  EXPECT_NEAR(plant.position().y(), 0.15, 0.15);
-  EXPECT_NEAR(plant.position().z(), -2.3, 0.15);
+  EXPECT_TRUE(state.isDepthAligned());
+  EXPECT_NEAR(plant.position().x(), planner.xWall(), 0.15);
+  EXPECT_NEAR(plant.position().y(), kModelParams.adhere_stage.target_y, 0.15);
+  EXPECT_NEAR(plant.position().z(), -kModelParams.adhere_stage.target_depth_m, 0.15);
 }
 
 }  // namespace

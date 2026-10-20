@@ -35,6 +35,11 @@
   <depend>visualization_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>std_msgs</depend>
+  <!-- adhere_mujoco_node subscribes to AdhereController's /rov/controller_state
+       (ControllerState.msg) purely to mirror the live FSM target pose/adhere stage into the
+       embedded MuJoCo viewer + RViz2 markers: a message-only dependency, zero MuJoCo/CUDA/
+       ros2_control coupling back onto adhere_controller itself. -->
+  <depend>adhere_control_msgs</depend>
   <!-- xacro/rviz2/robot_state_publisher/ament_index_python were previously exec_depend here
        for this package's own launch file; that launch file now lives in
        simplified_v1_description (CLAUDE.md Phase 3.4), which declares those deps itself. -->

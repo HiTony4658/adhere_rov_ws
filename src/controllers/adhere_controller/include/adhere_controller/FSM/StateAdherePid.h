@@ -54,6 +54,15 @@ public:
   // transitioned from APPROACH to ADHERED.
   bool isDocked() const { return docked_; }
 
+  // Phase 4.2: whether Stage 1 (DEPTH_ALIGN) has completed and Stage 2 (APPROACH/ADHERED, i.e.
+  // WALL_ADHERE) has begun.
+  bool isDepthAligned() const { return depth_aligned_; }
+
+  const char * adhereStageName() const override
+  {
+    return depth_aligned_ ? "WALL_ADHERE" : "DEPTH_ALIGN";
+  }
+
 private:
   Mat86 b_pinv_;
 
@@ -64,6 +73,10 @@ private:
   Vec3 p_d_world_ = Vec3::Zero();
   Quat q_d_ = Quat(1.0, 0.0, 0.0, 0.0);
 
+  // Phase 4.2 two-stage adhere sequence: Stage 1 DEPTH_ALIGN (hold standoff_x/target_y/
+  // target_depth_m) must complete before Stage 2 WALL_ADHERE (the existing APPROACH/ADHERED
+  // ramp-then-dock logic below) begins -- docked_ can only become true once depth_aligned_ is.
+  bool depth_aligned_ = false;
   bool docked_ = false;
   uint64_t last_seen_setpoint_seq_ = 0;
 };

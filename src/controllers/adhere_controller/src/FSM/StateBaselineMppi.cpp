@@ -28,6 +28,7 @@ void StateBaselineMppi::enter()
   // so run() never writes a leftover command from before this enter().
   planner_.warmStart(p_d_world_, q_d_);
   ctrl_interfaces_.outer_loop_cmd_.valid.store(false);
+  depth_aligned_ = false;
 
   // Safe-default contract (CLAUDE.md Phase 3.1 Stage 3.1, same as StatePassive::enter()): zeros
   // out any stale command left behind by the previous FSM state so the thrusters command 0 for
@@ -47,7 +48,19 @@ void StateBaselineMppi::run(const rclcpp::Time & /*time*/, const rclcpp::Duratio
   const auto & active = ctrl_interfaces_.active_state;
   const Vec3 pos_world(active.pos_w[0], active.pos_w[1], active.pos_w[2]);
   const Quat q_est(active.quat_w[0], active.quat_w[1], active.quat_w[2], active.quat_w[3]);
+  const Vec3 vel_body(active.vel_body[0], active.vel_body[1], active.vel_body[2]);
   const RotMat r = quatToRotMat(q_est);
+  const auto & stage = model_params_.adhere_stage;
+
+  // Stage 1 -> Stage 2 gate (CLAUDE.md Phase 4.2): identical sticky DEPTH_ALIGN -> WALL_ADHERE
+  // gate as StateAdherePid/StateAdhereSmc.
+  if (!depth_aligned_) {
+    const double depth_err = pos_world.z() - (-stage.target_depth_m);
+    const double vz_world = (r * vel_body).z();
+    if (std::abs(depth_err) <= stage.depth_tol && std::abs(vz_world) <= stage.vz_tol) {
+      depth_aligned_ = true;
+    }
+  }
 
   // Discrete setpoint (same MODE_* grammar as StatePidHold/StateAdherePid/StateAdhereSmc).
   const uint64_t seq = ci.setpoint_seq.load();
@@ -92,6 +105,20 @@ void StateBaselineMppi::run(const rclcpp::Time & /*time*/, const rclcpp::Duratio
     q_d_rpy(0) = saturation(q_d_rpy(0), -max_tilt_rad, max_tilt_rad);
     q_d_rpy(1) = saturation(q_d_rpy(1), -max_tilt_rad, max_tilt_rad);
     q_d_ = quatFromRPY(q_d_rpy);
+  }
+
+  // Stage 1 DEPTH_ALIGN (CLAUDE.md Phase 4.2): overrides whatever the setpoint/teleop handling
+  // above just computed, holding Y/Z at the shared target and X at a safe standoff distance from
+  // the wall. Once depth_aligned_, the target simply moves onto the wall plane (x_wall) for
+  // Stage 2 WALL_ADHERE -- the CUDA planner's own rollout cost (wall contact penalty +
+  // preload_fx) does the actual approach/press, there is no separate ramp/dock state machine
+  // here like StateAdherePid/StateAdhereSmc have.
+  if (!depth_aligned_) {
+    p_d_world_.y() = stage.target_y;
+    p_d_world_.z() = -stage.target_depth_m;
+    p_d_world_.x() = planner_.xWall() + stage.standoff_x;
+  } else {
+    p_d_world_.x() = planner_.xWall();
   }
 
   // Strict Zero-Order Hold (CLAUDE.md Phase 4.1 Sec.3.3): writes the latest async 25Hz CUDA MPPI

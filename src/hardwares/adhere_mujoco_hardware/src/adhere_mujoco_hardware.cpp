@@ -44,6 +44,15 @@ constexpr double kLoadcellNoiseStd = 0.15;    // N
 constexpr long long kDepthDecimation = 10;    // 500 / 10 = 50 Hz
 constexpr long long kDvlDecimation = 25;      // 500 / 25 = 20 Hz
 
+// Phase 4.2: the station-keeping gust preset's two half-sine pulses (StationKeepingGustPlugin)
+// are authored within a nominal 12.0s window; wrapping the relative wave clock
+// tau = t_sim - t_trigger modulo this period makes the whole gust pattern repeat forever while
+// flow mode stays at 2, instead of playing once and then going flat. Both evaluation sites below
+// (applyHydrodynamics()'s force integration and write()'s flow-arrow/telemetry snapshot) must
+// wrap identically, or the physics and the visualization would silently desync after the first
+// cycle.
+constexpr double kWaveGustCyclePeriodS = 12.0;
+
 // Launch-time model-source override (CLAUDE.md Phase 2.12 Section 1), consulted by the next
 // configure() call. Function-local statics (lazily constructed on first call, not namespace-
 // scope globals) because they must be reachable before any AdhereMujocoHardware instance
@@ -128,6 +137,20 @@ hardware_interface::return_type AdhereMujocoHardware::configure(
   // of dominating the scene.
   model_->vis.scale.framelength = 0.04;
   model_->vis.scale.framewidth = 0.002;
+
+  // Phase 4.2: same visual-only override rationale as framelength/framewidth above, for a
+  // different symptom. model_->stat.meansize is MuJoCo's auto-computed characteristic model
+  // size (from the compiled geom/body extents) -- mjv_applyPerturbForce()/mjv_updateScene()
+  // scale the Ctrl+drag perturbation spring stiffness AND the force-arrow's visual
+  // radius/length off of it (via vis.map.force/vis.scale.forcewidth, both themselves also
+  // meansize-relative defaults). The 20m x 20m x 10m tank's bounding geometry inflated the
+  // auto-computed meansize/extent by roughly 10x relative to this ~0.2-0.6m ROV hull, so a
+  // small Ctrl+drag tug was producing an enormous perturbation force and a correspondingly
+  // oversized arrow. Pin meansize back to the ROV's own characteristic size and shrink the
+  // force-arrow shaft width / per-Newton length scale by the same ~10x this caused.
+  model_->stat.meansize = 0.25;
+  model_->vis.scale.forcewidth = 0.015f;
+  model_->vis.map.force = 0.04f;
 
   // Root-body resolution fallback chain (CLAUDE.md Phase 2.12 Section 2): "rov_base" first
   // (rov_wall.xml and every existing model), then the quadruped_ros2_control-style convention
@@ -468,10 +491,13 @@ void AdhereMujocoHardware::applyHydrodynamics(const mjModel * m, mjData * d)
   // Relative wave clock (CLAUDE.md Phase 2.5 Stage 2.3/3.2): mode 2 evaluates the gust
   // profile at tau = t_sim - t_trigger (>= 0) instead of raw sim time, so switching into the
   // gust scenario at an arbitrary sim time always replays the gusts from their own t=0.
+  // Phase 4.2: wrapped modulo kWaveGustCyclePeriodS so the two-gust pattern repeats forever
+  // instead of playing once and then leaving the flow flat for the rest of the run.
   const bool gust_active = flow_mode_.load() == 2;
   const HydroParams & params =
     gust_active ? gust_plugin_->getHydroParams() : calm_plugin_->getHydroParams();
-  const double t_eval = gust_active ? std::max(0.0, d->time - wave_trigger_time_.load()) : d->time;
+  const double tau = std::max(0.0, d->time - wave_trigger_time_.load());
+  const double t_eval = gust_active ? std::fmod(tau, kWaveGustCyclePeriodS) : d->time;
 
   HydroWrenchBreakdown breakdown;
   // Finding A: m->opt.timestep is this 500Hz physics thread's own fixed tick period (2.0ms),
@@ -493,14 +519,34 @@ void AdhereMujocoHardware::applyHydrodynamics(const mjModel * m, mjData * d)
   // Ctrl+drag wrench it computed on its own secondary d_vis_ into vis_bridge_->xfrc_perturb;
   // folded into the same mj_applyFT call as the hydrodynamic wrench so both land in
   // qfrc_passive at the same point in the step.
+  // Phase 4.2: even after this file's meansize/forcewidth/map.force visual-scale fix above,
+  // mjv_applyPerturbForce()'s spring stiffness is itself still meansize-relative at the point
+  // MujocoViewer computed it (on its OWN secondary d_vis_, independently of this fix), so a
+  // hard clamp here is the authoritative last line of defense against an oversized perturbation
+  // actually reaching qfrc_passive, regardless of whatever the GUI side computed.
+  Eigen::Vector3d pert_force(
+    vis_bridge_->xfrc_perturb[0].load(), vis_bridge_->xfrc_perturb[1].load(),
+    vis_bridge_->xfrc_perturb[2].load());
+  Eigen::Vector3d pert_torque(
+    vis_bridge_->xfrc_perturb[3].load(), vis_bridge_->xfrc_perturb[4].load(),
+    vis_bridge_->xfrc_perturb[5].load());
+  constexpr double kMaxPerturbForceN = 40.0;
+  constexpr double kMaxPerturbTorqueNm = 8.0;
+  const double pert_force_norm = pert_force.norm();
+  if (pert_force_norm > kMaxPerturbForceN) {
+    pert_force *= kMaxPerturbForceN / pert_force_norm;
+  }
+  const double pert_torque_norm = pert_torque.norm();
+  if (pert_torque_norm > kMaxPerturbTorqueNm) {
+    pert_torque *= kMaxPerturbTorqueNm / pert_torque_norm;
+  }
+
   const mjtNum force[3] = {
-    wrench.force_world.x() + vis_bridge_->xfrc_perturb[0].load(),
-    wrench.force_world.y() + vis_bridge_->xfrc_perturb[1].load(),
-    wrench.force_world.z() + vis_bridge_->xfrc_perturb[2].load()};
+    wrench.force_world.x() + pert_force.x(), wrench.force_world.y() + pert_force.y(),
+    wrench.force_world.z() + pert_force.z()};
   const mjtNum torque[3] = {
-    wrench.torque_world.x() + vis_bridge_->xfrc_perturb[3].load(),
-    wrench.torque_world.y() + vis_bridge_->xfrc_perturb[4].load(),
-    wrench.torque_world.z() + vis_bridge_->xfrc_perturb[5].load()};
+    wrench.torque_world.x() + pert_torque.x(), wrench.torque_world.y() + pert_torque.y(),
+    wrench.torque_world.z() + pert_torque.z()};
   const mjtNum point[3] = {
     state.com_pos_world.x(), state.com_pos_world.y(), state.com_pos_world.z()};
   mj_applyFT(m, d, force, torque, point, body_id_, d->qfrc_passive);
@@ -836,8 +882,10 @@ hardware_interface::return_type AdhereMujocoHardware::write()
         vis_bridge_->pad_v_sep[i] = hw_states_[kPadContact + 4 + i];
       }
       const bool gust_active = flow_mode_.load() == 2;
-      const double t_eval =
-        gust_active ? std::max(0.0, sim_time_ - wave_trigger_time_.load()) : sim_time_;
+      const double tau_raw = std::max(0.0, sim_time_ - wave_trigger_time_.load());
+      // Phase 4.2: same kWaveGustCyclePeriodS wrap as applyHydrodynamics(), so this
+      // telemetry/arrow snapshot never desyncs from the force the physics actually integrated.
+      const double t_eval = gust_active ? std::fmod(tau_raw, kWaveGustCyclePeriodS) : sim_time_;
       const FlowEnvironmentPlugin & active_plugin =
         gust_active ? *gust_plugin_ : *calm_plugin_;
       const Eigen::Vector3d flow = active_plugin.ambientVelocityWorld(t_eval);
@@ -847,8 +895,17 @@ hardware_interface::return_type AdhereMujocoHardware::write()
       vis_bridge_->valid = true;
     }
     vis_bridge_->flow_mode_active.store(flow_mode_.load());
-    vis_bridge_->wave_tau.store(
-      flow_mode_.load() == 2 ? std::max(0.0, sim_time_ - wave_trigger_time_.load()) : 0.0);
+    {
+      // wave_tau is the uncapped total relative clock (for telemetry/debugging "how long has
+      // gust mode been active"); wave_tau_mod is the wrapped cycle-phase clock the gust profile
+      // is actually evaluated at (Phase 4.2) -- both published so the overlay can show "total
+      // tau" and "cycle phase" side by side per the task spec.
+      const double tau_raw =
+        flow_mode_.load() == 2 ? std::max(0.0, sim_time_ - wave_trigger_time_.load()) : 0.0;
+      vis_bridge_->wave_tau.store(tau_raw);
+      vis_bridge_->wave_tau_mod.store(
+        flow_mode_.load() == 2 ? std::fmod(tau_raw, kWaveGustCyclePeriodS) : 0.0);
+    }
     vis_bridge_->hydro_patch_count.store(static_cast<int>(hydro_geometry_model_.patches.size()));
   }
 

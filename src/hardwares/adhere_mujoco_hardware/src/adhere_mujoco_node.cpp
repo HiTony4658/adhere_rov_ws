@@ -23,6 +23,7 @@
 #include "controller_manager_msgs/srv/switch_controller.hpp"
 #include "hardware_interface/resource_manager.hpp"
 
+#include "adhere_control_msgs/msg/controller_state.hpp"
 #include "adhere_mujoco_hardware/adhere_mujoco_hardware.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
@@ -210,6 +211,46 @@ int main(int argc, char ** argv)
       }
     });
 
+  // Phase 4.2: mirrors AdhereController's live target pose/FSM state/adhere stage into
+  // MujocoVisBridge (so the embedded MuJoCo viewer's overlay + green target sphere update) and
+  // into these node-local atomics (read by the /rov/environment_markers RViz2 marker above) --
+  // a message-only dependency on adhere_control_msgs, zero MuJoCo/CUDA/ros2_control coupling in
+  // the other direction (CLAUDE.md Sec.3.3 governs the reverse link, not this one).
+  static std::atomic<int> latest_adhere_stage_code{0};
+  static std::atomic<double> latest_adhere_target_y{0.0};
+  static std::atomic<double> latest_adhere_target_z{0.0};
+  auto controller_state_sub = node->create_subscription<adhere_control_msgs::msg::ControllerState>(
+    "/rov/controller_state", 10,
+    [](const adhere_control_msgs::msg::ControllerState::SharedPtr msg) {
+      const int stage_code =
+        msg->adhere_stage == "DEPTH_ALIGN" ? 1 : (msg->adhere_stage == "WALL_ADHERE" ? 2 : 0);
+      latest_adhere_stage_code.store(stage_code);
+      latest_adhere_target_y.store(msg->target_pose.position.y);
+      latest_adhere_target_z.store(msg->target_pose.position.z);
+
+      // Quaternion -> yaw (Z-axis Euler angle), Hamilton (w,x,y,z) convention, matching
+      // adhere_controller's own mathTools.h::rotMatToRPY() derivation.
+      const double qw = msg->target_pose.orientation.w, qx = msg->target_pose.orientation.x,
+                   qy = msg->target_pose.orientation.y, qz = msg->target_pose.orientation.z;
+      const double yaw_rad =
+        std::atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz));
+
+      auto * active_hw = adhere_mujoco_hardware::AdhereMujocoHardware::activeInstance();
+      if (!active_hw) {
+        return;
+      }
+      auto bridge = active_hw->visBridge();
+      if (!bridge) {
+        return;
+      }
+      bridge->fsm_current_state_code.store(msg->current_state);
+      bridge->adhere_stage_code.store(stage_code);
+      bridge->adhere_target_x.store(msg->target_pose.position.x);
+      bridge->adhere_target_y.store(msg->target_pose.position.y);
+      bridge->adhere_target_z.store(msg->target_pose.position.z);
+      bridge->adhere_target_yaw_deg.store(yaw_rad * 180.0 / M_PI);
+    });
+
   auto publish_timer = node->create_wall_timer(
     std::chrono::duration<double>(1.0 / kPublishRateHz),
     [&, hw]() {
@@ -259,8 +300,9 @@ int main(int argc, char ** argv)
 
       visualization_msgs::msg::MarkerArray markers;
 
-      // Wall marker (CLAUDE.md Phase 3.3 tank geometry: 20m x 10m, centered at Z=-5.0,
-      // spanning Y in [-10,10]m x Z in [-10,0]m).
+      // Wall marker (CLAUDE.md Phase 4.2 tank geometry: 20m x 11.5m, centered at Z=-4.25,
+      // spanning Y in [-10,10]m x Z in [-10,+1.5]m -- extended 1.5m above the Z=0.0 water
+      // surface to match mjcf/rov_wall.xml's wall body).
       visualization_msgs::msg::Marker wall;
       wall.header.stamp = now;
       wall.header.frame_id = "world";
@@ -270,15 +312,39 @@ int main(int argc, char ** argv)
       wall.action = visualization_msgs::msg::Marker::ADD;
       wall.pose.position.x = -0.01;
       wall.pose.position.y = 0.0;
-      wall.pose.position.z = -5.0;
+      wall.pose.position.z = -4.25;
       wall.scale.x = 0.02;
       wall.scale.y = 20.0;
-      wall.scale.z = 10.0;
+      wall.scale.z = 11.5;
       wall.color.r = 0.25f;
       wall.color.g = 0.25f;
       wall.color.b = 0.3f;
       wall.color.a = 0.6f;
       markers.markers.push_back(wall);
+
+      // Phase 4.2: green target-adhesion-spot sphere, mirrors MujocoViewer's own scene-geom
+      // version -- only published while an adhere FSM state is actually active (adhere_stage
+      // non-empty on /rov/controller_state), at world (0, Y_target, Z_target).
+      if (latest_adhere_stage_code.load() != 0) {
+        visualization_msgs::msg::Marker target_sphere;
+        target_sphere.header.stamp = now;
+        target_sphere.header.frame_id = "world";
+        target_sphere.ns = "adhere_target";
+        target_sphere.id = 0;
+        target_sphere.type = visualization_msgs::msg::Marker::SPHERE;
+        target_sphere.action = visualization_msgs::msg::Marker::ADD;
+        target_sphere.pose.position.x = 0.0;
+        target_sphere.pose.position.y = latest_adhere_target_y.load();
+        target_sphere.pose.position.z = latest_adhere_target_z.load();
+        target_sphere.scale.x = 0.07;
+        target_sphere.scale.y = 0.07;
+        target_sphere.scale.z = 0.07;
+        target_sphere.color.r = 0.1f;
+        target_sphere.color.g = 1.0f;
+        target_sphere.color.b = 0.2f;
+        target_sphere.color.a = 0.9f;
+        markers.markers.push_back(target_sphere);
+      }
 
       // Water surface marker at world Z=0.0 (CLAUDE.md Phase 3.3), 20m x 20m, semi-transparent
       // cyan.

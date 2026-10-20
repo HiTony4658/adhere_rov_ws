@@ -53,20 +53,22 @@ struct ModelParams
   };
 
   // Phase 3.8 wall-adhesion PID baseline (algorithms::pid::AdherePidController +
-  // FSM::StateAdherePid): kp_pos/ki_pos/kd_vel/kp_att/ki_att/kd_att drive the Y/Z/attitude loop
-  // (via the shared SixDofPidController) in both APPROACH and ADHERED phases; the X components
-  // of kp_pos/ki_pos/kd_vel are used only during APPROACH (ADHERED phase re-latches p_d_world_.x
-  // every tick so the position loop's X contribution stays ~0, and the dedicated force PI law
-  // below drives Fx instead). approach_speed/dock_force_thresh/x_wall/x_dock_eps gate the
-  // APPROACH->ADHERED transition; kp_force/ki_force/kd_x/f_preload/f_des/integral_force_max are
+  // FSM::StateAdherePid): kp_pos/ki_pos/kd_vel/kp_att/ki_att/kd_att drive the X/Y/Z/attitude loop
+  // (via the shared SixDofPidController) in both APPROACH and ADHERED phases; the X component of
+  // kp_pos/ki_pos/kd_vel is exercised only during APPROACH in practice (ADHERED phase re-latches
+  // p_d_world_.x every tick so the position loop's X contribution stays ~0 there, and the
+  // dedicated force PI law below drives Fx instead) -- Z is actively regulated throughout (Phase
+  // 3.4's DEPTH_ALIGN stage requires it to converge to adhere_target_depth_m before WALL_ADHERE
+  // begins). approach_speed/dock_force_thresh/x_wall/x_dock_eps gate the APPROACH->ADHERED
+  // transition; kp_force/ki_force/kd_x/f_preload/f_des/integral_force_max are
   // AdherePidController's own wall-normal force-regulation gains (see its header for the sign
   // convention: positive magnitudes here, the minus sign that turns them into a pressing -- not
   // receding -- commanded wrench lives in code).
   struct AdherePidGains
   {
-    Vec3 kp_pos = Vec3(120.0, 120.0, 0.0);
-    Vec3 ki_pos = Vec3(10.0, 10.0, 0.0);
-    Vec3 kd_vel = Vec3(60.0, 60.0, 0.0);
+    Vec3 kp_pos = Vec3(120.0, 120.0, 120.0);
+    Vec3 ki_pos = Vec3(10.0, 10.0, 10.0);
+    Vec3 kd_vel = Vec3(60.0, 60.0, 60.0);
     Vec3 kp_att = Vec3(40.0, 40.0, 25.0);
     Vec3 ki_att = Vec3(2.0, 2.0, 2.0);
     Vec3 kd_att = Vec3(15.0, 15.0, 12.0);
@@ -103,6 +105,20 @@ struct ModelParams
     double x_wall = 0.0;
     double x_dock_eps = 0.02;
     double wall_preload_fx = 30.0;       // N magnitude; applied as -wall_preload_fx wrench
+  };
+
+  // Phase 4.2 two-stage adhere sequence, shared by ADHERE_PID/ADHERE_SMC/BASELINE_MPPI: on
+  // entry, each first stabilizes depth/lateral position at a safe standoff distance from the
+  // wall (DEPTH_ALIGN) before approaching/adhering (WALL_ADHERE). Deliberately a single shared
+  // block (not duplicated per-algorithm like AdherePidGains/AdhereSmcGains) -- the point is one
+  // zero-recompile target depth/standoff shared by all three baselines.
+  struct AdhereStageParams
+  {
+    double target_depth_m = 1.0;  // m, Z_target = -target_depth_m
+    double target_y = 0.0;        // m, world Y
+    double standoff_x = 0.35;     // m, DEPTH_ALIGN holds this far from the wall plane (X=0)
+    double depth_tol = 0.05;      // m, |z - Z_target| gate for DEPTH_ALIGN -> WALL_ADHERE
+    double vz_tol = 0.05;         // m/s, |v_z| gate for DEPTH_ALIGN -> WALL_ADHERE
   };
 
   // Phase 3.5 sensor mounting lever arms (body frame, relative to CoM), used by
@@ -183,6 +199,7 @@ struct ModelParams
   PidHoldGains pid_hold;
   AdherePidGains adhere_pid;
   AdhereSmcGains adhere_smc;
+  AdhereStageParams adhere_stage;
   SensorMount sensor_mount;
   DynamicsParams dynamics;
 

@@ -618,6 +618,7 @@ controller_interface::return_type AdhereController::update()
     controller_state_msg.target_pose.orientation.x = target.quat(1);
     controller_state_msg.target_pose.orientation.y = target.quat(2);
     controller_state_msg.target_pose.orientation.z = target.quat(3);
+    controller_state_msg.adhere_stage = current_state_->adhereStageName();
 
     const auto & active = ctrl_interfaces_.active_state;
 

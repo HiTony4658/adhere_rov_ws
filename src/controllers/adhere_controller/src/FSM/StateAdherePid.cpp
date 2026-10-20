@@ -62,6 +62,7 @@ void StateAdherePid::enter()
 
   pid_.resetIntegrators();
   force_pid_.resetIntegrator();
+  depth_aligned_ = false;
   docked_ = false;
 }
 
@@ -82,14 +83,28 @@ void StateAdherePid::run(const rclcpp::Time & /*time*/, const rclcpp::Duration &
     sum_f += f;
   }
 
+  const RotMat r = quatToRotMat(q_est);
+  const auto & stage = model_params_.adhere_stage;
+
+  // Stage 1 -> Stage 2 gate (CLAUDE.md Phase 4.2): DEPTH_ALIGN must stabilize depth/vertical
+  // speed before WALL_ADHERE's APPROACH/ADHERED ramp-then-dock logic (below) is allowed to run.
+  // Sticky, like docked_ below -- never un-aligns itself once reached.
+  if (!depth_aligned_) {
+    const double depth_err = pos_world.z() - (-stage.target_depth_m);
+    const double vz_world = (r * vel_body).z();
+    if (std::abs(depth_err) <= stage.depth_tol && std::abs(vz_world) <= stage.vz_tol) {
+      depth_aligned_ = true;
+    }
+  }
+
   // APPROACH -> ADHERED gate (CLAUDE.md Phase 3.8 Stage 2.2.1): sticky -- never un-docks itself.
-  if (!docked_ && sum_f >= gains.dock_force_thresh &&
+  // Gated on depth_aligned_ (Phase 4.2) so the sum-of-pad-forces/x_dock_eps check is never even
+  // evaluated while the ROV is still away from the wall at the DEPTH_ALIGN standoff.
+  if (depth_aligned_ && !docked_ && sum_f >= gains.dock_force_thresh &&
     pos_world.x() <= gains.x_wall + gains.x_dock_eps)
   {
     docked_ = true;
   }
-
-  const RotMat r = quatToRotMat(q_est);
 
   // Discrete setpoint (same edge-detection pattern as StatePidHold): Y/Z/attitude only matter
   // here, X is always re-latched below regardless of docked_.
@@ -139,13 +154,21 @@ void StateAdherePid::run(const rclcpp::Time & /*time*/, const rclcpp::Duration &
     q_d_ = quatFromRPY(q_d_rpy);
   }
 
-  if (!docked_) {
-    // APPROACH: ramp p_d_world_.x() toward the wall; SixDofPidController drives all 6 DOF.
+  if (!depth_aligned_) {
+    // Stage 1 DEPTH_ALIGN (CLAUDE.md Phase 4.2): hold Y/Z at the shared target and X at a safe
+    // standoff distance from the wall -- not pressing in yet. Overrides whatever the
+    // setpoint/teleop handling above just computed for Y/Z (X is untouched by that handling in
+    // this state already).
+    p_d_world_.y() = stage.target_y;
+    p_d_world_.z() = -stage.target_depth_m;
+    p_d_world_.x() = gains.x_wall + stage.standoff_x;
+  } else if (!docked_) {
+    // Stage 2 APPROACH: ramp p_d_world_.x() toward the wall; SixDofPidController drives all 6 DOF.
     const double step = gains.approach_speed * dt;
     p_d_world_.x() = std::max(p_d_world_.x() - step, gains.x_wall);
   } else {
-    // ADHERED: re-latch X every tick so SixDofPidController's position loop contributes ~0 on
-    // Fx, leaving the force PI law as the sole driver of that axis.
+    // Stage 2 ADHERED: re-latch X every tick so SixDofPidController's position loop contributes
+    // ~0 on Fx, leaving the force PI law as the sole driver of that axis.
     p_d_world_.x() = pos_world.x();
   }
 

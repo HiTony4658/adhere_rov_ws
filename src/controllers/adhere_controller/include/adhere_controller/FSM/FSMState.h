@@ -83,6 +83,13 @@ public:
   // 6-DOF pose (position + quaternion).
   virtual PoseTarget targetPose() const { return PoseTarget{}; }
 
+  // Phase 4.2 two-stage adhere sequence: "" for every state except ADHERE_PID/ADHERE_SMC/
+  // BASELINE_MPPI, which report "DEPTH_ALIGN" or "WALL_ADHERE" (see each state's depth_aligned_
+  // member). Read by AdhereController to populate ControllerState.msg::adhere_stage, consumed
+  // downstream by MujocoVisBridge's target-pose overlay/green target sphere (only shown while
+  // this string is non-empty).
+  virtual const char * adhereStageName() const { return ""; }
+
   FSMStateName state_name;
   std::string state_name_string;
 

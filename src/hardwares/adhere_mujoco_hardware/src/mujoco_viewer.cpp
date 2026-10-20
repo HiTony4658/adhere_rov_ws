@@ -234,6 +234,9 @@ void MujocoViewer::buildUi1()
   mjuiDef def_thrust_header[] = {
     {mjITEM_SECTION, "Thrusters (Manual)", mjSECT_OPEN, nullptr, "", 0},
     {mjITEM_BUTTON, "Zero All", 1, nullptr, "", 0},
+    // Phase 4.2: unchecked (default) -- sliders are a live read-only mirror of ctrl[]; checked
+    // -- back to the original drag-to-inject-manual_ctrl behavior.
+    {mjITEM_CHECKBYTE, "Manual Override", 1, &ui_manual_override_, "", 0},
     {mjITEM_CHECKBYTE, "Thruster Lag (15ms)", 1, &ui_thruster_lag_, "", 0},
     {mjITEM_CHECKBYTE, "Thruster Deadzone (2.0N)", 1, &ui_thruster_deadzone_, "", 0},
     {mjITEM_END, "", 0, nullptr, "", 0}};
@@ -977,24 +980,46 @@ void MujocoViewer::drawOverlayTelemetry(mjrRect viewport)
   const double sim_t = bridge_->sim_time.load();
   const int flow_mode = bridge_->flow_mode_active.load();
   const double tau = bridge_->wave_tau.load();
+  const double tau_mod = bridge_->wave_tau_mod.load();
   const char * hydro_name = ui_hydro_mode_ == 1 ? "Stonefish-Mesh" : "Lumped";
+
+  // Phase 4.2: adhere-mode target pose/stage telemetry (populated from AdhereController's
+  // /rov/controller_state via adhere_mujoco_node -> MujocoVisBridge). adhere_stage_code is
+  // 0 while no adhere FSM state is active -- that row is simply omitted then, since
+  // target_x/y/z/yaw are meaningless outside an adhere state's own reference pose.
+  const int adhere_stage_code = bridge_->adhere_stage_code.load();
+  const char * adhere_stage_name =
+    adhere_stage_code == 1 ? "DEPTH_ALIGN" : (adhere_stage_code == 2 ? "WALL_ADHERE" : "n/a");
+  // Mirrors ControllerState.msg::current_state's int32 encoding (comment in that .msg file) --
+  // a plain local UI label lookup, not a link/header dependency on adhere_controller.
+  static const char * kFsmStateNames[9] = {
+    "NONE", "PASSIVE", "DEPTH_HOLD", "OPEN_LOOP", "PID_HOLD", "ADHERE_PID", "ADHERE_SMC",
+    "BASELINE_MPPI", "KAMR_MPPI"};
+  const int fsm_code = bridge_->fsm_current_state_code.load();
+  const char * fsm_state_name =
+    (fsm_code >= 0 && fsm_code <= 8) ? kFsmStateNames[fsm_code] : "UNKNOWN";
 
   std::snprintf(
     title, sizeof(title),
     "Physics Rate\nSim Time\nFlow Mode\nFlow Velocity\n"
     "Pad TL / TR / BL / BR\nPose (X Y Z)\nPose (phi theta psi)\nBody Vel (vx vy vz)\n"
     "Body AngVel (wx wy wz)\nHydro Mode\nKern Margin M_kern\nActive Pads\n"
-    "Liftoff Ratio (cum.)\nCorner-Trap Ratio (cum.)\nLiftoff Events");
+    "Liftoff Ratio (cum.)\nCorner-Trap Ratio (cum.)\nLiftoff Events\n"
+    "Target Pos (X Y Z Yaw)\nFSM State / Adhere Stage");
   std::snprintf(
     content, sizeof(content),
-    "%.1f Hz (work: %.3f ms)\n%.2f s\n%s (tau=%.2fs)\n[%.2f, %.2f, %.2f] m/s\n"
+    "%.1f Hz (work: %.3f ms)\n%.2f s\n%s (tau=%.2fs, cycle=%.2fs)\n[%.2f, %.2f, %.2f] m/s\n"
     "%.1f / %.1f / %.1f / %.1f N\n[%.3f, %.3f, %.3f] m\n[%.1f, %.1f, %.1f] deg\n[%.3f, %.3f, %.3f] m/s\n"
-    "[%.3f, %.3f, %.3f] rad/s\n%s (%d patches)\n%.3f (K_val=%.3f)\n%d / 4\n%.1f%%\n%.1f%%\n%lld",
-    hz, work_ms, sim_t, flow_mode == 2 ? "Gust" : "Calm", tau, flow[0], flow[1], flow[2],
+    "[%.3f, %.3f, %.3f] rad/s\n%s (%d patches)\n%.3f (K_val=%.3f)\n%d / 4\n%.1f%%\n%.1f%%\n%lld\n"
+    "[%.3f, %.3f, %.3f] m (Yaw: %.1f deg)\n%s / %s",
+    hz, work_ms, sim_t, flow_mode == 2 ? "Gust" : "Calm", tau, tau_mod, flow[0], flow[1], flow[2],
     pad_force[0], pad_force[1], pad_force[2], pad_force[3], px, py, pz, phi * 57.2958, theta * 57.2958,
     psi * 57.2958, vx, vy, vz, wx, wy, wz, hydro_name, cached_hydro_patch_count_, cached_m_kern_,
     cached_kern_val_, cached_active_pads_, cached_liftoff_ratio_ * 100.0,
-    cached_corner_trap_ratio_ * 100.0, cached_liftoff_events_);
+    cached_corner_trap_ratio_ * 100.0, cached_liftoff_events_,
+    bridge_->adhere_target_x.load(), bridge_->adhere_target_y.load(),
+    bridge_->adhere_target_z.load(), bridge_->adhere_target_yaw_deg.load(),
+    fsm_state_name, adhere_stage_name);
 
   mjr_overlay(mjFONT_NORMAL, mjGRID_TOPLEFT, viewport, title, content, &con_);
 }
@@ -1113,6 +1138,20 @@ void MujocoViewer::renderFrame()
     scn_.ngeom++;
   }
 
+  // Phase 4.2: green target-adhesion-spot sphere on the wall, world (0, Y_target, Z_target) --
+  // only while an adhere FSM state is actually active (adhere_stage_code != 0); hidden
+  // otherwise so it never misleads during PASSIVE/DEPTH_HOLD/OPEN_LOOP/PID_HOLD/BASELINE_MPPI's
+  // free-swimming use.
+  if (bridge_->adhere_stage_code.load() != 0 && scn_.ngeom < scn_.maxgeom) {
+    const mjtNum target_pos[3] = {
+      0.0, bridge_->adhere_target_y.load(), bridge_->adhere_target_z.load()};
+    mjvGeom * g = &scn_.geoms[scn_.ngeom];
+    const float rgba[4] = {0.1f, 1.0f, 0.2f, 0.9f};
+    const mjtNum size[3] = {0.035, 0.0, 0.0};
+    mjv_initGeom(g, mjGEOM_SPHERE, size, target_pos, nullptr, rgba);
+    scn_.ngeom++;
+  }
+
   // Section C1: Rhombic Kern diamond + live CoP marker.
   if (ui_show_kern_diamond_) {
     drawKernDiamond();
@@ -1121,6 +1160,17 @@ void MujocoViewer::renderFrame()
   mjr_render(viewport, &scn_, &con_);
   drawOverlayTelemetry(viewport);
   updateAndDrawScope(uistate_.rect[0]);
+
+  // Phase 4.2: while Manual Override is unchecked (default), the 8 thruster sliders are a
+  // live read-only mirror of the controller's actual ctrl[] output -- d_vis_->ctrl[i] was
+  // already refreshed from bridge_->ctrl[i] under the mutex at the top of this function, so
+  // this just needs to happen before mjui_update()/mjui_render() below paint the slider
+  // widgets for this frame.
+  if (!ui_manual_override_) {
+    for (int i = 0; i < 8 && i < model_->nu; ++i) {
+      thruster_slider_[i] = d_vis_->ctrl[i];
+    }
+  }
 
   if (ui0_visible_) {
     mjui_update(-1, -1, &ui0_, &uistate_, &con_);
@@ -1157,8 +1207,13 @@ void MujocoViewer::renderFrame()
   bridge_->enable_thruster_lag.store(ui_thruster_lag_ != 0);
   bridge_->enable_thruster_deadzone.store(ui_thruster_deadzone_ != 0);
 
+  // Phase 4.2: manual_ctrl only carries real injected thrust while Manual Override is checked
+  // -- unchecked, it is force-zeroed every frame so no stale manual thrust lingers from before
+  // the checkbox was last unchecked (thruster_slider_[i] itself was already overwritten above
+  // with the live ctrl[] readout this same frame, so simply gating the store is sufficient).
   for (int i = 0; i < 8; ++i) {
-    bridge_->manual_ctrl[static_cast<size_t>(i)].store(thruster_slider_[i]);
+    bridge_->manual_ctrl[static_cast<size_t>(i)].store(
+      ui_manual_override_ ? thruster_slider_[i] : 0.0);
   }
 }
 

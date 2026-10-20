@@ -131,6 +131,10 @@ private:
   mjtByte ui_show_pad_forces_ = 1;  // custom green capsule bars, not a MuJoCo opt_/scn_ flag
   mjtByte ui_show_flow_arrow_ = 1;  // custom blue flow arrow, not a MuJoCo opt_/scn_ flag
   double thruster_slider_[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  // Phase 4.2 "Manual Override" checkbox: default unchecked, so the 8 sliders/numeric boxes
+  // just mirror the live controller-commanded ctrl[] every frame (read-only display) instead of
+  // injecting additive manual_ctrl thrust -- only checking this box re-enables dragging them.
+  mjtByte ui_manual_override_ = 0;
 
   // CLAUDE.md Phase 2.10 additions.
   int ui_hydro_mode_ = 0;             // radio index: 0 = Lumped, 1 = Stonefish-Mesh

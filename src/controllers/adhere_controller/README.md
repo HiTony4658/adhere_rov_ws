@@ -140,7 +140,10 @@ test/
   （Fossen 水动力前馈参数）；
 - `workspace_z_min/workspace_z_max/workspace_x_min`（世界坐标安全边界）；
 - `depth_hold.*`/`open_loop.*`/`pid_hold.*`/`adhere_pid.*`/`adhere_smc.*`
-  （各 FSM 状态的增益/限幅；后两者为 Phase 3.8 新增的贴壁基线参数）。
+  （各 FSM 状态的增益/限幅；后两者为 Phase 3.8 新增的贴壁基线参数）；
+- `adhere_target_depth_m/adhere_target_y/adhere_standoff_x/adhere_depth_tol/
+  adhere_vz_tol`（Phase 4.2 新增，`ModelParams::adhere_stage`，`ADHERE_PID`/
+  `ADHERE_SMC`/`BASELINE_MPPI` 三者共享的两阶段定深-贴壁目标/门限）。
 
 `ThrusterAllocator.h::buildThrusterAllocationMatrix(pos, dir)` 对每个推力器
 通用地构造 `b_i = [dir_i; pos_i x dir_i] ∈ R^6`（叉乘公式，不再硬编码角点/
@@ -229,9 +232,21 @@ struct CtrlInterfaces {
 | `DEPTH_HOLD` (`state_depth_hold`) | 2 | 世界坐标系 Z 向 PID 定深叠加姿态阻尼；`target_z_` 接受 `/rov/setpoint_cmd` 离散设定（沿边应用）与 Xbox 左摇杆连续微调，钳制在 `robot_control.yaml` 的 `workspace_z_min/max` 内 |
 | `OPEN_LOOP` (`state_open_loop`) | 3 | 无记忆地把 `/rov/teleop_cmd` 的 6 维遥操作输入（含 Phase 3.5 新增的 `pitch_rate`/`roll_rate`）线性映射为机体力矩（增益来自 `open_loop.max_wrench`），用于验证 `B`/`B^+` 分配零寄生耦合 |
 | `PID_HOLD` (`state_pid_hold`) | 4 | `enter()` 锁存当前 `(x,y,z,roll,pitch,yaw)` 为保持点；摇杆/扳机推动期间按机体对齐速度平移/旋转该设定点（增益来自 `pid_hold.*`，roll/pitch 目标钳制在 `±max_tilt_deg`），松手瞬间冻结；6-DOF PID + 浮力/科氏力/阻力前馈 |
-| `ADHERE_PID` (`state_adhere_pid`) | 5 | 贴壁 PID 基线（Phase 3.8）：未贴壁时 `AdherePidController` 之外的 Y/Z/姿态+X 全部由 `SixDofPidController` 驱动，X 向设定点以 `adhere_pid.approach_speed` 匀速逼近 `adhere_pid.x_wall`；一旦 4 垫估计法向力之和超过 `adhere_pid.dock_force_thresh` 且位置进入 `adhere_pid.x_dock_eps`，粘滞切换为贴壁态：X 向改由专用 `AdherePidController` 的法向力 PI 律覆盖，Y/Z/姿态仍由 `SixDofPidController` 保持 |
-| `ADHERE_SMC` (`state_adhere_smc`) | 6 | 贴壁 SMC 基线（Phase 3.8）：全程只用一个 `SixDofSmcController` 实例驱动全部 6DOF（不为逼近阶段单独构造位置控制器），贴壁判定与 `ADHERE_PID` 相同，贴壁后额外叠加常值压墙偏置 `adhere_smc.wall_preload_fx` |
-| `BASELINE_MPPI` (`state_baseline_mppi`) | 7 | 纯 CUDA 外环 MPPI 基线（Phase 4.1）：`enter()` 锁存当前位姿为目标并调用 `BaselineMppiController::warmStart()`；设定点/摇杆设定点积分与 `PID_HOLD` 同构；`run()` 在 250Hz 严格零阶保持（ZOH），只把 `CtrlInterfaces::outer_loop_cmd_`（25Hz 异步工作线程最新一次 `solve()` 的输出）逐值写入 `pending_thruster_cmd`，不含任何内环 PID/DOB/QP |
+| `ADHERE_PID` (`state_adhere_pid`) | 5 | 贴壁 PID 基线（Phase 3.8，Phase 4.2 新增两阶段序列）：`enter()` 后先进入 `DEPTH_ALIGN` 阶段，Y/Z/X 分别锁定到共享的 `adhere_target_y`/`-adhere_target_depth_m`/`adhere_pid.x_wall + adhere_standoff_x`，待 `|z-Z_target|<=adhere_depth_tol` 且 `|v_z|<=adhere_vz_tol` 后粘滞进入 `WALL_ADHERE` 阶段；该阶段内未贴壁时 `AdherePidController` 之外的 Y/Z/姿态+X 全部由 `SixDofPidController` 驱动，X 向设定点以 `adhere_pid.approach_speed` 匀速逼近 `adhere_pid.x_wall`；一旦 4 垫估计法向力之和超过 `adhere_pid.dock_force_thresh` 且位置进入 `adhere_pid.x_dock_eps`，粘滞切换为贴壁态：X 向改由专用 `AdherePidController` 的法向力 PI 律覆盖，Y/Z/姿态仍由 `SixDofPidController` 保持 |
+| `ADHERE_SMC` (`state_adhere_smc`) | 6 | 贴壁 SMC 基线（Phase 3.8，Phase 4.2 新增两阶段序列）：`DEPTH_ALIGN`/`WALL_ADHERE` 两阶段门限与 `ADHERE_PID` 完全一致；`WALL_ADHERE` 阶段内全程只用一个 `SixDofSmcController` 实例驱动全部 6DOF（不为逼近阶段单独构造位置控制器），贴壁判定与 `ADHERE_PID` 相同，贴壁后额外叠加常值压墙偏置 `adhere_smc.wall_preload_fx` |
+| `BASELINE_MPPI` (`state_baseline_mppi`) | 7 | 纯 CUDA 外环 MPPI 基线（Phase 4.1，Phase 4.2 新增两阶段序列）：`enter()` 锁存当前位姿为目标并调用 `BaselineMppiController::warmStart()`；`DEPTH_ALIGN` 阶段同样先锁定 Y/Z/X standoff 目标，对齐后 `WALL_ADHERE` 阶段把目标 X 直接改为 `BaselineMppiController::xWall()`（无独立 docked_ 状态机 —— 实际逼近/压墙由 CUDA 滚动代价里的墙面接触惩罚 + `preload_fx` 完成）；设定点/摇杆设定点积分与 `PID_HOLD` 同构，但在 `DEPTH_ALIGN` 期间被两阶段目标覆盖；`run()` 在 250Hz 严格零阶保持（ZOH），只把 `CtrlInterfaces::outer_loop_cmd_`（25Hz 异步工作线程最新一次 `solve()` 的输出）逐值写入 `pending_thruster_cmd`，不含任何内环 PID/DOB/QP |
+
+### 两阶段贴壁序列（`DEPTH_ALIGN` → `WALL_ADHERE`，Phase 4.2）
+
+`ADHERE_PID`/`ADHERE_SMC`/`BASELINE_MPPI` 三个贴壁 FSM 状态共享同一套 `ModelParams::
+AdhereStageParams`（`adhere_stage`，由 `robot_control.yaml` 的 `adhere_target_depth_m`/
+`adhere_target_y`/`adhere_standoff_x`/`adhere_depth_tol`/`adhere_vz_tol` 五个零重编译参数驱动，
+默认 `1.0m`/`0.0m`/`0.35m`/`0.05m`/`0.05m`），而非各算法私有的 `adhere_pid.*`/`adhere_smc.*`/
+`baseline_mppi.*` 块 —— 三者统一先定深、再贴壁。`DEPTH_ALIGN`：目标锁定到 `(x_wall+standoff_x,
+target_y, -target_depth_m)`，不触碰墙面；一旦深度误差与垂向速度双双收敛到容差内，粘滞切换为
+`WALL_ADHERE`（永不回退）。各 `FSMState::adhereStageName()` 实现（非贴壁状态返回空字符串）把该
+阶段字符串写入 `ControllerState.msg::adhere_stage`，供 `adhere_mujoco_hardware` 的嵌入式 MuJoCo
+Viewer 叠加层/绿色目标球体以及 RViz2 `/rov/environment_markers` 消费。
 
 ## `MultiRateDecimator`：均匀整数抽取多速率调度
 

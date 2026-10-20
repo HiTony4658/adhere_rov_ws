@@ -2309,3 +2309,133 @@ launch.py headless:=true use_rviz:=false estimation_mode:=ground_truth`，
 `/rov/runtime_diagnostics` 显示 `outer_loop_hz≈25.0`、
 `outer_planner_solve_ms≈0.17~0.3ms`（远低于 `40ms` 外环预算）、
 `timing_healthy=true`；进程通过 `SIGTERM` 干净退出，无残留进程。
+
+## Phase 4.2（2026-10-20）：两阶段贴壁序列 + 壁面水面以上延伸 + 阵风循环 + 实时推力滑条 + 贴壁目标可视化 + 扰动力缩放修复
+
+### 动机
+
+既有 `ADHERE_PID`/`ADHERE_SMC`/`BASELINE_MPPI` 三个贴壁 FSM 状态进入时直接从
+ROV 出生点开始逼近/贴壁，缺少一个明确的"先定深再贴壁"安全序列；水箱/壁面扩容
+到 20m×20m×10m 后暴露了若干可视化/交互层面的副作用（阵风只播放一次、鼠标扰动
+力随场景放大失真）；MuJoCo Viewer 的推力器滑条只能手动注入，无法反映控制器
+真实输出，也缺少贴壁目标点的直观可视化。本阶段集中解决这六项问题。
+
+### 两阶段贴壁序列（`DEPTH_ALIGN` → `WALL_ADHERE`）
+
+新增 `ModelParams::AdhereStageParams`（`adhere_stage`，由 `robot_control.yaml`
+扁平键 `adhere_target_depth_m`/`adhere_target_y`/`adhere_standoff_x`/
+`adhere_depth_tol`/`adhere_vz_tol` 驱动，默认 `1.0m`/`0.0m`/`0.35m`/`0.05m`/
+`0.05m`）——刻意作为三个贴壁算法共享的单一配置块，而非复制进
+`adhere_pid.*`/`adhere_smc.*`/`baseline_mppi.*` 各自私有的参数块，因为"先统一
+定深、再各自贴壁"正是本阶段要表达的架构意图。`FSMState.h` 新增虚函数
+`adhereStageName()`（默认返回空字符串），`StateAdherePid`/`StateAdhereSmc`/
+`StateBaselineMppi` 各自新增 `bool depth_aligned_`（sticky，`enter()` 重置为
+`false`，一旦 `|z-Z_target|<=depth_tol` 且 `|v_z|<=vz_tol` 即永久置真，不会
+倒退）并据此分支覆写 `adhereStageName()`。
+
+`StateAdherePid`/`StateAdhereSmc`：`!depth_aligned_` 时每拍强制把 Y/Z 目标
+覆写为 `adhere_stage.target_y`/`-adhere_stage.target_depth_m`，X 目标覆写为
+`x_wall + adhere_stage.standoff_x`（安全站位，不触碰壁面）；`depth_aligned_`
+之后才允许进入既有的 APPROACH（X 以 `approach_speed` 匀速逼近 `x_wall`）→
+ADHERED（粘滞贴壁判定 `sum_f>=dock_force_thresh && x<=x_wall+x_dock_eps`）
+两段逻辑，`docked_` 判定本身也新增 `depth_aligned_ &&` 前置条件，避免 ROV
+仍在远离壁面的定深阶段时就误触发贴壁判定。顺带修复 `ModelParams::
+AdherePidGains` 里 `kp_pos`/`ki_pos`/`kd_vel` 的 Z 分量此前被误置为 `0.0`
+（文档注释写的是"Y/Z/姿态"三者都应被 `SixDofPidController` 主动调节，但
+实际数组第三分量恒为零，使 Z 轴从未被真正镇定过——此前因为 Z 目标与起始值
+总是相等而未被任何既有 gtest/闭环验证暴露），改为与 Y 分量一致的
+`120.0/10.0/60.0`，否则 `DEPTH_ALIGN` 阶段的 Z 收敛要求无法被满足。
+
+`StateBaselineMppi`：没有独立的 `docked_` 状态机——`!depth_aligned_` 时同样
+把 Y/Z/X 目标覆写为站位点，`depth_aligned_` 之后把 X 目标直接改为
+`BaselineMppiController::xWall()`（新增的只读访问器，暴露
+`BaselineMppiConfig::x_wall`），剩下的逼近/压墙完全交给 CUDA 滚动代价里既有
+的墙面接触惩罚项 + `preload_fx` 完成，不改动任何核函数。
+
+`ControllerState.msg` 新增 `string adhere_stage` 字段（非贴壁状态为空
+字符串），由 `AdhereController::update()` 在 25Hz 发布拍从
+`current_state_->adhereStageName()` 填入，供下游（`adhere_mujoco_hardware`
+的嵌入式 Viewer 叠加层/绿色目标球、RViz2 Marker）消费。
+
+`test_adhere_wall_states.cpp`/`test_baseline_mppi.cpp` 相应更新：原先断言
+"Y/Z 保持在 `enter()` 锁存的起始值"的两个 `ADHERE_PID`/`ADHERE_SMC` 收敛性
+用例改为断言收敛到共享的 `adhere_stage.target_y`/`-target_depth_m`，并新增
+`EXPECT_TRUE(state.isDepthAligned())`；`BASELINE_MPPI` 的闭环跟踪用例原先
+驱动一个任意 `MODE_FULL_POSE` 设定点（`[0.2,0.15,-2.3]`，在两阶段序列下会被
+无条件覆盖，测试会失去意义），改为驱动真实的两阶段收敛到壁面站位，并给这个
+测试新增的 `FakePlant` 补上与 `test_adhere_wall_states.cpp` 同款的单边弹簧
+贴壁接触模型（原来没有任何壁面物理，驱动目标穿过 `x_wall=0` 后会一直向负向
+滑行而不停止）。
+
+### 壁面延伸至水面以上 `1.5m`
+
+`mjcf/rov_wall.xml` 的 `wall` 刚体 `pos`/`wall_geom` `size` 从
+`"-0.01 0 -5.0"`/`"0.01 10.0 5.0"`（`Z∈[-10,0]m`）改为
+`"-0.01 0 -4.25"`/`"0.01 10.0 5.75"`（`Z∈[-10,+1.5]m`，总高 `11.5m`），
+`water_boundary_marker` 的局部 Z 同步从 `5.0` 改为 `4.25` 以继续标记世界
+`Z=0.0m`；`adhere_mujoco_node.cpp` 的 RViz2 壁面 Marker 同步更新
+`pose.position.z=-4.25`/`scale.z=11.5`。水面（`Z=0.0m`）与水箱底
+（`Z=-10.0m`）不变。
+
+### `12.0s` 阵风循环重放
+
+`AdhereMujocoHardware::applyHydrodynamics()`/`write()` 两处原先都用未取模的
+相对造浪时钟 `τ=max(0,t_sim-t_trigger)` 查询 `StationKeepingGustPlugin`，
+使两段半正弦阵风在 `τ∈[3.0,4.2]s`/`[7.0,8.2]s` 播放一次后、`τ` 超出
+`12.0s` 名义周期便再无阵风。两处改为用 `τ_mod=fmod(τ,12.0)` 查询，使阵风
+模式在模式 `2` 保持激活期间永久循环（`τ∈[15.0,16.2]s`/`[19.0,20.2]s` 等
+同理重放）；`MujocoVisBridge` 新增 `wave_tau_mod`，叠加层/遥测同时展示总
+`τ` 与循环相位 `τ_mod`。
+
+### 鼠标扰动力/箭头缩放修复
+
+20m×20m×10m 水箱使 MuJoCo 自动估算的 `model_->stat.meansize`/`extent` 相对
+`~0.2-0.6m` 的 ROV 壳体放大约 10 倍，而 `mjv_applyPerturbForce()`/
+`mjv_updateScene()` 的扰动弹簧刚度与力箭头粗细/长度都按 `meansize` 缩放，
+使轻微 `Ctrl`+拖拽即产生巨大扰动力与失真箭头。`AdhereMujocoHardware::
+configure()` 中 `mj_loadXML` 后把 `model_->stat.meansize` 钳回 `0.25`
+（匹配 ROV 尺度），`vis.scale.forcewidth`/`vis.map.force` 相应缩小为
+`0.015f`/`0.04f`；`applyHydrodynamics()` 中额外对 `MujocoVisBridge::
+xfrc_perturb` 读出的力/力矩范数做硬钳位（`<=40.0N`/`<=8.0N*m`），作为不依赖
+GUI 侧视觉缩放公式细节的权威最后防线。
+
+### `MujocoViewer` 实时推力滑条 + `Manual Override`
+
+右侧边栏 "Thrusters (Manual)" 分组新增 `Manual Override` 复选框（默认关闭，
+位于 8 个滑条上方）。关闭时，`renderFrame()` 每帧用 `d_vis_->ctrl[i]` 覆写
+`thruster_slider_[i]`（滑条/数值框变成控制器实际输出的只读实时镜像），并把
+`MujocoVisBridge::manual_ctrl` 强制清零；勾选后恢复原始行为（拖动滑条把值
+写入 `manual_ctrl`，与上层控制器指令叠加），`Zero All` 按钮不受影响。
+
+### 贴壁目标位姿遥测 + 绿色目标球可视化
+
+`adhere_mujoco_node.cpp` 新增对 `/rov/controller_state` 的订阅（新增
+`adhere_control_msgs` 消息级依赖，不引入任何 MuJoCo/CUDA/`ros2_control`
+反向耦合），解析 `target_pose`/`current_state`/`adhere_stage`
+并同时写入：(1) 节点本地原子量，驱动 `/rov/environment_markers` 新增的
+绿色 `SPHERE` Marker（仅在 `adhere_stage` 非空时发布，位于世界
+`(0, Y_target, Z_target)`）；(2) `MujocoVisBridge` 新增的
+`fsm_current_state_code`/`adhere_stage_code`/`adhere_target_{x,y,z,yaw_deg}`
+原子量，供嵌入式 `MujocoViewer` 消费。`MujocoViewer::drawOverlayTelemetry()`
+叠加层新增 `Target Pos (X Y Z Yaw)` 与 `FSM State / Adhere Stage` 两行；
+`renderFrame()` 新增同款绿色目标球场景几何（`mjGEOM_SPHERE`，半径
+`0.035m`，RGBA `{0.1,1.0,0.2,0.9}`），同样只在贴壁状态激活时渲染。
+
+### 验证结果
+
+`export PATH=/usr/bin:/usr/local/cuda/bin:$PATH && colcon build --symlink-
+install`（5 个包）零警告零错误。`colcon test`：全部 11 个 gtest 可执行文件
+共 55/55 用例通过（含本阶段更新的 `test_adhere_wall_states`/
+`test_baseline_mppi`），零回归；lint 结果与既有基线完全一致（仅剩全仓库
+预先存在的缺版权头/`package.xml` `test_depend` 顺序等 Phase 2.14 起已记录的
+失败，新增/修改文件未引入任何新增 lint 回归）。真实 MuJoCo 闭环（`ros2
+launch simplified_v1_description mujoco.launch.py headless:=true
+use_rviz:=false estimation_mode:=ground_truth`，经 `ros2 topic pub/echo`
+驱动）确认：切换到 `ADHERE_PID`（`command:=5`）后 `/rov/controller_state`
+依次报告 `adhere_stage=DEPTH_ALIGN`→`WALL_ADHERE`，`target_pose.position.z`
+收敛到 `-1.0`，4 个 `contact_forces` 收敛到约 `9.55N`（均正、`kern_margin≈
+0.9999986`）；切换到 `ADHERE_SMC`（`command:=6`）、`BASELINE_MPPI`
+（`command:=7`）均不崩溃，`adhere_stage` 正确报告 `WALL_ADHERE`（ROV 已由
+前序状态带到贴壁位置附近），`/rov/runtime_diagnostics` 显示
+`outer_planner_solve_ms≈0.29~0.45ms`、`timing_healthy=true`；进程通过
+`SIGTERM` 干净退出，无残留进程。

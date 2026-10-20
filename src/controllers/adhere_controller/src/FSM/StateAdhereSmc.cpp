@@ -39,6 +39,7 @@ void StateAdhereSmc::enter()
   const auto & active = ctrl_interfaces_.active_state;
   p_d_world_ = Vec3(active.pos_w[0], active.pos_w[1], active.pos_w[2]);
   q_d_ = Quat(active.quat_w[0], active.quat_w[1], active.quat_w[2], active.quat_w[3]);
+  depth_aligned_ = false;
   docked_ = false;
 }
 
@@ -59,13 +60,24 @@ void StateAdhereSmc::run(const rclcpp::Time & /*time*/, const rclcpp::Duration &
     sum_f += f;
   }
 
-  if (!docked_ && sum_f >= gains.dock_force_thresh &&
+  const RotMat r = quatToRotMat(q_est);
+  const auto & stage = model_params_.adhere_stage;
+
+  // Stage 1 -> Stage 2 gate (CLAUDE.md Phase 4.2): see StateAdherePid.cpp for the full
+  // rationale -- identical sticky DEPTH_ALIGN -> WALL_ADHERE gate.
+  if (!depth_aligned_) {
+    const double depth_err = pos_world.z() - (-stage.target_depth_m);
+    const double vz_world = (r * vel_body).z();
+    if (std::abs(depth_err) <= stage.depth_tol && std::abs(vz_world) <= stage.vz_tol) {
+      depth_aligned_ = true;
+    }
+  }
+
+  if (depth_aligned_ && !docked_ && sum_f >= gains.dock_force_thresh &&
     pos_world.x() <= gains.x_wall + gains.x_dock_eps)
   {
     docked_ = true;
   }
-
-  const RotMat r = quatToRotMat(q_est);
 
   const uint64_t seq = ci.setpoint_seq.load();
   if (seq != last_seen_setpoint_seq_) {
@@ -110,7 +122,11 @@ void StateAdhereSmc::run(const rclcpp::Time & /*time*/, const rclcpp::Duration &
     q_d_ = quatFromRPY(q_d_rpy);
   }
 
-  if (!docked_) {
+  if (!depth_aligned_) {
+    p_d_world_.y() = stage.target_y;
+    p_d_world_.z() = -stage.target_depth_m;
+    p_d_world_.x() = gains.x_wall + stage.standoff_x;
+  } else if (!docked_) {
     const double step = gains.approach_speed * dt;
     p_d_world_.x() = std::max(p_d_world_.x() - step, gains.x_wall);
   } else {

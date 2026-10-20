@@ -135,9 +135,12 @@ adhere_mujoco_node:
     # the APPROACH phase -- ADHERED re-latches p_d_world_.x() every tick); kp_force/ki_force/
     # kd_x/f_preload/f_des/integral_force_max belong to the dedicated wall-normal force PI loop
     # (algorithms/pid/AdherePidController.h) that overrides the Fx wrench component once docked.
-    adhere_pid.kp_pos: [120.0, 120.0, 0.0]
-    adhere_pid.ki_pos: [10.0, 10.0, 0.0]
-    adhere_pid.kd_vel: [60.0, 60.0, 0.0]
+    # Z gain fixed from 0.0 to 120.0/10.0/60.0 in CLAUDE.md Phase 4.2: Z must be actively
+    # regulated during the new DEPTH_ALIGN stage (converges to -adhere_target_depth_m before
+    # WALL_ADHERE begins), matching Y's gains exactly.
+    adhere_pid.kp_pos: [120.0, 120.0, 120.0]
+    adhere_pid.ki_pos: [10.0, 10.0, 10.0]
+    adhere_pid.kd_vel: [60.0, 60.0, 60.0]
     adhere_pid.kp_att: [40.0, 40.0, 25.0]
     adhere_pid.ki_att: [2.0, 2.0, 2.0]
     adhere_pid.kd_att: [15.0, 15.0, 12.0]
@@ -169,6 +172,18 @@ adhere_mujoco_node:
     adhere_smc.x_wall: 0.0
     adhere_smc.x_dock_eps: 0.02
     adhere_smc.wall_preload_fx: 30.0     # N magnitude; applied as -wall_preload_fx wrench
+
+    # Two-stage adhere sequence (CLAUDE.md Phase 4.2), shared by all three wall-adhesion FSM
+    # states (ADHERE_PID/ADHERE_SMC/BASELINE_MPPI): on entry, each first stabilizes depth/lateral
+    # position at a safe standoff distance from the wall (DEPTH_ALIGN) before approaching and
+    # adhering (WALL_ADHERE). Deliberately NOT nested under adhere_pid.*/adhere_smc.*/
+    # baseline_mppi.* -- a single shared target depth/standoff is the point (zero-recompile
+    # tuning in one place for all three baselines).
+    adhere_target_depth_m: 1.0  # m, target depth below surface (Z_target = -1.0m)
+    adhere_target_y: 0.0        # m, world Y
+    adhere_standoff_x: 0.35     # m, DEPTH_ALIGN holds this far from the wall plane (X=0)
+    adhere_depth_tol: 0.05      # m, |z - Z_target| gate for DEPTH_ALIGN -> WALL_ADHERE
+    adhere_vz_tol: 0.05         # m/s, |v_z| gate for DEPTH_ALIGN -> WALL_ADHERE
 
     # Baseline MPPI (CLAUDE.md Phase 4.1): algorithm-scoped config, parsed independently of
     # ModelParams by baseline_mppi::BaselineMppiConfig::loadFromNode() (not ModelParams::

@@ -55,13 +55,14 @@
     <geom name="water_surface" type="plane" pos="0 0 0" size="10.0 10.0 0.01" rgba="0.2 0.6 0.9 0.25" contype="0" conaffinity="0"/>
 
     <!-- Wall: static vertical plane at X=0, outward normal +X, spanning Y in [-10,10]m and
-         Z in [-10,0]m (CLAUDE.md Phase 3.3: 20m x 10m, 5x the original 4m x 4m extent).
-         Rendered as a thin box centered at Z=-5.0. -->
-    <body name="wall" pos="-0.01 0 -5.0">
-      <geom name="wall_geom" type="box" size="0.01 10.0 5.0" material="wall_mat" friction="0.005 0.002 0.0001"/>
+         Z in [-10,+1.5]m (CLAUDE.md Phase 4.2: top extended 1.5m above the Z=0.0 water surface
+         so adhere-mode ROVs can approach/climb above the waterline; 11.5m total height).
+         Rendered as a thin box centered at Z=-4.25. -->
+    <body name="wall" pos="-0.01 0 -4.25">
+      <geom name="wall_geom" type="box" size="0.01 10.0 5.75" material="wall_mat" friction="0.005 0.002 0.0001"/>
       <!-- Water-boundary warning buoy: small sphere on the wall face marking world Z = 0.0
-           (local Z = 5.0, since this body is now centered at world Z = -5.0) -->
-      <geom name="water_boundary_marker" type="sphere" size="0.04" pos="0.02 0 5.0" rgba="1.0 0.6 0.0 0.9" contype="0" conaffinity="0"/>
+           (local Z = 4.25, since this body is now centered at world Z = -4.25) -->
+      <geom name="water_boundary_marker" type="sphere" size="0.04" pos="0.02 0 4.25" rgba="1.0 0.6 0.0 0.9" contype="0" conaffinity="0"/>
     </body>
 
     <!-- ROV chassis: flat box, thin along X (wall-normal), L x W x H = 0.2 x 0.6 x 0.4 m (wide Y, narrow Z), mass ~20 kg -->

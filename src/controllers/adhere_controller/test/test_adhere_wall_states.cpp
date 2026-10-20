@@ -184,6 +184,8 @@ TEST(AdhereWallStates, StateAdherePidDocksAndHoldsAllFourPadsWithPositiveKernMar
     plant.step(kDt);
   }
 
+  // Phase 4.2 two-stage adhere sequence: DEPTH_ALIGN must complete before WALL_ADHERE (docking).
+  EXPECT_TRUE(state.isDepthAligned());
   EXPECT_TRUE(state.isDocked());
   for (int i = 0; i < 4; ++i) {
     EXPECT_GT(plant.ci.active_state.pad_force[i], 0.0);
@@ -204,9 +206,10 @@ TEST(AdhereWallStates, StateAdherePidDocksAndHoldsAllFourPadsWithPositiveKernMar
     EXPECT_LT(kern_result(i), 0.0);  // C_kern*u <= 0 admissible region
   }
 
-  // Y/Z setpoint held (latched at enter() to the starting 0.1/-2.1).
-  EXPECT_NEAR(plant.position().y(), 0.1, 0.02);
-  EXPECT_NEAR(plant.position().z(), -2.1, 0.02);
+  // Y/Z setpoint converges to the shared DEPTH_ALIGN target (adhere_stage.target_y/
+  // target_depth_m), NOT the starting 0.1/-2.1 -- Phase 4.2 re-targets both before docking.
+  EXPECT_NEAR(plant.position().y(), kTestModelParams.adhere_stage.target_y, 0.02);
+  EXPECT_NEAR(plant.position().z(), -kTestModelParams.adhere_stage.target_depth_m, 0.05);
 }
 
 TEST(AdhereWallStates, StateAdhereSmcDocksAndHoldsAllFourPadsWithPositiveKernMargin)
@@ -226,6 +229,7 @@ TEST(AdhereWallStates, StateAdhereSmcDocksAndHoldsAllFourPadsWithPositiveKernMar
     plant.step(kDt);
   }
 
+  EXPECT_TRUE(state.isDepthAligned());
   EXPECT_TRUE(state.isDocked());
   for (int i = 0; i < 4; ++i) {
     EXPECT_GT(plant.ci.active_state.pad_force[i], 0.0);
@@ -245,8 +249,8 @@ TEST(AdhereWallStates, StateAdhereSmcDocksAndHoldsAllFourPadsWithPositiveKernMar
     EXPECT_LT(kern_result(i), 0.0);
   }
 
-  EXPECT_NEAR(plant.position().y(), 0.1, 0.02);
-  EXPECT_NEAR(plant.position().z(), -2.1, 0.02);
+  EXPECT_NEAR(plant.position().y(), kTestModelParams.adhere_stage.target_y, 0.02);
+  EXPECT_NEAR(plant.position().z(), -kTestModelParams.adhere_stage.target_depth_m, 0.05);
 }
 
 // Comparative trade-off check (CLAUDE.md Phase 3.8 Stage 3.1): under an identical sustained +Y
