@@ -4,7 +4,7 @@ namespace adhere_controller
 {
 
 StatePassive::StatePassive(CtrlInterfaces & ctrl_interfaces, const ModelParams & model_params)
-: FSMState(FSMStateName::PASSIVE, "state_passive", ctrl_interfaces, model_params)
+: FSMState(FSMStateName::IDLE_PASSIVE_NONE, "state_idle_passive_none", ctrl_interfaces, model_params)
 {
 }
 

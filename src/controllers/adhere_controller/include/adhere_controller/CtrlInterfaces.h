@@ -21,7 +21,7 @@ namespace adhere_controller
 struct ControlInputs
 {
   // /rov/fsm_command (FsmCommand.msg): ONLY switches FSM states.
-  std::atomic<int> command{0};  // 0=NO_CHANGE, 1=PASSIVE, 2=DEPTH_HOLD, 3=OPEN_LOOP, 4=PID_HOLD
+  std::atomic<int> command{0};  // 0=NO_CHANGE, 1=IDLE_PASSIVE_NONE, 2=HOLD_PID_DEPTH, 3=TELEOP_OPENLOOP_6DOF, 4=HOLD_PID_6DOF
 
   // /rov/setpoint_cmd (SetpointCommand.msg): discrete numeric setpoints, orthogonal to state
   // switching. setpoint_seq increments once per received message so StateDepthHold/StatePidHold

@@ -508,7 +508,7 @@ Phase 4.2：20m×20m×10m 水箱把 MuJoCo 自动估算的 `model_->stat.meansiz
   `MujocoVisBridge`）与 `FSM State / Adhere Stage`（FSM 状态名 + `DEPTH_
   ALIGN`/`WALL_ADHERE`/`n/a`） |
 
-Phase 4.2：`ADHERE_PID`/`ADHERE_SMC`/`BASELINE_MPPI` 任一贴壁状态激活时，
+Phase 4.2：`ADHERE_PID_WBC`/`ADHERE_SMC_WBC`/`ADHERE_MPPI_BASELINE` 任一贴壁状态激活时，
 视口内额外渲染一个亮绿色目标球（`mjGEOM_SPHERE`，半径 `0.035m`，RGBA
 `{0.1, 1.0, 0.2, 0.9}`），固定在世界 `(X=0, Y=Y_target, Z=Z_target)`——即
 该状态当前的贴壁目标点；非贴壁状态下不渲染。`adhere_mujoco_node.cpp` 的
@@ -802,7 +802,7 @@ ros2 topic pub /rov/flow_mode_cmd std_msgs/msg/Int32 "{data: 1}" --once   # 切�
 
 `autostart_controllers:="[]"` 时即此前 `mujoco_sim.launch.py` 的纯开环硬件仿真
 行为：对任何具体控制器或 FSM 终端控制台零知晓，始终以 `u=0` 启动。需要
-`AdhereController` 闭环 FSM（`PASSIVE`/`DEPTH_HOLD`/`OPEN_LOOP`/`PID_HOLD`
+`AdhereController` 闭环 FSM（`IDLE_PASSIVE_NONE`/`HOLD_PID_DEPTH`/`TELEOP_OPENLOOP_6DOF`/`HOLD_PID_6DOF`
 切换、定深 PID 目标深度设定）与 FSM 终端控制台时，使用默认的
 `autostart_controllers:=['adhere_controller']`（见
 [`adhere_controller/README.md`](../../controllers/adhere_controller/README.md)）。

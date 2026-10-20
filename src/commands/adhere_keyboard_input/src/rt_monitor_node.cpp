@@ -71,7 +71,7 @@ void printDiagnosticsTable(const adhere_control_msgs::msg::RuntimeDiagnostics & 
   printRow("Inner Loop", msg.inner_loop_hz, 250.0, msg.inner_loop_exec_ms, msg.inner_loop_budget_ms);
   printRow("Outer Loop", msg.outer_loop_hz, 25.0, msg.outer_loop_exec_ms, msg.outer_loop_budget_ms);
   printRow("Thruster Cmd", msg.thruster_cmd_hz, 250.0, 0.0, 0.0);
-  // Phase 4.1: 0.0 whenever no GPU outer-loop planner (BASELINE_MPPI/KAMR_MPPI) is active -- not
+  // Phase 4.1: 0.0 whenever no GPU outer-loop planner (ADHERE_MPPI_BASELINE/ADHERE_MPPI_KAMR) is active -- not
   // colorized against a target Hz like the rows above, just the raw worker-thread solve latency.
   std::printf(
     "%-16s                                 solve %6.2f ms\n", "GPU Planner",

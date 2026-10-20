@@ -44,7 +44,7 @@ AdherePidController::Gains adherePidGainsToForcePid(const ModelParams::AdherePid
 }  // namespace
 
 StateAdherePid::StateAdherePid(CtrlInterfaces & ctrl_interfaces, const ModelParams & model_params)
-: FSMState(FSMStateName::ADHERE_PID, "state_adhere_pid", ctrl_interfaces, model_params),
+: FSMState(FSMStateName::ADHERE_PID_WBC, "state_adhere_pid_wbc", ctrl_interfaces, model_params),
   dynamics_(model_params),
   pid_(
     adherePidGainsToSixDof(model_params.adhere_pid), dynamics_, kIntegralPosMax, kIntegralAttMax),
@@ -185,7 +185,17 @@ void StateAdherePid::run(const rclcpp::Time & /*time*/, const rclcpp::Duration &
   Vec6 wrench = pid_.computeWrench(in, dt);
   if (docked_) {
     wrench(0) = force_pid_.computeNormalForceWrench(gains.f_des, sum_f, vel_body.x(), dt);
+  } else if (depth_aligned_) {
+    // Phase 4.3 soft-landing: decelerate into the wall during the pre-dock APPROACH ramp
+    // instead of impacting at a constant approach_speed (the Kelvin-Voigt pads' zeta~0.2 would
+    // otherwise bounce the ROV off on first contact).
+    wrench(0) -= stage.approach_vx_damp * std::max(0.0, vel_body.x());
   }
+
+  // Phase 4.3 lever-arm moment feedforward (CLAUDE.md Sec.5.2's k_ff=0.1m): thr_T5..8 sit at
+  // body X=-0.10m, so any Fy/Fz command induces a parasitic overturning moment this cancels.
+  wrench(4) += 0.1 * wrench(2);
+  wrench(5) -= 0.1 * wrench(1);
 
   const Vec8 u = b_pinv_ * wrench;
   for (int i = 0; i < 8; ++i) {

@@ -1,6 +1,7 @@
-// state_cmd_console_node: dedicated DEPTH_HOLD/PID_HOLD setpoint terminal (CLAUDE.md Phase 3.2
-// Stage 2.2, quaternion-ized in Phase 3.6). Auto-spawned by fsm_console_node when the active
-// state becomes DEPTH_HOLD/PID_HOLD, or run manually. Subscribes /rov/controller_state for live
+// state_cmd_console_node: dedicated HOLD_PID_DEPTH/HOLD_PID_6DOF setpoint terminal (CLAUDE.md
+// Phase 3.2 Stage 2.2, quaternion-ized in Phase 3.6). Auto-spawned by fsm_console_node when the
+// active state becomes HOLD_PID_DEPTH/HOLD_PID_6DOF, or run manually. Subscribes
+// /rov/controller_state for live
 // actual/target display and publishes ONLY SetpointCommand on /rov/setpoint_cmd -- never
 // FsmCommand (setpoint terminals are orthogonal to state switching). The wire format
 // (SetpointCommand::target_pose) is a geometry_msgs/Pose quaternion, but the human prompt stays
@@ -9,12 +10,17 @@
 // console input parsing and display.
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <csignal>
 #include <iostream>
 #include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
+
+#include <sys/prctl.h>
 
 #include "rclcpp/rclcpp.hpp"
 
@@ -23,6 +29,17 @@
 
 namespace
 {
+
+// Set by handleSignal() on SIGINT/SIGTERM/SIGHUP; the watchdog thread below polls this (and
+// rclcpp::ok()) every 100ms so a blocking std::getline(std::cin, ...) (e.g. stdin closed by the
+// terminal emulator on window-close, or the parent fsm_console_node's killpg()) never hangs
+// shutdown.
+std::atomic<bool> g_shutdown_requested{false};
+
+void handleSignal(int /*sig*/)
+{
+  g_shutdown_requested.store(true);
+}
 
 struct Quat
 {
@@ -94,22 +111,22 @@ void printDepthHoldPrompt()
   // CLAUDE.md Phase 3.3 tank geometry: water surface at world Z=0.0m, floor at Z=-10.0m, so
   // depth below surface = -Z. Displayed alongside raw Z for unambiguous cross-reference.
   std::cout << "============================================================\n"
-            << "  [DEPTH_HOLD] Setpoint Console (定深设定终端)\n"
+            << "  [HOLD_PID_DEPTH] Setpoint Console (定深设定终端)\n"
             << "============================================================\n"
             << "  Current Depth: " << -actual.pos[2] << " m (Z = " << actual.pos[2] << " m)   |   "
             << "Target Depth: " << -target.pos[2] << " m (Z = " << target.pos[2] << " m)\n"
             << "------------------------------------------------------------\n"
-            << "[DEPTH_HOLD] Enter target depth in meters, positive or negative (float, e.g. "
+            << "[HOLD_PID_DEPTH] Enter target depth in meters, positive or negative (float, e.g. "
                "2.50 or -2.50 -- both mean 2.50m below the surface), or 'h' to hold current "
                "depth: " << std::flush;
 }
 
-// mode 4=PID_HOLD, 5=ADHERE_PID, 6=ADHERE_SMC, 7=BASELINE_MPPI -- all four share the exact same
-// command grammar below (y/z/roll/pitch/yaw/all/reset/h), since sliding along the wall in
-// Y/Z/attitude while ADHERE_PID/ADHERE_SMC maintain wall-normal preload (or BASELINE_MPPI tracks
-// a free 6DOF reference via its CUDA rollout) is identical in shape to PID_HOLD's free 6-DOF
-// setpoint move -- the FSM states themselves simply ignore the X component of
-// target_pose.position once docked (CLAUDE.md Phase 3.8/4.1).
+// mode 4=HOLD_PID_6DOF, 5=ADHERE_PID_WBC, 6=ADHERE_SMC_WBC, 7=ADHERE_MPPI_BASELINE -- all four
+// share the exact same command grammar below (y/z/roll/pitch/yaw/all/reset/h), since sliding
+// along the wall in Y/Z/attitude while ADHERE_PID_WBC/ADHERE_SMC_WBC maintain wall-normal preload
+// (or ADHERE_MPPI_BASELINE tracks a free 6DOF reference via its CUDA rollout) is identical in
+// shape to HOLD_PID_6DOF's free 6-DOF setpoint move -- the FSM states themselves simply ignore
+// the X component of target_pose.position once docked (CLAUDE.md Phase 3.8/4.1).
 void printPidHoldPrompt(int mode)
 {
   PoseDisplay target, actual;
@@ -120,10 +137,10 @@ void printPidHoldPrompt(int mode)
   }
   const auto actual_rpy = rpyFromQuat(actual.quat);
   const auto target_rpy = rpyFromQuat(target.quat);
-  const char * title = mode == 5 ? "[ADHERE_PID] Setpoint Console (贴壁 PID 基线设定终端)"
-    : mode == 6 ? "[ADHERE_SMC] Setpoint Console (贴壁 SMC 基线设定终端)"
-    : mode == 7 ? "[BASELINE_MPPI] Setpoint Console (纯 CUDA 外环 MPPI 设定终端)"
-    : "[PID_HOLD] Setpoint Console (6DOF 位置+姿态保持设定终端)";
+  const char * title = mode == 5 ? "[ADHERE_PID_WBC] Setpoint Console (贴壁 PID 基线设定终端)"
+    : mode == 6 ? "[ADHERE_SMC_WBC] Setpoint Console (贴壁 SMC 基线设定终端)"
+    : mode == 7 ? "[ADHERE_MPPI_BASELINE] Setpoint Console (纯 CUDA 外环 MPPI 设定终端)"
+    : "[HOLD_PID_6DOF] Setpoint Console (6DOF 位置+姿态保持设定终端)";
   // CLAUDE.md Phase 3.3 tank geometry: water surface at world Z=0.0m, so depth = -Z. Phase 3.6:
   // displays both the wire-format quaternion and the human-friendly RPY(deg) derived from it.
   std::cout << "============================================================\n"
@@ -141,7 +158,7 @@ void printPidHoldPrompt(int mode)
             << ", " << target_rpy[1] * kRadToDeg << ", " << target_rpy[2] * kRadToDeg << "]\n"
             << "------------------------------------------------------------\n"
             << "Enter 'z <val>' (depth), 'y <val>' (lateral), 'x <val>' (wall dist, ignored "
-               "once ADHERE_PID/ADHERE_SMC have docked), 'roll <deg>', 'pitch <deg>', "
+               "once ADHERE_PID_WBC/ADHERE_SMC_WBC have docked), 'roll <deg>', 'pitch <deg>', "
                "'yaw <deg>', 'all <x> <y> <z> <yaw_deg>', 'reset' (roll/pitch -> 0), or 'h' "
                "(lock current pose): "
             << std::flush;
@@ -152,6 +169,13 @@ void printPidHoldPrompt(int mode)
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
+  // Self-terminate if the parent fsm_console_node dies without delivering a signal (e.g.
+  // SIGKILL'd, bypassing its killpg() cleanup path).
+  prctl(PR_SET_PDEATHSIG, SIGTERM);
+  std::signal(SIGINT, handleSignal);
+  std::signal(SIGTERM, handleSignal);
+  std::signal(SIGHUP, handleSignal);
+
   auto node = std::make_shared<rclcpp::Node>("state_cmd_console_node");
 
   const int mode = node->declare_parameter<int>("mode", 2);
@@ -184,6 +208,16 @@ int main(int argc, char ** argv)
   auto executor = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
   executor->add_node(node);
   std::thread spin_thread([executor]() { executor->spin(); });
+
+  // Watchdog: forces the process to exit even if std::getline(std::cin, ...) below is stuck
+  // blocking on a terminal whose window/stdin already closed.
+  std::thread watchdog_thread([]() {
+    while (rclcpp::ok() && !g_shutdown_requested.load()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    std::exit(0);
+  });
+  watchdog_thread.detach();
 
   while (rclcpp::ok()) {
     if (mode == 2) {
@@ -220,7 +254,7 @@ int main(int argc, char ** argv)
         }
       }
     } else {
-      // mode == 4/5/6/7 (PID_HOLD/ADHERE_PID/ADHERE_SMC/BASELINE_MPPI): parse 'z <val>' / 'y <val>' /
+      // mode == 4/5/6/7 (HOLD_PID_6DOF/ADHERE_PID_WBC/ADHERE_SMC_WBC/ADHERE_MPPI_BASELINE): parse 'z <val>' / 'y <val>' /
       // 'x <val>' / 'roll <deg>' / 'pitch <deg>' / 'yaw <deg>' /
       // 'all <x> <y> <z> <yaw_deg>' / 'reset' / 'h'. Partial updates carry the
       // CURRENTLY known target pose forward (decomposed to x/y/z/roll/pitch/yaw), so e.g.

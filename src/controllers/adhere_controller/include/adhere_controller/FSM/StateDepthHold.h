@@ -40,8 +40,12 @@ public:
 
   FSMStateName checkChange() override;
 
-  // Reports pos=[0, 0, target_z_], quat=identity -- only Z is a meaningful reference here.
+  // Reports pos=[last_actual_x_, last_actual_y_, target_z_], quat=identity (Phase 4.3: X/Y
+  // follow the ROV's own actual position each tick, since this state has no lateral authority
+  // -- lets the universal target sphere sit directly above/below the ROV on its vertical axis).
   PoseTarget targetPose() const override;
+
+  bool targetValid() const override { return true; }
 
 private:
   // Damped Moore-Penrose pseudoinverse of the 6x8 thruster allocation matrix B (shared
@@ -53,6 +57,8 @@ private:
   SixDofPidController pid_;
 
   double target_z_ = 0.5;
+  double last_actual_x_ = 0.0;
+  double last_actual_y_ = 0.0;
 
   // Last setpoint_seq value this state has already applied (CLAUDE.md Phase 3.2 Stage 2.1's
   // edge-detection pattern); starts at 0 and only ever moves forward.

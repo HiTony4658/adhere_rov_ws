@@ -50,7 +50,7 @@ namespace adhere_controller
 //
 // Future KAMR-MPPI milestones (Impedance PD + Pad-Force DOB + 12D OSQP on the inner loop, async
 // CUDA MPPI rollout on the outer-loop hook) add further FSMState subclasses to this same state
-// machine; Phase 3.1 only wires PASSIVE and DEPTH_HOLD.
+// machine; Phase 3.1 only wires IDLE_PASSIVE_NONE and HOLD_PID_DEPTH.
 class AdhereController : public controller_interface::ControllerInterface
 {
 public:
@@ -264,7 +264,7 @@ private:
     // Phase 4.1: set from current_state_->state_name at the same 500Hz-thread snapshot site
     // (update()'s tick.outer_due block) that fills the fields above -- tells outerWorkerLoop()
     // whether to actually run baseline_mppi_.solve() this cycle, or keep the original trivial
-    // pass-through (e.g. while PASSIVE/PID_HOLD/ADHERE_* are active).
+    // pass-through (e.g. while IDLE_PASSIVE_NONE/HOLD_PID_6DOF/ADHERE_* are active).
     bool run_baseline_mppi = false;
   };
   struct OuterLoopOutput

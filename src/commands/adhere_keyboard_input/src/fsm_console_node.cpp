@@ -8,6 +8,7 @@
 // active").
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
@@ -16,7 +17,9 @@
 #include <string>
 #include <thread>
 
+#include <csignal>
 #include <signal.h>
+#include <sys/prctl.h>
 #include <unistd.h>
 
 #include "rclcpp/rclcpp.hpp"
@@ -28,14 +31,29 @@
 namespace
 {
 
-std::atomic<int32_t> g_current_state{adhere_control_msgs::msg::FsmCommand::PASSIVE};
-std::string g_state_name = "state_passive";
+std::atomic<int32_t> g_current_state{adhere_control_msgs::msg::FsmCommand::IDLE_PASSIVE_NONE};
+std::string g_state_name = "state_idle_passive_none";
 std::mutex g_state_name_mutex;
 
 // setsid() in spawnStateConsole() below puts the forked child in its own session, so its pid
 // IS its process group id -- killpg() on that pid tears down gnome-terminal/xterm and the
 // inner ros2 run process together.
 std::atomic<pid_t> g_child_pgid{-1};
+
+// Set by handleSignal() on SIGINT/SIGTERM/SIGHUP; the watchdog thread below polls this (and
+// rclcpp::ok()) every 100ms so a blocking std::getline(std::cin, ...) (e.g. stdin closed by the
+// terminal emulator on window-close) never hangs shutdown.
+std::atomic<bool> g_shutdown_requested{false};
+
+void killChildConsole();
+
+void handleSignal(int /*sig*/)
+{
+  g_shutdown_requested.store(true);
+  // killpg() is a thin syscall wrapper, safe enough to call directly from a signal handler for
+  // this interactive CLI tool (not a hard real-time context).
+  killChildConsole();
+}
 
 // Compact 1-line timing summary (CLAUDE.md Phase 3.6 Stage 3.2), updated from
 // /rov/runtime_diagnostics -- full detail lives in rt_monitor_node, this is just a glance.
@@ -50,22 +68,22 @@ std::string g_metrics_line = "||u||: --N  Power: --  Slew: --N/s  E: --N^2s  Sat
 const char * stateLabel(int32_t state)
 {
   switch (state) {
-    case adhere_control_msgs::msg::FsmCommand::PASSIVE:
-      return "[1] state_passive";
-    case adhere_control_msgs::msg::FsmCommand::DEPTH_HOLD:
-      return "[2] state_depth_hold";
-    case adhere_control_msgs::msg::FsmCommand::OPEN_LOOP:
-      return "[3] state_open_loop";
-    case adhere_control_msgs::msg::FsmCommand::PID_HOLD:
-      return "[4] state_pid_hold";
-    case adhere_control_msgs::msg::FsmCommand::ADHERE_PID:
-      return "[5] state_adhere_pid";
-    case adhere_control_msgs::msg::FsmCommand::ADHERE_SMC:
-      return "[6] state_adhere_smc";
-    case adhere_control_msgs::msg::FsmCommand::BASELINE_MPPI:
-      return "[7] state_baseline_mppi";
-    case adhere_control_msgs::msg::FsmCommand::KAMR_MPPI:
-      return "[8] state_kamr_mppi";
+    case adhere_control_msgs::msg::FsmCommand::IDLE_PASSIVE_NONE:
+      return "[1] state_idle_passive_none";
+    case adhere_control_msgs::msg::FsmCommand::HOLD_PID_DEPTH:
+      return "[2] state_hold_pid_depth";
+    case adhere_control_msgs::msg::FsmCommand::TELEOP_OPENLOOP_6DOF:
+      return "[3] state_teleop_openloop_6dof";
+    case adhere_control_msgs::msg::FsmCommand::HOLD_PID_6DOF:
+      return "[4] state_hold_pid_6dof";
+    case adhere_control_msgs::msg::FsmCommand::ADHERE_PID_WBC:
+      return "[5] state_adhere_pid_wbc";
+    case adhere_control_msgs::msg::FsmCommand::ADHERE_SMC_WBC:
+      return "[6] state_adhere_smc_wbc";
+    case adhere_control_msgs::msg::FsmCommand::ADHERE_MPPI_BASELINE:
+      return "[7] state_adhere_mppi_baseline";
+    case adhere_control_msgs::msg::FsmCommand::ADHERE_MPPI_KAMR:
+      return "[8] state_adhere_mppi_kamr";
     default:
       return "[?] unknown";
   }
@@ -91,20 +109,20 @@ void spawnStateConsole(int mode)
 
   std::string title;
   switch (mode) {
-    case adhere_control_msgs::msg::FsmCommand::DEPTH_HOLD:
-      title = "ROV DEPTH_HOLD Setpoint Console";
+    case adhere_control_msgs::msg::FsmCommand::HOLD_PID_DEPTH:
+      title = "ROV HOLD_PID_DEPTH Setpoint Console";
       break;
-    case adhere_control_msgs::msg::FsmCommand::ADHERE_PID:
-      title = "ROV ADHERE_PID Setpoint Console";
+    case adhere_control_msgs::msg::FsmCommand::ADHERE_PID_WBC:
+      title = "ROV ADHERE_PID_WBC Setpoint Console";
       break;
-    case adhere_control_msgs::msg::FsmCommand::ADHERE_SMC:
-      title = "ROV ADHERE_SMC Setpoint Console";
+    case adhere_control_msgs::msg::FsmCommand::ADHERE_SMC_WBC:
+      title = "ROV ADHERE_SMC_WBC Setpoint Console";
       break;
-    case adhere_control_msgs::msg::FsmCommand::BASELINE_MPPI:
-      title = "ROV BASELINE_MPPI Setpoint Console";
+    case adhere_control_msgs::msg::FsmCommand::ADHERE_MPPI_BASELINE:
+      title = "ROV ADHERE_MPPI_BASELINE Setpoint Console";
       break;
     default:
-      title = "ROV PID_HOLD Setpoint Console";
+      title = "ROV HOLD_PID_6DOF Setpoint Console";
       break;
   }
   const std::string inner_cmd =
@@ -121,6 +139,10 @@ void spawnStateConsole(int mode)
   const pid_t pid = fork();
   if (pid == 0) {
     setsid();
+    // Second line of defense alongside setsid()+killpg() above: if this process is SIGKILL'd
+    // (killChildConsole() can't run), the kernel delivers SIGTERM to the child directly once its
+    // parent dies, so the spawned terminal window still closes.
+    prctl(PR_SET_PDEATHSIG, SIGTERM);
     execl("/bin/bash", "bash", "-c", shell_cmd.c_str(), nullptr);
     _exit(127);  // execl() only returns on failure
   } else if (pid > 0) {
@@ -138,13 +160,13 @@ void printMenu()
   std::cout << "============================================================\n"
             << "  Underwater ROV FSM Control Console (有限状态机终端控制台)\n"
             << "============================================================\n"
-            << "  [1] state_passive    (推进器全零输出 u = 0 N，自由漂流)\n"
-            << "  [2] state_depth_hold (PID 定深控制，自动弹出深度设定终端)\n"
-            << "  [3] state_open_loop  (Xbox 开环推力映射，B 伪逆分配)\n"
-            << "  [4] state_pid_hold   (6DOF 位置+航向保持，自动弹出设定终端)\n"
-            << "  [5] state_adhere_pid (贴壁 PID 基线：两阶段靠壁+法向力 PI 保压)\n"
-            << "  [6] state_adhere_smc (贴壁 SMC 基线：6DOF 滑模控制+法向预压)\n"
-            << "  [7] state_baseline_mppi (纯 CUDA 外环 MPPI，250Hz 零阶保持)\n"
+            << "  [1] state_idle_passive_none      (推进器全零输出 u = 0 N，自由漂流)\n"
+            << "  [2] state_hold_pid_depth         (PID 定深控制，自动弹出深度设定终端)\n"
+            << "  [3] state_teleop_openloop_6dof   (Xbox 开环推力映射，B 伪逆分配)\n"
+            << "  [4] state_hold_pid_6dof          (6DOF 位置+航向保持，自动弹出设定终端)\n"
+            << "  [5] state_adhere_pid_wbc         (贴壁 PID 基线：两阶段靠壁+法向力 PI 保压)\n"
+            << "  [6] state_adhere_smc_wbc         (贴壁 SMC 基线：6DOF 滑模控制+法向预压)\n"
+            << "  [7] state_adhere_mppi_baseline   (纯 CUDA 外环 MPPI，250Hz 零阶保持)\n"
             << "  [q] Quit Console     (退出控制台)\n"
             << "------------------------------------------------------------\n"
             << "Current State: " << stateLabel(g_current_state.load()) << " (" << state_name
@@ -189,11 +211,11 @@ int main(int argc, char ** argv)
         g_metrics_line = oss.str();
       }
       if (g_current_state.exchange(msg->current_state) != msg->current_state) {
-        if (msg->current_state == adhere_control_msgs::msg::FsmCommand::DEPTH_HOLD ||
-            msg->current_state == adhere_control_msgs::msg::FsmCommand::PID_HOLD ||
-            msg->current_state == adhere_control_msgs::msg::FsmCommand::ADHERE_PID ||
-            msg->current_state == adhere_control_msgs::msg::FsmCommand::ADHERE_SMC ||
-            msg->current_state == adhere_control_msgs::msg::FsmCommand::BASELINE_MPPI) {
+        if (msg->current_state == adhere_control_msgs::msg::FsmCommand::HOLD_PID_DEPTH ||
+            msg->current_state == adhere_control_msgs::msg::FsmCommand::HOLD_PID_6DOF ||
+            msg->current_state == adhere_control_msgs::msg::FsmCommand::ADHERE_PID_WBC ||
+            msg->current_state == adhere_control_msgs::msg::FsmCommand::ADHERE_SMC_WBC ||
+            msg->current_state == adhere_control_msgs::msg::FsmCommand::ADHERE_MPPI_BASELINE) {
           spawnStateConsole(msg->current_state);
         } else {
           killChildConsole();
@@ -214,9 +236,24 @@ int main(int argc, char ** argv)
         g_timing_line = oss.str();
       });
 
+  std::signal(SIGINT, handleSignal);
+  std::signal(SIGTERM, handleSignal);
+  std::signal(SIGHUP, handleSignal);
+
   auto executor = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
   executor->add_node(node);
   std::thread spin_thread([executor]() { executor->spin(); });
+
+  // Watchdog: forces the process to exit even if std::getline(std::cin, ...) below is stuck
+  // blocking on a terminal whose window/stdin already closed.
+  std::thread watchdog_thread([]() {
+    while (rclcpp::ok() && !g_shutdown_requested.load()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    killChildConsole();
+    std::exit(0);
+  });
+  watchdog_thread.detach();
 
   while (rclcpp::ok()) {
     printMenu();
@@ -234,19 +271,19 @@ int main(int argc, char ** argv)
 
     int command = 0;
     if (line == "1") {
-      command = adhere_control_msgs::msg::FsmCommand::PASSIVE;
+      command = adhere_control_msgs::msg::FsmCommand::IDLE_PASSIVE_NONE;
     } else if (line == "2") {
-      command = adhere_control_msgs::msg::FsmCommand::DEPTH_HOLD;
+      command = adhere_control_msgs::msg::FsmCommand::HOLD_PID_DEPTH;
     } else if (line == "3") {
-      command = adhere_control_msgs::msg::FsmCommand::OPEN_LOOP;
+      command = adhere_control_msgs::msg::FsmCommand::TELEOP_OPENLOOP_6DOF;
     } else if (line == "4") {
-      command = adhere_control_msgs::msg::FsmCommand::PID_HOLD;
+      command = adhere_control_msgs::msg::FsmCommand::HOLD_PID_6DOF;
     } else if (line == "5") {
-      command = adhere_control_msgs::msg::FsmCommand::ADHERE_PID;
+      command = adhere_control_msgs::msg::FsmCommand::ADHERE_PID_WBC;
     } else if (line == "6") {
-      command = adhere_control_msgs::msg::FsmCommand::ADHERE_SMC;
+      command = adhere_control_msgs::msg::FsmCommand::ADHERE_SMC_WBC;
     } else if (line == "7") {
-      command = adhere_control_msgs::msg::FsmCommand::BASELINE_MPPI;
+      command = adhere_control_msgs::msg::FsmCommand::ADHERE_MPPI_BASELINE;
     } else {
       std::cout << "Unrecognized selection \"" << line
                 << "\", expected 1, 2, 3, 4, 5, 6, 7, or q.\n\n";

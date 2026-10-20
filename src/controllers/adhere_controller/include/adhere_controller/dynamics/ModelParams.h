@@ -107,7 +107,7 @@ struct ModelParams
     double wall_preload_fx = 30.0;       // N magnitude; applied as -wall_preload_fx wrench
   };
 
-  // Phase 4.2 two-stage adhere sequence, shared by ADHERE_PID/ADHERE_SMC/BASELINE_MPPI: on
+  // Phase 4.2 two-stage adhere sequence, shared by ADHERE_PID_WBC/ADHERE_SMC_WBC/ADHERE_MPPI_BASELINE: on
   // entry, each first stabilizes depth/lateral position at a safe standoff distance from the
   // wall (DEPTH_ALIGN) before approaching/adhering (WALL_ADHERE). Deliberately a single shared
   // block (not duplicated per-algorithm like AdherePidGains/AdhereSmcGains) -- the point is one
@@ -119,6 +119,12 @@ struct ModelParams
     double standoff_x = 0.35;     // m, DEPTH_ALIGN holds this far from the wall plane (X=0)
     double depth_tol = 0.05;      // m, |z - Z_target| gate for DEPTH_ALIGN -> WALL_ADHERE
     double vz_tol = 0.05;         // m/s, |v_z| gate for DEPTH_ALIGN -> WALL_ADHERE
+    // Phase 4.3 soft-landing approach damping: ADHERE_PID_WBC/ADHERE_SMC_WBC subtract
+    // approach_vx_damp*max(0, v_x,body) from the commanded Fx during the pre-dock APPROACH
+    // ramp (WALL_ADHERE, !docked_) so the ROV decelerates into the wall instead of impacting at
+    // the ramp's constant approach_speed. Not applied once docked_ (the force PI/SMC preload
+    // law owns Fx from then on).
+    double approach_vx_damp = 80.0;  // N/(m/s)
   };
 
   // Phase 3.5 sensor mounting lever arms (body frame, relative to CoM), used by

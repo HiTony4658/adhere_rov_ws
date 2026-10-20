@@ -26,7 +26,7 @@ SixDofSmcController::Gains adhereSmcGainsToController(const ModelParams::AdhereS
 }  // namespace
 
 StateAdhereSmc::StateAdhereSmc(CtrlInterfaces & ctrl_interfaces, const ModelParams & model_params)
-: FSMState(FSMStateName::ADHERE_SMC, "state_adhere_smc", ctrl_interfaces, model_params),
+: FSMState(FSMStateName::ADHERE_SMC_WBC, "state_adhere_smc_wbc", ctrl_interfaces, model_params),
   dynamics_(model_params),
   smc_(adhereSmcGainsToController(model_params.adhere_smc), dynamics_)
 {
@@ -143,7 +143,17 @@ void StateAdhereSmc::run(const rclcpp::Time & /*time*/, const rclcpp::Duration &
   in.v_est_body = vel_body;
   in.omega_est_body = omega_body;
 
-  const Vec6 wrench = smc_.computeWrench(in, docked_);
+  Vec6 wrench = smc_.computeWrench(in, docked_);
+  if (depth_aligned_ && !docked_) {
+    // Phase 4.3 soft-landing: see StateAdherePid.cpp's identical term for the rationale.
+    wrench(0) -= stage.approach_vx_damp * std::max(0.0, vel_body.x());
+  }
+
+  // Phase 4.3 lever-arm moment feedforward (CLAUDE.md Sec.5.2's k_ff=0.1m): see
+  // StateAdherePid.cpp's identical term for the rationale.
+  wrench(4) += 0.1 * wrench(2);
+  wrench(5) -= 0.1 * wrench(1);
+
   const Vec8 u = b_pinv_ * wrench;
   for (int i = 0; i < 8; ++i) {
     ctrl_interfaces_.pending_thruster_cmd[i] = u(i);

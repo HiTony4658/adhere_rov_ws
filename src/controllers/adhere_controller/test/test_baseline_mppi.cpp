@@ -268,8 +268,8 @@ TEST(BaselineMppi, ClosedLoopPositionTrackingWithin15cm)
   BaselineMppiController planner;
   planner.init(kModelParams, b, b_pinv, cfg);
 
-  // Phase 4.2 two-stage adhere sequence: BASELINE_MPPI is now also a wall-adhesion FSM state
-  // (same as ADHERE_PID/ADHERE_SMC) -- StateBaselineMppi::run() ignores/overrides any
+  // Phase 4.2 two-stage adhere sequence: ADHERE_MPPI_BASELINE is now also a wall-adhesion FSM state
+  // (same as ADHERE_PID_WBC/ADHERE_SMC_WBC) -- StateBaselineMppi::run() ignores/overrides any
   // setpoint-driven target until DEPTH_ALIGN completes, then re-targets onto the wall plane for
   // WALL_ADHERE (CLAUDE.md Phase 4.2 Sec.3). This test therefore exercises the full two-stage
   // sequence (not an arbitrary free-swimming setpoint, which Test 2 above already covers via

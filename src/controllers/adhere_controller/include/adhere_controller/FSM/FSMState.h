@@ -47,7 +47,7 @@ public:
 
   // Default implementation (CLAUDE.md Phase 3.2 Stage 2.2, extended Phase 3.8): maps the live
   // control_inputs_.command atomic (set by AdhereController's /rov/fsm_command
-  // subscription, 0=NO_CHANGE..7=BASELINE_MPPI) onto the requested FSMStateName, or this state's own
+  // subscription, 0=NO_CHANGE..7=ADHERE_MPPI_BASELINE) onto the requested FSMStateName, or this state's own
   // name if no change is requested. All concrete states share this identical mapping, so each
   // one's checkChange() override is just `return checkFsmCommandChange();` -- replaces the
   // Phase 3.1 pattern of each state hardcoding its own `== 1`/`== 2` comparison, which does not
@@ -56,19 +56,19 @@ public:
   {
     switch (ctrl_interfaces_.control_inputs_.command.load()) {
       case 1:
-        return FSMStateName::PASSIVE;
+        return FSMStateName::IDLE_PASSIVE_NONE;
       case 2:
-        return FSMStateName::DEPTH_HOLD;
+        return FSMStateName::HOLD_PID_DEPTH;
       case 3:
-        return FSMStateName::OPEN_LOOP;
+        return FSMStateName::TELEOP_OPENLOOP_6DOF;
       case 4:
-        return FSMStateName::PID_HOLD;
+        return FSMStateName::HOLD_PID_6DOF;
       case 5:
-        return FSMStateName::ADHERE_PID;
+        return FSMStateName::ADHERE_PID_WBC;
       case 6:
-        return FSMStateName::ADHERE_SMC;
+        return FSMStateName::ADHERE_SMC_WBC;
       case 7:
-        return FSMStateName::BASELINE_MPPI;
+        return FSMStateName::ADHERE_MPPI_BASELINE;
       default:
         return state_name;
     }
@@ -78,16 +78,22 @@ public:
 
   // Live reference-pose report for /rov/controller_state (CLAUDE.md Phase 3.6's
   // ControllerState.msg::target_pose, geometry_msgs/Pose), published by AdhereController on
-  // every outer-loop tick. Meaning is per-state: PASSIVE/OPEN_LOOP have no reference pose
-  // (default identity); StateDepthHold overrides pos.z only; StatePidHold overrides the full
-  // 6-DOF pose (position + quaternion).
+  // every outer-loop tick. Meaning is per-state: IDLE_PASSIVE_NONE/TELEOP_OPENLOOP_6DOF have no
+  // reference pose (default identity, targetValid()==false); StateDepthHold overrides pos.z (and,
+  // Phase 4.3, the actual x/y so the target sphere sits on the ROV's vertical axis);
+  // StatePidHold/StateAdhere* override the full 6-DOF pose (position + quaternion).
   virtual PoseTarget targetPose() const { return PoseTarget{}; }
 
-  // Phase 4.2 two-stage adhere sequence: "" for every state except ADHERE_PID/ADHERE_SMC/
-  // BASELINE_MPPI, which report "DEPTH_ALIGN" or "WALL_ADHERE" (see each state's depth_aligned_
-  // member). Read by AdhereController to populate ControllerState.msg::adhere_stage, consumed
-  // downstream by MujocoVisBridge's target-pose overlay/green target sphere (only shown while
-  // this string is non-empty).
+  // Phase 4.3: whether targetPose()/ControllerState.msg::target_pose is actually meaningful for
+  // this state -- gates the universal green target-sphere/overlay display (previously hardcoded
+  // to only the three ADHERE_* states). Default false (IDLE_PASSIVE_NONE/TELEOP_OPENLOOP_6DOF);
+  // overridden true by every state that returns a real targetPose().
+  virtual bool targetValid() const { return false; }
+
+  // Phase 4.2 two-stage adhere sequence: "" for every state except ADHERE_PID_WBC/
+  // ADHERE_SMC_WBC/ADHERE_MPPI_BASELINE, which report "DEPTH_ALIGN" or "WALL_ADHERE" (see each
+  // state's depth_aligned_ member). Read by AdhereController to populate
+  // ControllerState.msg::adhere_stage.
   virtual const char * adhereStageName() const { return ""; }
 
   FSMStateName state_name;

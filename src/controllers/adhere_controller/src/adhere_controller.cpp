@@ -105,19 +105,19 @@ bool findAndAppend(
 int32_t fsmStateNameToInt(FSMStateName name)
 {
   switch (name) {
-    case FSMStateName::PASSIVE:
+    case FSMStateName::IDLE_PASSIVE_NONE:
       return 1;
-    case FSMStateName::DEPTH_HOLD:
+    case FSMStateName::HOLD_PID_DEPTH:
       return 2;
-    case FSMStateName::OPEN_LOOP:
+    case FSMStateName::TELEOP_OPENLOOP_6DOF:
       return 3;
-    case FSMStateName::PID_HOLD:
+    case FSMStateName::HOLD_PID_6DOF:
       return 4;
-    case FSMStateName::ADHERE_PID:
+    case FSMStateName::ADHERE_PID_WBC:
       return 5;
-    case FSMStateName::ADHERE_SMC:
+    case FSMStateName::ADHERE_SMC_WBC:
       return 6;
-    case FSMStateName::BASELINE_MPPI:
+    case FSMStateName::ADHERE_MPPI_BASELINE:
       return 7;
     default:
       return 0;
@@ -339,7 +339,7 @@ CallbackReturn AdhereController::on_activate(const rclcpp_lifecycle::State & /*p
   state_list_.baseline_mppi =
     std::make_shared<StateBaselineMppi>(ctrl_interfaces_, model_params_, baseline_mppi_);
 
-  // Default-boots in PASSIVE (CLAUDE.md Phase 3.1 Stage 2.3): launching mujoco_sim.launch.py
+  // Default-boots in IDLE_PASSIVE_NONE (CLAUDE.md Phase 3.1 Stage 2.3): launching mujoco_sim.launch.py
   // immediately brings up the FSM in the safe zero-thrust state.
   current_state_ = state_list_.passive;
   current_state_->enter();
@@ -618,6 +618,7 @@ controller_interface::return_type AdhereController::update()
     controller_state_msg.target_pose.orientation.x = target.quat(1);
     controller_state_msg.target_pose.orientation.y = target.quat(2);
     controller_state_msg.target_pose.orientation.z = target.quat(3);
+    controller_state_msg.target_valid = current_state_->targetValid();
     controller_state_msg.adhere_stage = current_state_->adhereStageName();
 
     const auto & active = ctrl_interfaces_.active_state;
@@ -642,7 +643,8 @@ controller_interface::return_type AdhereController::update()
       outer_worker_input_.seq = ++outer_worker_seq_;
       // Phase 4.1: only the async worker's Baseline MPPI branch actually spends GPU time -- every
       // other FSM state keeps the original trivial pass-through (see outerWorkerLoop()).
-      outer_worker_input_.run_baseline_mppi = current_state_->state_name == FSMStateName::BASELINE_MPPI;
+      outer_worker_input_.run_baseline_mppi =
+        current_state_->state_name == FSMStateName::ADHERE_MPPI_BASELINE;
       outer_worker_has_work_ = true;
     }
     outer_worker_cv_.notify_one();
@@ -687,7 +689,7 @@ controller_interface::return_type AdhereController::update()
       controller_state_msg.contact_forces[i] = f_contact_est(i);
     }
     // Center-of-pressure / K_val is only meaningful while the hull is actually pressing against
-    // the wall (sum_f appreciably > 0) -- when it isn't (e.g. PID_HOLD floating away from the
+    // the wall (sum_f appreciably > 0) -- when it isn't (e.g. HOLD_PID_6DOF floating away from the
     // wall), dividing by a near-zero sum_f would blow p_y/p_z/K_val up into meaningless large
     // values. kern_margin reports the safe default (1.0, "fully inside kern") below that
     // threshold instead of garbage telemetry; kFContactFloor is a noise-floor-scale threshold,
@@ -867,19 +869,19 @@ std::shared_ptr<FSMState> AdhereController::getNextState(
   FSMStateName state_name) const
 {
   switch (state_name) {
-    case FSMStateName::PASSIVE:
+    case FSMStateName::IDLE_PASSIVE_NONE:
       return state_list_.passive;
-    case FSMStateName::DEPTH_HOLD:
+    case FSMStateName::HOLD_PID_DEPTH:
       return state_list_.depth_hold;
-    case FSMStateName::OPEN_LOOP:
+    case FSMStateName::TELEOP_OPENLOOP_6DOF:
       return state_list_.open_loop;
-    case FSMStateName::PID_HOLD:
+    case FSMStateName::HOLD_PID_6DOF:
       return state_list_.pid_hold;
-    case FSMStateName::ADHERE_PID:
+    case FSMStateName::ADHERE_PID_WBC:
       return state_list_.adhere_pid;
-    case FSMStateName::ADHERE_SMC:
+    case FSMStateName::ADHERE_SMC_WBC:
       return state_list_.adhere_smc;
-    case FSMStateName::BASELINE_MPPI:
+    case FSMStateName::ADHERE_MPPI_BASELINE:
       return state_list_.baseline_mppi;
     default:
       return state_list_.passive;

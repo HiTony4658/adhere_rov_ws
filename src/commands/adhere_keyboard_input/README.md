@@ -4,15 +4,15 @@
 
 人机交互终端 + Xbox 手柄遥操作桥接层（CLAUDE.md Phase 3.2，四元数消息 +
 实时诊断于 Phase 3.6 更新，贴壁基线状态切换/遥测/离线评估于 Phase 3.8 更新，
-`BASELINE_MPPI` 状态切换/GPU 规划器延迟遥测于 Phase 4.1 更新）。
+`ADHERE_MPPI_BASELINE` 状态切换/GPU 规划器延迟遥测于 Phase 4.1 更新）。
 通过 `adhere_control_msgs` 定义的 5 话题，以标准 ROS 2 话题（非实时路径）
 与 `AdhereController` 异步通信，五个可执行文件各自职责正交：
 
 - `fsm_console_node`：主控 FSM 状态切换终端，**仅**发布 `/rov/fsm_command`，
   并订阅 `/rov/runtime_diagnostics` 显示单行计时摘要、订阅
   `/rov/controller_state` 显示单行效率/安全遥测摘要（Phase 3.8）；
-- `state_cmd_console_node`：`DEPTH_HOLD`/`PID_HOLD`/`ADHERE_PID`/`ADHERE_SMC`/
-  `BASELINE_MPPI` 专属数值设定终端，**仅**发布 `/rov/setpoint_cmd`，由
+- `state_cmd_console_node`：`HOLD_PID_DEPTH`/`HOLD_PID_6DOF`/`ADHERE_PID_WBC`/`ADHERE_SMC_WBC`/
+  `ADHERE_MPPI_BASELINE` 专属数值设定终端，**仅**发布 `/rov/setpoint_cmd`，由
   `fsm_console_node` 按需自动弹出，也可手动单独运行；
 - `xbox_teleop_node`：订阅官方 ROS 2 `joy` 包的 `/joy`（`sensor_msgs/msg/Joy`），
   转换为 `/rov/teleop_cmd`（美国手/Mode 2 连续摇杆，`geometry_msgs/Vector3
@@ -37,7 +37,7 @@
 ```text
 src/
 ├── fsm_console_node.cpp          # 主控 FSM 状态切换终端 + 动态子终端生命周期管理 + 计时/效率摘要
-├── state_cmd_console_node.cpp    # DEPTH_HOLD/PID_HOLD/ADHERE_PID/ADHERE_SMC/BASELINE_MPPI 专属设定终端（ROS 参数 mode=2|4|5|6|7）
+├── state_cmd_console_node.cpp    # HOLD_PID_DEPTH/HOLD_PID_6DOF/ADHERE_PID_WBC/ADHERE_SMC_WBC/ADHERE_MPPI_BASELINE 专属设定终端（ROS 参数 mode=2|4|5|6|7）
 ├── xbox_teleop_node.cpp          # /joy -> TeleopCommand/FsmCommand 桥接
 ├── rt_monitor_node.cpp           # /rov/runtime_diagnostics + /rov/controller_state 实时 ANSI 终端表格（Phase 3.6/3.8）
 └── benchmark_evaluator_node.cpp  # 滚动窗口跟踪/能耗/平顺性/贴壁安全性 Markdown 对比评估（Phase 3.8）
@@ -53,16 +53,16 @@ launch/
 ============================================================
   Underwater ROV FSM Control Console (有限状态机终端控制台)
 ============================================================
-  [1] state_passive    (推进器全零输出 u = 0 N，自由漂流)
-  [2] state_depth_hold (PID 定深控制，自动弹出深度设定终端)
-  [3] state_open_loop  (Xbox 开环推力映射，B 伪逆分配)
-  [4] state_pid_hold   (6DOF 位置+航向保持，自动弹出设定终端)
-  [5] state_adhere_pid (贴壁 PID 基线：两阶段靠壁+法向力 PI 保压)
-  [6] state_adhere_smc (贴壁 SMC 基线：6DOF 滑模控制+法向预压)
-  [7] state_baseline_mppi (纯 CUDA 外环 MPPI，250Hz 零阶保持)
+  [1] state_idle_passive_none    (推进器全零输出 u = 0 N，自由漂流)
+  [2] state_hold_pid_depth (PID 定深控制，自动弹出深度设定终端)
+  [3] state_teleop_openloop_6dof  (Xbox 开环推力映射，B 伪逆分配)
+  [4] state_hold_pid_6dof   (6DOF 位置+航向保持，自动弹出设定终端)
+  [5] state_adhere_pid_wbc (贴壁 PID 基线：两阶段靠壁+法向力 PI 保压)
+  [6] state_adhere_smc_wbc (贴壁 SMC 基线：6DOF 滑模控制+法向预压)
+  [7] state_adhere_mppi_baseline (纯 CUDA 外环 MPPI，250Hz 零阶保持)
   [q] Quit Console     (退出控制台)
 ------------------------------------------------------------
-Current State: [1] state_passive (state_passive)
+Current State: [1] state_idle_passive_none (state_idle_passive_none)
 ||u||: --N  Power: --  Slew: --N/s  E: --N^2s  Sat: --/8  Pads: --/4  Kern: --
 Select state (1/2/3/4/5/6/7/q):
 ```
@@ -78,8 +78,8 @@ Select state (1/2/3/4/5/6/7/q):
 - **动态子终端生命周期管理**：只要 `/rov/controller_state::current_state` 发生变化
   （无论切换来自本控制台的键盘输入还是 Xbox 手柄按键），就先终止上一个已弹出
   的 `state_cmd_console_node` 子终端，再视新状态决定：
-  - 新状态是 `DEPTH_HOLD`（`2`）、`PID_HOLD`（`4`）、`ADHERE_PID`（`5`）、
-    `ADHERE_SMC`（`6`）或 `BASELINE_MPPI`（`7`）：以 `fork()` + `setsid()` +
+  - 新状态是 `HOLD_PID_DEPTH`（`2`）、`HOLD_PID_6DOF`（`4`）、`ADHERE_PID_WBC`（`5`）、
+    `ADHERE_SMC_WBC`（`6`）或 `ADHERE_MPPI_BASELINE`（`7`）：以 `fork()` + `setsid()` +
     `execl()` 启动一个新的 `gnome-terminal --wait`（未安装则回退 `xterm`）
     窗口运行
     `ros2 run adhere_keyboard_input state_cmd_console_node --ros-args -p mode:=<2|4|5|6|7>`；
@@ -87,14 +87,14 @@ Select state (1/2/3/4/5/6/7/q):
     的 `ros2 run` 进程一并清理干净（`--wait` 使 gnome-terminal 客户端进程的
     生命周期跟随内部命令，否则裸 `gnome-terminal` 客户端在请求常驻服务端开窗后
     会立刻退出，使这个 pid 变得不可控）；
-  - 新状态是 `PASSIVE`（`1`）、`OPEN_LOOP`（`3`）或其他：只清理旧子终端，
+  - 新状态是 `IDLE_PASSIVE_NONE`（`1`）、`TELEOP_OPENLOOP_6DOF`（`3`）或其他：只清理旧子终端，
     不弹出新的。
 
-## `state_cmd_console_node`：`DEPTH_HOLD`/`PID_HOLD`/`ADHERE_PID`/`ADHERE_SMC`/`BASELINE_MPPI` 专属设定终端
+## `state_cmd_console_node`：`HOLD_PID_DEPTH`/`HOLD_PID_6DOF`/`ADHERE_PID_WBC`/`ADHERE_SMC_WBC`/`ADHERE_MPPI_BASELINE` 专属设定终端
 
 ROS 参数 `mode`（`int`，`2`/`4`/`5`/`6`/`7`）决定界面；`4`/`5`/`6`/`7` 四者
-共用完全相同的 `z/y/x/roll/pitch/yaw/all/reset/h` 命令语法（`ADHERE_PID`/
-`ADHERE_SMC` 贴壁后在 FSM 层直接忽略 `x` 分量，`BASELINE_MPPI` 则始终是
+共用完全相同的 `z/y/x/roll/pitch/yaw/all/reset/h` 命令语法（`ADHERE_PID_WBC`/
+`ADHERE_SMC_WBC` 贴壁后在 FSM 层直接忽略 `x` 分量，`ADHERE_MPPI_BASELINE` 则始终是
 自由 6DOF 目标，终端侧无需区分）。订阅 `/rov/controller_state`
 实时显示 Actual/Target，**仅**发布 `/rov/setpoint_cmd`（线上协议是
 `command_type` + `geometry_msgs/Pose target_pose` 四元数，本终端自带一套
@@ -106,12 +106,12 @@ Phase 3.6）：
 # 都代表水面以下 2.50m，内部统一归一化为 target_z = -|input|，钳制在
 # [-9.80, -0.15]m）
 Current Depth: 2.000 m (Z = -2.000 m)   |   Target Depth: 2.500 m (Z = -2.500 m)
-[DEPTH_HOLD] Enter target depth in meters, positive or negative (float, e.g.
+[HOLD_PID_DEPTH] Enter target depth in meters, positive or negative (float, e.g.
 2.50 or -2.50 -- both mean 2.50m below the surface), or 'h' to hold current depth:
 
 # mode:=4（`z <val>` 同样接受正负水深输入，归一化方式与 mode:=2 一致；
 # 同时显示四元数 [qw,qx,qy,qz] 与由其换算出的 RPY(deg)）
-[PID_HOLD] Enter 'z <val>' (depth), 'y <val>' (lateral), 'x <val>' (wall dist),
+[HOLD_PID_6DOF] Enter 'z <val>' (depth), 'y <val>' (lateral), 'x <val>' (wall dist),
 'roll <deg>', 'pitch <deg>', 'yaw <deg>', 'all <x> <y> <z> <yaw_deg>',
 'reset' (roll/pitch -> 0), or 'h' (lock current pose):
 ```
@@ -156,10 +156,10 @@ ros2 run adhere_keyboard_input state_cmd_console_node --ros-args -p mode:=2
 
 | 按键 | 默认索引 | 切换到 |
 |---|---|---|
-| A | `0` | `PASSIVE`（紧急安全零推力） |
-| B | `1` | `PID_HOLD` |
-| X | `2` | `DEPTH_HOLD` |
-| Y | `3` | `OPEN_LOOP` |
+| A | `0` | `IDLE_PASSIVE_NONE`（紧急安全零推力） |
+| B | `1` | `HOLD_PID_6DOF` |
+| X | `2` | `HOLD_PID_DEPTH` |
+| Y | `3` | `TELEOP_OPENLOOP_6DOF` |
 
 ## 独立上位机（GCS）部署
 

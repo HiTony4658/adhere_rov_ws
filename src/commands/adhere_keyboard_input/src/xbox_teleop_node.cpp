@@ -122,13 +122,13 @@ private:
     teleop_pub_->publish(teleop_msg);
 
     publishFsmCommandOnRisingEdge(
-      msg->buttons, button_passive_, adhere_control_msgs::msg::FsmCommand::PASSIVE);
+      msg->buttons, button_passive_, adhere_control_msgs::msg::FsmCommand::IDLE_PASSIVE_NONE);
     publishFsmCommandOnRisingEdge(
-      msg->buttons, button_depth_hold_, adhere_control_msgs::msg::FsmCommand::DEPTH_HOLD);
+      msg->buttons, button_depth_hold_, adhere_control_msgs::msg::FsmCommand::HOLD_PID_DEPTH);
     publishFsmCommandOnRisingEdge(
-      msg->buttons, button_open_loop_, adhere_control_msgs::msg::FsmCommand::OPEN_LOOP);
+      msg->buttons, button_open_loop_, adhere_control_msgs::msg::FsmCommand::TELEOP_OPENLOOP_6DOF);
     publishFsmCommandOnRisingEdge(
-      msg->buttons, button_pid_hold_, adhere_control_msgs::msg::FsmCommand::PID_HOLD);
+      msg->buttons, button_pid_hold_, adhere_control_msgs::msg::FsmCommand::HOLD_PID_6DOF);
   }
 
   // Rising-edge debounce (CLAUDE.md Phase 3.2 Stage 2.3): fires FsmCommand exactly once per

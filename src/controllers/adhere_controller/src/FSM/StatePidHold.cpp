@@ -32,7 +32,7 @@ SixDofPidController::Gains pidHoldGainsToSixDof(const ModelParams::PidHoldGains 
 }  // namespace
 
 StatePidHold::StatePidHold(CtrlInterfaces & ctrl_interfaces, const ModelParams & model_params)
-: FSMState(FSMStateName::PID_HOLD, "state_pid_hold", ctrl_interfaces, model_params),
+: FSMState(FSMStateName::HOLD_PID_6DOF, "state_hold_pid_6dof", ctrl_interfaces, model_params),
   dynamics_(model_params),
   pid_(pidHoldGainsToSixDof(model_params.pid_hold), dynamics_, kIntegralPosMax, kIntegralAttMax)
 {

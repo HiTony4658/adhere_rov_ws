@@ -211,22 +211,32 @@ int main(int argc, char ** argv)
       }
     });
 
-  // Phase 4.2: mirrors AdhereController's live target pose/FSM state/adhere stage into
-  // MujocoVisBridge (so the embedded MuJoCo viewer's overlay + green target sphere update) and
-  // into these node-local atomics (read by the /rov/environment_markers RViz2 marker above) --
-  // a message-only dependency on adhere_control_msgs, zero MuJoCo/CUDA/ros2_control coupling in
-  // the other direction (CLAUDE.md Sec.3.3 governs the reverse link, not this one).
-  static std::atomic<int> latest_adhere_stage_code{0};
-  static std::atomic<double> latest_adhere_target_y{0.0};
-  static std::atomic<double> latest_adhere_target_z{0.0};
+  // Phase 4.2 (generalized Phase 4.3): mirrors AdhereController's live target pose/FSM
+  // state/adhere stage into MujocoVisBridge (so the embedded MuJoCo viewer's overlay + green
+  // target sphere update) and into these node-local atomics (read by the
+  // /rov/environment_markers RViz2 marker above) -- a message-only dependency on
+  // adhere_control_msgs, zero MuJoCo/CUDA/ros2_control coupling in the other direction
+  // (CLAUDE.md Sec.3.3 governs the reverse link, not this one). Phase 4.3: the sphere/overlay
+  // used to be gated on adhere_stage being non-empty (ADHERE_* only); now gated on the
+  // ControllerState::target_valid field, which is also true for HOLD_PID_DEPTH/HOLD_PID_6DOF.
+  // ADHERE_* states (FsmCommand IDs 5/6/7) still force the sphere's X onto the wall plane
+  // (world X=0) regardless of the live standoff/approach X, matching the existing visual
+  // design; every other target_valid state uses target_pose.x directly.
+  static std::atomic<bool> latest_target_valid{false};
+  static std::atomic<double> latest_target_x{0.0};
+  static std::atomic<double> latest_target_y{0.0};
+  static std::atomic<double> latest_target_z{0.0};
   auto controller_state_sub = node->create_subscription<adhere_control_msgs::msg::ControllerState>(
     "/rov/controller_state", 10,
     [](const adhere_control_msgs::msg::ControllerState::SharedPtr msg) {
       const int stage_code =
         msg->adhere_stage == "DEPTH_ALIGN" ? 1 : (msg->adhere_stage == "WALL_ADHERE" ? 2 : 0);
-      latest_adhere_stage_code.store(stage_code);
-      latest_adhere_target_y.store(msg->target_pose.position.y);
-      latest_adhere_target_z.store(msg->target_pose.position.z);
+      const bool is_adhere_state = msg->current_state >= 5 && msg->current_state <= 7;
+      const double sphere_x = is_adhere_state ? 0.0 : msg->target_pose.position.x;
+      latest_target_valid.store(msg->target_valid);
+      latest_target_x.store(sphere_x);
+      latest_target_y.store(msg->target_pose.position.y);
+      latest_target_z.store(msg->target_pose.position.z);
 
       // Quaternion -> yaw (Z-axis Euler angle), Hamilton (w,x,y,z) convention, matching
       // adhere_controller's own mathTools.h::rotMatToRPY() derivation.
@@ -245,10 +255,11 @@ int main(int argc, char ** argv)
       }
       bridge->fsm_current_state_code.store(msg->current_state);
       bridge->adhere_stage_code.store(stage_code);
-      bridge->adhere_target_x.store(msg->target_pose.position.x);
-      bridge->adhere_target_y.store(msg->target_pose.position.y);
-      bridge->adhere_target_z.store(msg->target_pose.position.z);
-      bridge->adhere_target_yaw_deg.store(yaw_rad * 180.0 / M_PI);
+      bridge->target_valid.store(msg->target_valid);
+      bridge->target_x.store(sphere_x);
+      bridge->target_y.store(msg->target_pose.position.y);
+      bridge->target_z.store(msg->target_pose.position.z);
+      bridge->target_yaw_deg.store(yaw_rad * 180.0 / M_PI);
     });
 
   auto publish_timer = node->create_wall_timer(
@@ -322,10 +333,10 @@ int main(int argc, char ** argv)
       wall.color.a = 0.6f;
       markers.markers.push_back(wall);
 
-      // Phase 4.2: green target-adhesion-spot sphere, mirrors MujocoViewer's own scene-geom
-      // version -- only published while an adhere FSM state is actually active (adhere_stage
-      // non-empty on /rov/controller_state), at world (0, Y_target, Z_target).
-      if (latest_adhere_stage_code.load() != 0) {
+      // Phase 4.2 (generalized Phase 4.3): green target sphere, mirrors MujocoViewer's own
+      // scene-geom version -- published whenever the active FSM state reports a meaningful
+      // target_pose (HOLD_PID_DEPTH/HOLD_PID_6DOF/ADHERE_*), not just the three ADHERE_* states.
+      if (latest_target_valid.load()) {
         visualization_msgs::msg::Marker target_sphere;
         target_sphere.header.stamp = now;
         target_sphere.header.frame_id = "world";
@@ -333,9 +344,9 @@ int main(int argc, char ** argv)
         target_sphere.id = 0;
         target_sphere.type = visualization_msgs::msg::Marker::SPHERE;
         target_sphere.action = visualization_msgs::msg::Marker::ADD;
-        target_sphere.pose.position.x = 0.0;
-        target_sphere.pose.position.y = latest_adhere_target_y.load();
-        target_sphere.pose.position.z = latest_adhere_target_z.load();
+        target_sphere.pose.position.x = latest_target_x.load();
+        target_sphere.pose.position.y = latest_target_y.load();
+        target_sphere.pose.position.z = latest_target_z.load();
         target_sphere.scale.x = 0.07;
         target_sphere.scale.y = 0.07;
         target_sphere.scale.z = 0.07;

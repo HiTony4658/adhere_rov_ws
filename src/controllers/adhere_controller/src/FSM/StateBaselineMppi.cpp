@@ -11,7 +11,7 @@ namespace adhere_controller
 StateBaselineMppi::StateBaselineMppi(
   CtrlInterfaces & ctrl_interfaces, const ModelParams & model_params,
   baseline_mppi::BaselineMppiController & planner)
-: FSMState(FSMStateName::BASELINE_MPPI, "state_baseline_mppi", ctrl_interfaces, model_params),
+: FSMState(FSMStateName::ADHERE_MPPI_BASELINE, "state_adhere_mppi_baseline", ctrl_interfaces, model_params),
   planner_(planner)
 {
 }
@@ -40,7 +40,7 @@ void StateBaselineMppi::run(const rclcpp::Time & /*time*/, const rclcpp::Duratio
 {
   const double dt = period.seconds();
   auto & ci = ctrl_interfaces_.control_inputs_;
-  // Reuses PID_HOLD's teleop-shaping/tilt-clamp gains (CLAUDE.md Phase 4.1 Sec.3.2): this state
+  // Reuses HOLD_PID_6DOF's teleop-shaping/tilt-clamp gains (CLAUDE.md Phase 4.1 Sec.3.2): this state
   // only decides WHAT pose to track (identical setpoint/teleop grammar to StatePidHold), the CUDA
   // planner decides HOW -- there is no baseline_mppi-specific teleop shaping to configure.
   const auto & gains = model_params_.pid_hold;

@@ -35,6 +35,8 @@ public:
 
   PoseTarget targetPose() const override;
 
+  bool targetValid() const override { return true; }
+
   // Phase 4.2: whether Stage 1 (DEPTH_ALIGN) has completed and Stage 2 (WALL_ADHERE) has begun.
   // Unlike StateAdherePid/StateAdhereSmc, there is no separate docked_/force-threshold gate here
   // -- once depth_aligned_, the target simply moves to the wall plane and the CUDA planner's own

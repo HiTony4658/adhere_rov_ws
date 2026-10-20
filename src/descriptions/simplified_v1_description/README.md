@@ -129,7 +129,7 @@ ros2 launch simplified_v1_description visualize.launch.py
 
 # 完整闭环仿真（默认行为）：adhere_mujoco_hardware 的 500Hz 物理后端 + Fossen
 # 水动力学 + 可运行时切换造浪 + RViz2 + adhere_controller 自动加载/配置/激活
-# （默认 PASSIVE 态）+ Xbox 手柄遥操作 + FSM 终端控制台
+# （默认 IDLE_PASSIVE_NONE 态）+ Xbox 手柄遥操作 + FSM 终端控制台
 ros2 launch simplified_v1_description mujoco.launch.py
 
 # 纯开环硬件仿真：覆盖为 0 个控制器加载（u=0 被动漂移验证场景），不弹出遥操作

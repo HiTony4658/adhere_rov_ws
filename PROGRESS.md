@@ -2439,3 +2439,100 @@ use_rviz:=false estimation_mode:=ground_truth`，经 `ros2 topic pub/echo`
 前序状态带到贴壁位置附近），`/rov/runtime_diagnostics` 显示
 `outer_planner_solve_ms≈0.29~0.45ms`、`timing_healthy=true`；进程通过
 `SIGTERM` 干净退出，无残留进程。
+
+## Phase 4.3（2026-10-20）：子终端自动关闭 + FSM 状态名统一为 `FUNCTION_ALGORITHM_CATEGORY` + 通用目标位姿可视化 + 三个 `ADHERE_*` 基线调参
+
+### 动机
+
+Phase 4.2 完成两阶段贴壁序列后仍遗留三个问题：`fsm_console_node`/`state_cmd_
+console_node` 弹出的子终端在主 launch 退出后不会自动关闭；8 个 FSM 状态名沿用
+不一致的旧命名（`PASSIVE`/`ADHERE_PID`等），未遵循任何统一规则；绿色目标球/
+`Target Pos` 叠加层遥测硬编码仅对三个 `ADHERE_*` 状态生效。本阶段集中解决
+这三类问题，并顺带把三个 `ADHERE_*` 贴壁基线的触墙/保压参数调得更稳。
+
+### 子终端生命周期：`--wait` + `OnProcessExit` 级联关闭 + 信号处理 + 看门狗线程
+
+`adhere_keyboard_input/launch/teleop_gcs.launch.py` 的 `gnome-terminal` 回退
+分支补上 `--wait`（`fsm_console_node.cpp::spawnStateConsole()` 内部早已这样
+做，launch 文件这边之前漏了）。`simplified_v1_description/launch/mujoco.
+launch.py` 新增 `RegisterEventHandler(OnProcessExit(target_action=
+adhere_mujoco_node, on_exit=[EmitEvent(event=Shutdown())]))`——关闭嵌入式
+MuJoCo GLFW 窗口导致 `adhere_mujoco_node` 退出时，`robot_state_publisher`/
+`rviz2`/整个 `teleop_gcs.launch.py` 子树（`joy_node`/`xbox_teleop_node`/
+`fsm_console_node`）会级联关闭。`fsm_console_node.cpp`/`state_cmd_console_
+node.cpp` 都新增 `SIGINT`/`SIGTERM`/`SIGHUP` 信号处理器 + 一个每 `100ms`
+轮询 `rclcpp::ok()` 的看门狗 `std::thread`（阻塞在 `std::getline(std::cin,
+...)` 上时也能强制 `std::exit(0)`），并在 `fsm_console_node` fork 出的
+`state_cmd_console_node` 子进程与 `state_cmd_console_node` 自身都加上
+`prctl(PR_SET_PDEATHSIG, SIGTERM)`，作为既有 `setsid()`+`killpg()` 之外的
+第二道防线（覆盖父进程被 `SIGKILL` 的场景）。
+
+### FSM 状态名统一为 `FUNCTION_ALGORITHM_CATEGORY`（数值 ID 保持不变）
+
+`CLAUDE.md` 第 7 节新增强制命名规则：每个 FSM 状态名（`FsmCommand`/
+`FSMStateName` 枚举标识符及其小写 `state_name_string`）必须遵循
+`功能_算法_类别` 三段式。8 个状态的数值 ID（`1`~`8`）保持不变，仅重命名
+字符串：`PASSIVE→IDLE_PASSIVE_NONE`、`DEPTH_HOLD→HOLD_PID_DEPTH`、
+`OPEN_LOOP→TELEOP_OPENLOOP_6DOF`、`PID_HOLD→HOLD_PID_6DOF`、
+`ADHERE_PID→ADHERE_PID_WBC`、`ADHERE_SMC→ADHERE_SMC_WBC`、
+`BASELINE_MPPI→ADHERE_MPPI_BASELINE`、`KAMR_MPPI→ADHERE_MPPI_KAMR`（最后
+一个仍是未实现的占位状态，仅重命名消息常量/显示表）。改动覆盖
+`FsmCommand.msg`/`ControllerState.msg` 常量与注释、`enumClass.h`、
+`adhere_controller.cpp`/`FSMState.h` 的 int↔enum 映射、7 个 `FSM/StateXxx.
+cpp` 构造函数、`adhere_keyboard_input` 全部 4 个节点、`mujoco_viewer.cpp`
+的 `kFsmStateNames` 显示数组、`robot_control.yaml` 注释、相关 README 与
+`test_adhere_wall_states.cpp`/`test_baseline_mppi.cpp` 的引用。保留了
+`ADHERE_SMC_WBC`（用户确认：不随任务原文字面方案一起把 SMC 基线从 FSM 中
+删除），仍维持 8 个状态、ID `1`~`8` 不变。
+
+### 通用目标位姿可视化：`target_valid` 取代仅限 `ADHERE_*` 的硬编码门控
+
+`ControllerState.msg` 新增 `bool target_valid`；`FSMState` 新增虚函数
+`targetValid()`（默认 `false`），`HOLD_PID_DEPTH`/`HOLD_PID_6DOF`/
+`ADHERE_PID_WBC`/`ADHERE_SMC_WBC`/`ADHERE_MPPI_BASELINE` 均覆写为 `true`
+(`IDLE_PASSIVE_NONE`/`TELEOP_OPENLOOP_6DOF` 维持默认 `false`)。
+`StateDepthHold::targetPose()` 不再固定返回 `[0,0,target_z_]`，改为每拍
+缓存 ROV 的实际 X/Y（`last_actual_x_`/`last_actual_y_`），与 `target_z_`
+一起返回，使绿色目标球落在 ROV 自身竖直轴线上而不是世界原点。
+`MujocoVisBridge` 把 Phase 4.2 的 `adhere_target_{x,y,z,yaw_deg}`
+原子量改名为通用的 `target_{x,y,z,yaw_deg}`（不再仅限贴壁状态）并新增
+`target_valid`；`adhere_mujoco_node.cpp` 的 `/rov/controller_state` 回调与
+`MujocoViewer::drawOverlayTelemetry()` 的叠加层/绿色球渲染逻辑都改为按
+`target_valid` 门控（而非之前的 `adhere_stage` 非空判断），且按 FSM 类别
+区分文案与球心 X 坐标：`IDLE_PASSIVE_NONE`/`TELEOP_OPENLOOP_6DOF` 显示
+"None"；`HOLD_PID_DEPTH` 只显示 Z/深度；`HOLD_PID_6DOF` 显示完整
+`[X,Y,Z,Yaw]`；三个 `ADHERE_*` 状态沿用 Phase 4.2 的视觉设计，球心 X 始终
+钳到墙面 `0.0`（不随站位/逼近阶段的真实 X 漂移）。
+
+### 三个 `ADHERE_*` 基线调参：软着陆阻尼 + 杠杆力矩前馈 + 提高保压目标
+
+`ModelParams::AdhereStageParams` 新增共享字段 `approach_vx_damp`
+(`adhere_approach_vx_damp`，默认 `80.0 N/(m/s)`)：`StateAdherePid`/
+`StateAdhereSmc` 在 `depth_aligned_ && !docked_` 的 APPROACH 阶段，对命令
+`Fx` 额外叠加 `-approach_vx_damp*max(0,v_x,body)` 项，使 ROV 在触墙前减速
+而不是以恒定 `approach_speed` 直接撞墙反弹；`ADHERE_MPPI_BASELINE` 没有
+独立的 APPROACH 状态机，改为把 `baseline_mppi.wall_b`（滚动代价里的触墙
+阻尼）从 `200.0` 提高到 `500.0`，让 CUDA 滚动本身更偏好柔和逼近。
+`StateAdherePid::run()`/`StateAdhereSmc::run()` 都在分配前对最终 wrench
+追加杠杆力矩前馈 `T_y += 0.1*F_z, T_z -= 0.1*F_y`（对应 CLAUDE.md 第 5.2
+节文档化的 `k_ff=0.1m`，补偿 `thr_T5..8` 在机体 `X=-0.10m` 处产生的寄生
+倾覆力矩；`ADHERE_MPPI_BASELINE` 的 CUDA 滚动动力学模型在 Phase 4.1 已自带
+等效项，未重复添加）。三个基线的目标保压力都调高，使稳态 4 垫压力落在
+`~28~31N`/垫区间：`adhere_pid.f_des` `100.0→120.0`、`adhere_smc.
+wall_preload_fx` `30.0→120.0`、`baseline_mppi.preload_fx` `30.0→120.0`。
+
+### 验证结果
+
+`export PATH=/usr/bin:/usr/local/cuda/bin:$PATH && colcon build --symlink-
+install`（5 个包）零警告零错误。`colcon test`：全部 11 个 gtest 可执行文件
+（含 `test_adhere_wall_states`/`test_baseline_mppi` 的重命名引用更新）共
+563 个用例里全部 gtest 用例 0 失败，零回归；lint 失败（copyright/cpplint/
+uncrustify 等）与既有基线完全一致，未引入任何新增 lint 回归。真实 MuJoCo
+闭环烟雾测试本阶段未能完成：`ros2 launch simplified_v1_description
+mujoco.launch.py headless:=true use_rviz:=false` 在 `adhere_controller`
+`on_configure()`/`on_activate()` 阶段挂起超过 `90s`——经 `git stash` 复现
+确认这是 Phase 4.2 既有代码库上已经存在的问题（与本阶段改动无关，怀疑是
+本工作站当次会话的 CUDA/GPU 上下文初始化异常缓慢或卡死，需要下一阶段单独
+排查），因此本阶段的终端自动关闭/`target_valid`/贴壁调参改动只经过了
+gtest 套件验证，未经真实 MuJoCo 闭环烟雾测试复核，这点需要在下一次会话
+优先补上。

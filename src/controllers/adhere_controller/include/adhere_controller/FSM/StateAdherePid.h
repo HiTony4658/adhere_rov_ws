@@ -50,6 +50,8 @@ public:
   // Reports the live hold setpoint: pos=p_d_world_, quat=q_d_.
   PoseTarget targetPose() const override;
 
+  bool targetValid() const override { return true; }
+
   // Exposed for closed-loop gtests (CLAUDE.md Phase 3.8 Stage 3.1): whether the state has
   // transitioned from APPROACH to ADHERED.
   bool isDocked() const { return docked_; }

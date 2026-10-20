@@ -112,21 +112,25 @@ struct MujocoVisBridge
   std::atomic<double> hydro_f_squeeze_x{0.0};
   std::atomic<double> hydro_f_fk_am_y{0.0};
 
-  // Phase 4.2: AdhereController's live target pose/FSM state/adhere stage, forwarded here by
-  // adhere_mujoco_node's /rov/controller_state subscription callback (ROS executor thread) so
-  // MujocoViewer's overlay/green target sphere and the RViz2 /rov/environment_markers publisher
-  // both reflect the exact same live reference pose. Plain lock-free atomics, same pattern as
-  // the other hardware->GUI telemetry above; fsm_current_state_code mirrors
-  // ControllerState::current_state's int32 encoding (0 = no controller active yet) and
-  // adhere_stage_code is 0=not an adhere state / 1=DEPTH_ALIGN / 2=WALL_ADHERE -- both plain
-  // integer codes (not strings) to stay lock-free-atomic-friendly; human-readable names are
-  // derived locally by each consumer from these codes.
+  // Phase 4.2 (generalized Phase 4.3): AdhereController's live target pose/FSM state/adhere
+  // stage, forwarded here by adhere_mujoco_node's /rov/controller_state subscription callback
+  // (ROS executor thread) so MujocoViewer's overlay/green target sphere and the RViz2
+  // /rov/environment_markers publisher both reflect the exact same live reference pose. Plain
+  // lock-free atomics, same pattern as the other hardware->GUI telemetry above;
+  // fsm_current_state_code mirrors ControllerState::current_state's int32 encoding (0 = no
+  // controller active yet) and adhere_stage_code is 0=not an adhere state / 1=DEPTH_ALIGN /
+  // 2=WALL_ADHERE -- both plain integer codes (not strings) to stay lock-free-atomic-friendly;
+  // human-readable names are derived locally by each consumer from these codes. target_* was
+  // adhere_target_* through Phase 4.2 (adhere-only); Phase 4.3 made target_valid/target_pose
+  // universal (HOLD_PID_DEPTH/HOLD_PID_6DOF/ADHERE_*), so the fields were renamed to drop the
+  // now-inaccurate "adhere_" prefix.
   std::atomic<int> fsm_current_state_code{0};
   std::atomic<int> adhere_stage_code{0};
-  std::atomic<double> adhere_target_x{0.0};
-  std::atomic<double> adhere_target_y{0.0};
-  std::atomic<double> adhere_target_z{0.0};
-  std::atomic<double> adhere_target_yaw_deg{0.0};
+  std::atomic<bool> target_valid{false};
+  std::atomic<double> target_x{0.0};
+  std::atomic<double> target_y{0.0};
+  std::atomic<double> target_z{0.0};
+  std::atomic<double> target_yaw_deg{0.0};
 };
 
 }  // namespace adhere_mujoco_hardware

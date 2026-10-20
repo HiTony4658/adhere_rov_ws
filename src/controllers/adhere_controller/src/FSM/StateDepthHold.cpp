@@ -37,7 +37,7 @@ SixDofPidController::Gains depthHoldGainsToSixDof(const ModelParams::DepthHoldGa
 }  // namespace
 
 StateDepthHold::StateDepthHold(CtrlInterfaces & ctrl_interfaces, const ModelParams & model_params)
-: FSMState(FSMStateName::DEPTH_HOLD, "state_depth_hold", ctrl_interfaces, model_params),
+: FSMState(FSMStateName::HOLD_PID_DEPTH, "state_hold_pid_depth", ctrl_interfaces, model_params),
   dynamics_(model_params),
   pid_(
     depthHoldGainsToSixDof(model_params.depth_hold), dynamics_, kIntegralPosMax, kIntegralAttMax)
@@ -48,8 +48,8 @@ StateDepthHold::StateDepthHold(CtrlInterfaces & ctrl_interfaces, const ModelPara
 
 void StateDepthHold::enter()
 {
-  // Only reached via a transition INTO DEPTH_HOLD (checkChange() below never requests a
-  // DEPTH_HOLD -> DEPTH_HOLD re-entry), so this is exactly the "entering fresh" case CLAUDE.md
+  // Only reached via a transition INTO HOLD_PID_DEPTH (checkChange() below never requests a
+  // HOLD_PID_DEPTH -> HOLD_PID_DEPTH re-entry), so this is exactly the "entering fresh" case CLAUDE.md
   // Phase 3.1 Stage 2.2 says must reset the integrator; live target_z_ updates while already in
   // this state never call enter() again. Seeds target_z_ from the ROV's current world Z so the
   // hull does not lurch toward a stale leftover setpoint on entry.
@@ -69,6 +69,8 @@ void StateDepthHold::run(const rclcpp::Time & /*time*/, const rclcpp::Duration &
   const Quat q_est(active.quat_w[0], active.quat_w[1], active.quat_w[2], active.quat_w[3]);
   const Vec3 vel_body(active.vel_body[0], active.vel_body[1], active.vel_body[2]);
   const Vec3 omega_body(active.omega_body[0], active.omega_body[1], active.omega_body[2]);
+  last_actual_x_ = pos_world.x();
+  last_actual_y_ = pos_world.y();
 
   // Discrete setpoint (CLAUDE.md Phase 3.2 Stage 2.1): edge-detected via setpoint_seq so the
   // same /rov/setpoint_cmd message is applied exactly once, never fighting the continuous
@@ -127,7 +129,7 @@ FSMStateName StateDepthHold::checkChange()
 PoseTarget StateDepthHold::targetPose() const
 {
   PoseTarget t;
-  t.pos = Vec3(0.0, 0.0, target_z_);
+  t.pos = Vec3(last_actual_x_, last_actual_y_, target_z_);
   return t;
 }
 

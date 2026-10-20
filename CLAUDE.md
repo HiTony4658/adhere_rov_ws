@@ -170,6 +170,10 @@ adhere_robot_ws/
    - Whenever a directory becomes non-empty, remove any leftover `.gitkeep` placeholder file inside it.
 4. **Automatic Verification, Commit & Push**:
    - At the end of every milestone, run `colcon build --symlink-install` and `colcon test`, update `PROGRESS.md` and relevant `README.md` tutorials, stage all changes (`git add -A`), commit with a descriptive English message, and push to the remote repository (`git push`).
+5. **FSM State Naming Convention: `FUNCTION_ALGORITHM_CATEGORY` (Phase 4.3, MANDATORY)**:
+   - Every FSM state name (the `FsmCommand.msg`/`FSMStateName` enum identifier and its lowercase `state_name_string`, e.g. `state_hold_pid_depth`) MUST follow `FUNCTION_ALGORITHM_CATEGORY` (功能_算法_类别): a leading functional verb/noun (`IDLE`, `HOLD`, `TELEOP`, `ADHERE`), the control algorithm (`PASSIVE`, `PID`, `OPENLOOP`, `SMC`, `MPPI`), and a trailing category/DOF tag (`NONE`, `DEPTH`, `6DOF`, `WBC`, `BASELINE`, `KAMR`).
+   - Numeric `FsmCommand` IDs are a separate, independently stable contract — renaming a state's string MUST NEVER renumber its ID (`1=IDLE_PASSIVE_NONE, 2=HOLD_PID_DEPTH, 3=TELEOP_OPENLOOP_6DOF, 4=HOLD_PID_6DOF, 5=ADHERE_PID_WBC, 6=ADHERE_SMC_WBC, 7=ADHERE_MPPI_BASELINE, 8=ADHERE_MPPI_KAMR`).
+   - Any new FSM state added in future phases must be named against this convention before it is wired into `enumClass.h`/`FsmCommand.msg`, not retrofitted afterward.
 
 ---
 
@@ -177,19 +181,19 @@ adhere_robot_ws/
 
 **Always re-read the last 2 sections of `PROGRESS.md` after every `/clear`** (Sec.0's startup protocol) before trusting this snapshot — it is a point-in-time summary, `PROGRESS.md` is the authoritative chronological record. Whenever a `/clear` session completes a major architectural change (package merge/split, new topic, new coordinate convention, new FSM state), **update this section in the same commit**.
 
-### Exact 5-Package Workspace Layout (as of Phase 4.2)
+### Exact 5-Package Workspace Layout (as of Phase 4.3)
 ```text
 src/
 ├── interfaces/adhere_control_msgs/        # FsmCommand, SetpointCommand, TeleopCommand, ControllerState (Phase 4.2: + adhere_stage), RuntimeDiagnostics (zero MuJoCo/CUDA/ros2_control deps)
 ├── descriptions/simplified_v1_description/ # URDF/Xacro + mjcf/rov_wall.xml (Phase 4.2: wall extended to Z in [-10,+1.5]m) + config/robot_control.yaml (single source of model params, + Phase 4.2 adhere_target_*/adhere_standoff_x/adhere_depth_tol/adhere_vz_tol) + config/mujoco_sim.rviz
 ├── hardwares/adhere_mujoco_hardware/       # AdhereMujocoHardware (500Hz SystemInterface) + FossenHydrodynamics + dual ground-truth/noisy sensor paths + runtime diagnostics mirror + MujocoViewer (Phase 4.2: live thruster-slider mirror + Manual Override + green adhere-target sphere) + adhere_mujoco_node (message-level adhere_control_msgs dep added Phase 4.2; zero config/ files)
-├── controllers/adhere_controller/          # AdhereController plugin (FSM: PASSIVE/DEPTH_HOLD/OPEN_LOOP/PID_HOLD/ADHERE_PID/ADHERE_SMC/BASELINE_MPPI) in modular dynamics/allocation/estimator/algorithms{pid,smc,wbc,mppi,baseline_mppi}/FSM/common subdirs (Phase 3.7/3.8/4.1) + async outer-loop worker now running a real pure-CUDA Baseline MPPI solve (Phase 4.1, first concrete occupant of that skeleton) + centralized efficiency/chattering/safety telemetry (Phase 3.8) + shared two-stage DEPTH_ALIGN->WALL_ADHERE sequence across ADHERE_PID/ADHERE_SMC/BASELINE_MPPI (Phase 4.2, `ModelParams::adhere_stage`)
-└── commands/adhere_keyboard_input/         # fsm_console_node + state_cmd_console_node + xbox_teleop_node + rt_monitor_node + benchmark_evaluator_node (Phase 3.8), all extended for BASELINE_MPPI (Phase 4.1) (zero MuJoCo/CUDA/ros2_control deps)
+├── controllers/adhere_controller/          # AdhereController plugin (FSM: IDLE_PASSIVE_NONE/HOLD_PID_DEPTH/TELEOP_OPENLOOP_6DOF/HOLD_PID_6DOF/ADHERE_PID_WBC/ADHERE_SMC_WBC/ADHERE_MPPI_BASELINE) in modular dynamics/allocation/estimator/algorithms{pid,smc,wbc,mppi,baseline_mppi}/FSM/common subdirs (Phase 3.7/3.8/4.1) + async outer-loop worker now running a real pure-CUDA Baseline MPPI solve (Phase 4.1, first concrete occupant of that skeleton) + centralized efficiency/chattering/safety telemetry (Phase 3.8) + shared two-stage DEPTH_ALIGN->WALL_ADHERE sequence across ADHERE_PID_WBC/ADHERE_SMC_WBC/ADHERE_MPPI_BASELINE (Phase 4.2, `ModelParams::adhere_stage`)
+└── commands/adhere_keyboard_input/         # fsm_console_node + state_cmd_console_node + xbox_teleop_node + rt_monitor_node + benchmark_evaluator_node (Phase 3.8), all extended for ADHERE_MPPI_BASELINE (Phase 4.1) (zero MuJoCo/CUDA/ros2_control deps)
 ```
 `adhere_controller_common` and `adhere_kamr_controller` NO LONGER EXIST (merged into `adhere_controller` in Phase 3.3) — do not recreate them or reference their names in new code. `FsmState.msg` NO LONGER EXISTS (replaced by `ControllerState.msg` in Phase 3.6) — do not recreate it. `adhere_controller/include/adhere_controller/common/{ModelParams.h,ThrusterAllocator.h}` NO LONGER EXIST (moved to `dynamics/ModelParams.h`/`allocation/ThrusterAllocator.h` in Phase 3.7, now declaration-only with `.cpp` implementations) — update any stale `#include` to the new paths. `adhere_controller/config/controllers.yaml` and `adhere_mujoco_hardware/config/mujoco_sim.rviz` NO LONGER EXIST (Phase 3.7: the former was dead/unused, the latter moved to `simplified_v1_description/config/`).
 
 ### 5 ROS Topics (`adhere_control_msgs`, orthogonal contract, Sec.3.4, quaternion-ized + 100% Sim-to-Real pure in Phase 3.6, renumbered in Phase 3.8)
-1. `/rov/fsm_command` (`FsmCommand`) — ONLY switches FSM state (`1=PASSIVE, 2=DEPTH_HOLD, 3=OPEN_LOOP, 4=PID_HOLD, 5=ADHERE_PID, 6=ADHERE_SMC, 7=BASELINE_MPPI, 8=KAMR_MPPI`; Phase 3.8 inserted `ADHERE_PID`/`ADHERE_SMC` at `5`/`6` and shifted `BASELINE_MPPI`/`KAMR_MPPI` from `5`/`6` to `7`/`8`).
+1. `/rov/fsm_command` (`FsmCommand`) — ONLY switches FSM state (`1=IDLE_PASSIVE_NONE, 2=HOLD_PID_DEPTH, 3=TELEOP_OPENLOOP_6DOF, 4=HOLD_PID_6DOF, 5=ADHERE_PID_WBC, 6=ADHERE_SMC_WBC, 7=ADHERE_MPPI_BASELINE, 8=ADHERE_MPPI_KAMR`; Phase 3.8 inserted `ADHERE_PID_WBC`/`ADHERE_SMC_WBC` at `5`/`6` and shifted `ADHERE_MPPI_BASELINE`/`ADHERE_MPPI_KAMR` from `5`/`6` to `7`/`8`).
 2. `/rov/setpoint_cmd` (`SetpointCommand`) — ONLY discrete numeric targets: `command_type` (`1=MODE_DEPTH_ONLY, 2=MODE_FULL_POSE, 3=MODE_LOCK_CURRENT, 4=MODE_LEVEL_ATTITUDE`) + `geometry_msgs/Pose target_pose` (position + unit quaternion, world frame).
 3. `/rov/teleop_cmd` (`TeleopCommand`) — ONLY `50Hz` continuous Xbox Mode-2 stick/trigger commands: `geometry_msgs/Vector3 linear` (surge/sway/heave) + `geometry_msgs/Vector3 angular` (roll_rate=RT/RB, pitch_rate=LT/LB, yaw_rate), both in `[-1,1]`.
 4. `/rov/controller_state` (`ControllerState`, replaces `FsmState` in Phase 3.6) — `25Hz` feedback, 100% Sim-to-Real pure (NO ground truth field at all): `current_state, state_name, estimation_mode, target_pose (Pose), estimated_pose (Pose), estimated_twist_body (Twist), contact_forces[4] (estimated via A_contact), thruster_cmds[8], thrust_l2_norm, thrust_power_proxy, thrust_slew_rate_l2, cumulative_energy_l2, cumulative_impulse_l1, saturated_thruster_count, active_contact_pad_count (Phase 3.8 efficiency/chattering/safety telemetry), kern_margin`. Published by `AdhereController`.
@@ -204,7 +208,7 @@ Water surface at world `Z=0.0m`; tank floor at world `Z=-10.0m` (10m depth); wal
 `ModelParams::loadFromNode()` (`adhere_controller/include/adhere_controller/dynamics/ModelParams.h`, Phase 3.7: moved out of `common/`) loads ALL thruster/pad geometry, Fossen hydro params, workspace bounds, per-FSM-state gains, `estimation_mode`, and sensor mounting lever arms from `simplified_v1_description/config/robot_control.yaml` at `on_configure()`. `allocation/ThrusterAllocator.h::buildThrusterAllocationMatrix()` builds `B` dynamically from `ModelParams`' loaded geometry (no hardcoded corner coordinates). `robot_control.yaml`'s `thruster_pos_xyz`/`thruster_dir_xyz` encode `rov_wall.xml`'s REAL geometry (all 8 thruster sites at body `X=0.0`, zero lever arm) — a documented, user-confirmed deviation from this file's own Sec.4.3 illustrative placeholder. `estimation_mode` is deliberately NOT a `robot_control.yaml` key (see that file's inline comment on the wildcard-vs-exact-node-name parameter-precedence gotcha) — it is set only via `mujoco.launch.py`'s `estimation_mode` launch argument (default `ground_truth`) or `ModelParams`' compiled-in default.
 
 ### Two-Stage DEPTH_ALIGN -> WALL_ADHERE Sequence (Phase 4.2)
-`ADHERE_PID`/`ADHERE_SMC`/`BASELINE_MPPI` share a single `ModelParams::AdhereStageParams`
+`ADHERE_PID_WBC`/`ADHERE_SMC_WBC`/`ADHERE_MPPI_BASELINE` share a single `ModelParams::AdhereStageParams`
 (`adhere_stage`, loaded from `robot_control.yaml`'s flat `adhere_target_depth_m`/
 `adhere_target_y`/`adhere_standoff_x`/`adhere_depth_tol`/`adhere_vz_tol` keys — deliberately
 NOT duplicated into each algorithm's own `adhere_pid.*`/`adhere_smc.*`/`baseline_mppi.*` block,
@@ -221,10 +225,51 @@ standoff_x)` and the existing APPROACH/ADHERED `docked_` gate is additionally co
 accessor) and lets the existing CUDA rollout wall-contact-penalty + `preload_fx` cost terms do
 the actual approach/press.
 
-### FSM States Implemented (Phase 3.2/3.3/3.5/3.6/3.7/3.8/4.1/4.2, `adhere_controller`)
-`PASSIVE` (zero-thrust safe default), `DEPTH_HOLD` (Phase 3.7: delegates to `algorithms::pid::SixDofPidController` in a reduced "depth-only" mode — lateral X/Y setpoint re-latched to the current estimate every tick, attitude setpoint identity, equivalent to the pre-3.7 `-kp_att*rpy` small-angle Euler damping law at this state's operating point, now with buoyancy feedforward via `FossenDynamics` that the pre-3.7 law never had), `OPEN_LOOP` (direct teleop-to-wrench, no memory, 6-DOF with Tx/Ty from roll_rate/pitch_rate), `PID_HOLD` (Phase 3.7: keeps setpoint integration — stick-driven advancement, discrete `MODE_*` handling — in the FSM layer, delegates the error→wrench PID + hydrostatic/drag feedforward law to the same `SixDofPidController`, quaternion attitude setpoint `q_d_` integrated via quaternion kinematics and tracked via the singularity-free SO(3) error `mathTools.h::quatError()` with hemisphere alignment, roll/pitch clamped to `±pid_hold.max_tilt_deg` via an RPY round-trip). `ADHERE_PID`/`ADHERE_SMC` (Phase 3.8, see dedicated subsection below) are the first classical wall-adhesion baselines. `BASELINE_MPPI` (ID `7`, Phase 4.1, see dedicated subsection below) is the first sampling-based planner: outer-loop-only, pure CUDA, with `StateBaselineMppi`'s 250Hz `run()` doing a strict Zero-Order-Hold pass-through of the async worker's latest output (no inner-loop PID/DOB/QP at all). `KAMR-MPPI`'s 250Hz inner loop (Impedance PD + Pad-Force DOB + 12D OSQP) is NOT yet implemented — `algorithms/wbc/WbcAllocatorBase.h` and `algorithms/mppi/MppiPlannerBase.h` (Phase 3.7) remain pure data-contract abstract headers marking its Phase 4.3 landing point (`BaselineMppiController` deliberately does NOT implement either — it returns raw allocated thruster commands, not a `NominalWrenchCmd` for a WBC to consume). The 25Hz outer loop's async worker THREAD (`AdhereController::outerWorkerLoop()`, started in `on_activate()`/joined in `on_deactivate()`/dtor, hand-off via a mutex+condition_variable-guarded `OuterLoopInput`/`OuterLoopOutput` pair, Phase 3.6) now runs a real solve — `baseline_mppi_.solve()` — whenever `run_baseline_mppi` is set (i.e. `BASELINE_MPPI` is the active state), and still falls back to the original trivial pass-through otherwise; `KAMR_MPPI` lands with another branch alongside it, Phase 4.3, without touching this threading/hand-off architecture. Every FSM state writes its computed command into `CtrlInterfaces::pending_thruster_cmd` (never `.set_value()` directly) — `AdhereController::update()` runs the centralized `common/OutputSafety.h::sanitizeAndWriteThrusterCommands()` NaN/Inf-sanitize + saturation gate on it before it reaches hardware (Phase 3.7).
+### `FUNCTION_ALGORITHM_CATEGORY` FSM Rename, Terminal Auto-Close, Universal Target Display & Adhere Tuning (Phase 4.3)
 
-### Pure-CUDA Outer-Loop-Only `BASELINE_MPPI` Baseline (Phase 4.1)
+All 8 FSM state names/strings were renamed to the `FUNCTION_ALGORITHM_CATEGORY` convention
+(Sec.7.5) with every numeric `FsmCommand` ID held fixed: `IDLE_PASSIVE_NONE`/`HOLD_PID_DEPTH`/
+`TELEOP_OPENLOOP_6DOF`/`HOLD_PID_6DOF`/`ADHERE_PID_WBC`/`ADHERE_SMC_WBC`/`ADHERE_MPPI_BASELINE`/
+`ADHERE_MPPI_KAMR` (the last is a rename-only placeholder, still unimplemented).
+
+`fsm_console_node`/`state_cmd_console_node` gained signal handlers (`SIGINT`/`SIGTERM`/`SIGHUP`)
++ a `std::thread` watchdog polling `rclcpp::ok()` every `100ms` to force `std::exit(0)` even when
+`std::getline(std::cin, ...)` is stuck blocking on a closed terminal, plus
+`prctl(PR_SET_PDEATHSIG, SIGTERM)` (in `fsm_console_node`'s forked `state_cmd_console_node` child
+and in `state_cmd_console_node` itself) as a second line of defense alongside the existing
+`setsid()`+`killpg()` pair. `teleop_gcs.launch.py`'s `gnome-terminal` fallback now passes
+`--wait`. `simplified_v1_description/launch/mujoco.launch.py` registers an `OnProcessExit`
+handler on `adhere_mujoco_node` that emits `Shutdown()`, cascading teardown to
+`robot_state_publisher`/`rviz2`/the whole `teleop_gcs.launch.py` subtree when the MuJoCo GLFW
+window closes.
+
+`ControllerState.msg` gained `bool target_valid`, and `FSMState::targetValid()` (default
+`false`) generalizes the green target-sphere/overlay display (previously hardcoded to only the
+three `ADHERE_*` states) to every state with a meaningful `targetPose()`:
+`HOLD_PID_DEPTH`/`HOLD_PID_6DOF`/`ADHERE_PID_WBC`/`ADHERE_SMC_WBC`/`ADHERE_MPPI_BASELINE` all
+report `targetValid()==true`. `StateDepthHold::targetPose()` now reports the ROV's own live
+X/Y (cached each tick) alongside `target_z_`, so the sphere sits directly on the ROV's vertical
+axis instead of at the origin. `MujocoVisBridge`'s Phase 4.2 `adhere_target_*` atomics were
+renamed to `target_*` (no longer adhere-only) and gained `target_valid`; `adhere_mujoco_node.cpp`
+and `MujocoViewer::drawOverlayTelemetry()` both gate the sphere/overlay text on `target_valid`
+and format the "Target Pos" line per FSM category (none / Z-only / full XYZ+yaw / wall-pinned
+X=0 for `ADHERE_*`).
+
+The three `ADHERE_*` states got a soft-landing/firm-preload retune: a new shared
+`ModelParams::AdhereStageParams::approach_vx_damp` (`adhere_approach_vx_damp` in
+`robot_control.yaml`, default `80.0 N/(m/s)`) subtracts an approach-velocity-proportional damping
+term from the commanded `Fx` during `ADHERE_PID_WBC`/`ADHERE_SMC_WBC`'s pre-dock `APPROACH` phase
+(and `ADHERE_MPPI_BASELINE`'s `baseline_mppi.wall_b` rollout-contact-damping was raised instead,
+same intent); both states also gained an explicit `T_y += 0.1*F_z, T_z -= 0.1*F_y` lever-arm
+moment feedforward (matching Sec.5.2's `k_ff=0.1m`) applied to the final wrench before
+allocation. Target pressing force was raised across all three baselines so steady-state 4-pad
+compression lands in the `~28-31N`/pad range: `adhere_pid.f_des` `100.0->120.0`,
+`adhere_smc.wall_preload_fx` `30.0->120.0`, `baseline_mppi.preload_fx` `30.0->120.0`.
+
+### FSM States Implemented (Phase 3.2/3.3/3.5/3.6/3.7/3.8/4.1/4.2, `adhere_controller`)
+`IDLE_PASSIVE_NONE` (zero-thrust safe default), `HOLD_PID_DEPTH` (Phase 3.7: delegates to `algorithms::pid::SixDofPidController` in a reduced "depth-only" mode — lateral X/Y setpoint re-latched to the current estimate every tick, attitude setpoint identity, equivalent to the pre-3.7 `-kp_att*rpy` small-angle Euler damping law at this state's operating point, now with buoyancy feedforward via `FossenDynamics` that the pre-3.7 law never had), `TELEOP_OPENLOOP_6DOF` (direct teleop-to-wrench, no memory, 6-DOF with Tx/Ty from roll_rate/pitch_rate), `HOLD_PID_6DOF` (Phase 3.7: keeps setpoint integration — stick-driven advancement, discrete `MODE_*` handling — in the FSM layer, delegates the error→wrench PID + hydrostatic/drag feedforward law to the same `SixDofPidController`, quaternion attitude setpoint `q_d_` integrated via quaternion kinematics and tracked via the singularity-free SO(3) error `mathTools.h::quatError()` with hemisphere alignment, roll/pitch clamped to `±pid_hold.max_tilt_deg` via an RPY round-trip). `ADHERE_PID_WBC`/`ADHERE_SMC_WBC` (Phase 3.8, see dedicated subsection below) are the first classical wall-adhesion baselines. `ADHERE_MPPI_BASELINE` (ID `7`, Phase 4.1, see dedicated subsection below) is the first sampling-based planner: outer-loop-only, pure CUDA, with `StateBaselineMppi`'s 250Hz `run()` doing a strict Zero-Order-Hold pass-through of the async worker's latest output (no inner-loop PID/DOB/QP at all). `KAMR-MPPI`'s 250Hz inner loop (Impedance PD + Pad-Force DOB + 12D OSQP) is NOT yet implemented — `algorithms/wbc/WbcAllocatorBase.h` and `algorithms/mppi/MppiPlannerBase.h` (Phase 3.7) remain pure data-contract abstract headers marking its Phase 4.4 landing point (`BaselineMppiController` deliberately does NOT implement either — it returns raw allocated thruster commands, not a `NominalWrenchCmd` for a WBC to consume). The 25Hz outer loop's async worker THREAD (`AdhereController::outerWorkerLoop()`, started in `on_activate()`/joined in `on_deactivate()`/dtor, hand-off via a mutex+condition_variable-guarded `OuterLoopInput`/`OuterLoopOutput` pair, Phase 3.6) now runs a real solve — `baseline_mppi_.solve()` — whenever `run_baseline_mppi` is set (i.e. `ADHERE_MPPI_BASELINE` is the active state), and still falls back to the original trivial pass-through otherwise; `ADHERE_MPPI_KAMR` lands with another branch alongside it, Phase 4.4, without touching this threading/hand-off architecture. Every FSM state writes its computed command into `CtrlInterfaces::pending_thruster_cmd` (never `.set_value()` directly) — `AdhereController::update()` runs the centralized `common/OutputSafety.h::sanitizeAndWriteThrusterCommands()` NaN/Inf-sanitize + saturation gate on it before it reaches hardware (Phase 3.7).
+
+### Pure-CUDA Outer-Loop-Only `ADHERE_MPPI_BASELINE` Baseline (Phase 4.1)
 
 First landing point for a sampling-based planner, and the template for `KAMR-MPPI`'s eventual
 async CUDA outer loop. `algorithms/baseline_mppi/` (new subdirectory alongside `pid/`/`smc/`/
@@ -272,7 +317,7 @@ from the previous FSM state leaks through before the worker's first valid solve 
 `valid` bridge, same isolation discipline as `ActiveState`) is how `StateBaselineMppi::run()`'s
 250Hz ZOH reads the worker's latest `u_star` without ever touching
 `AdhereController::outer_worker_mutex_` directly. `RuntimeDiagnostics.msg` gained
-`outer_planner_solve_ms` (0 when no GPU planner is active; typically `<0.5ms` for `BASELINE_MPPI`,
+`outer_planner_solve_ms` (0 when no GPU planner is active; typically `<0.5ms` for `ADHERE_MPPI_BASELINE`,
 far under the `40ms` outer-loop budget), sourced from `BaselineMppiController`'s own
 `LoopProfiler`. `CMAKE_CUDA_ARCHITECTURES` is pinned to `"72;75"` (Sec.2's actual target hardware,
 not the wider `72;75;80;86` a literal reading of a looser task spec might suggest) in
@@ -281,15 +326,15 @@ not the wider `72;75;80;86` a literal reading of a looser task spec might sugges
 command's `$PATH`) and uses the legacy `find_package(CUDA REQUIRED)` module (this workstation's
 CMake 3.16 predates `FindCUDAToolkit`, which needs 3.17+).
 
-### Wall-Adhesion `ADHERE_PID`/`ADHERE_SMC` Baselines & Efficiency/Safety Telemetry (Phase 3.8)
+### Wall-Adhesion `ADHERE_PID_WBC`/`ADHERE_SMC_WBC` Baselines & Efficiency/Safety Telemetry (Phase 3.8)
 
 `StateAdherePid` (ID `5`) and `StateAdhereSmc` (ID `6`) are the first FSM states that actively
-regulate wall-normal preload — free-swimming `PID_HOLD` never does. Both share an identical
+regulate wall-normal preload — free-swimming `HOLD_PID_6DOF` never does. Both share an identical
 two-phase structure: an `!docked_` APPROACH phase (ramps the X setpoint toward
 `adhere_{pid,smc}.x_wall` at `approach_speed`) followed by a sticky `docked_` ADHERED phase
 (entered once the estimated sum of the 4 pad normal forces exceeds `dock_force_thresh` within
 `x_dock_eps` of the wall; never un-docks itself — only an explicit `/rov/fsm_command` switch
-leaves the state), with Y/Z/attitude setpoint sliding identical to `PID_HOLD`'s teleop/setpoint
+leaves the state), with Y/Z/attitude setpoint sliding identical to `HOLD_PID_6DOF`'s teleop/setpoint
 grammar (X is simply ignored once docked). `algorithms::pid::AdherePidController`
 (`algorithms/pid/AdherePidController.h`) is a small dedicated wall-normal force PI regulator that
 overwrites `StateAdherePid`'s commanded Fx wrench once docked — NOT a wrapper around
@@ -320,7 +365,7 @@ safety; `fsm_console_node`/`state_cmd_console_node`/`rt_monitor_node` were all e
 switch to/display these 2 new states and their telemetry.
 
 ### Dual State-Acquisition & Strict Ground-Truth Isolation (Phase 3.5)
-`AdhereMujocoHardware` exposes 55 state interfaces: the original 28 noise-free ground-truth ones (`imu_sensor`/`rov_odom`/`pad_contact`) PLUS 4 new independent noisy multi-rate channels (`imu_sensor_noisy` 500Hz, `depth_sensor_noisy` 50Hz sample-and-hold, `dvl_sensor_noisy` 20Hz sample-and-hold with lever-arm DVL velocity, `loadcell_noisy` 500Hz) generated entirely inside `AdhereMujocoHardware::read()` from hardcoded noise-std constants (not ROS parameters — this hardware component is not an `rclcpp::Node`). `AdhereController` binds the ground-truth and noisy interfaces to PRIVATE members (`gt_*_state_interface_`/`noisy_*_state_interface_`) — NEVER members of `CtrlInterfaces` — and every 500Hz tick populates `CtrlInterfaces::active_state` (an `ActiveState` struct: `pos_w/rpy/vel_body/omega_body/pad_force/v_sep`) either directly from ground truth (`estimation_mode=="ground_truth"`) or from `RovStateEstimator`'s fused output (`estimation_mode=="sensor_fusion"`). `FSMState::run()` reads ONLY `ctrl_interfaces_.active_state` — it has no way to access ground truth, enforcing the isolation contract even in code review (`grep` for `gt_*_state_interface_` must only ever match inside `adhere_controller.cpp`/`.hpp`). `RovStateEstimator` (`adhere_controller/include/adhere_controller/estimator/RovStateEstimator.h`) is a decoupled, fixed-gain (steady-state EMA) Kalman/complementary filter per channel, NOT a joint-covariance EKF — verified against the `<0.015 m/s`/`<15mm`/`<1.0deg` RMSE contract in `test_sensor_fusion_and_teleop.cpp`. Phase 3.6: `ActiveState` gained a `quat_w[4]` (world-frame orientation, Hamilton w/x/y/z) field alongside `rpy[3]` (now derived from `quat_w`, retained only for `DEPTH_HOLD`'s damping); `quatMul`/`normalizeQuat`/`smallAngleQuat` were hoisted from `RovStateEstimator.h` into the shared `mathTools.h` (public) so `StatePidHold` can reuse the exact same quaternion math.
+`AdhereMujocoHardware` exposes 55 state interfaces: the original 28 noise-free ground-truth ones (`imu_sensor`/`rov_odom`/`pad_contact`) PLUS 4 new independent noisy multi-rate channels (`imu_sensor_noisy` 500Hz, `depth_sensor_noisy` 50Hz sample-and-hold, `dvl_sensor_noisy` 20Hz sample-and-hold with lever-arm DVL velocity, `loadcell_noisy` 500Hz) generated entirely inside `AdhereMujocoHardware::read()` from hardcoded noise-std constants (not ROS parameters — this hardware component is not an `rclcpp::Node`). `AdhereController` binds the ground-truth and noisy interfaces to PRIVATE members (`gt_*_state_interface_`/`noisy_*_state_interface_`) — NEVER members of `CtrlInterfaces` — and every 500Hz tick populates `CtrlInterfaces::active_state` (an `ActiveState` struct: `pos_w/rpy/vel_body/omega_body/pad_force/v_sep`) either directly from ground truth (`estimation_mode=="ground_truth"`) or from `RovStateEstimator`'s fused output (`estimation_mode=="sensor_fusion"`). `FSMState::run()` reads ONLY `ctrl_interfaces_.active_state` — it has no way to access ground truth, enforcing the isolation contract even in code review (`grep` for `gt_*_state_interface_` must only ever match inside `adhere_controller.cpp`/`.hpp`). `RovStateEstimator` (`adhere_controller/include/adhere_controller/estimator/RovStateEstimator.h`) is a decoupled, fixed-gain (steady-state EMA) Kalman/complementary filter per channel, NOT a joint-covariance EKF — verified against the `<0.015 m/s`/`<15mm`/`<1.0deg` RMSE contract in `test_sensor_fusion_and_teleop.cpp`. Phase 3.6: `ActiveState` gained a `quat_w[4]` (world-frame orientation, Hamilton w/x/y/z) field alongside `rpy[3]` (now derived from `quat_w`, retained only for `HOLD_PID_DEPTH`'s damping); `quatMul`/`normalizeQuat`/`smallAngleQuat` were hoisted from `RovStateEstimator.h` into the shared `mathTools.h` (public) so `StatePidHold` can reuse the exact same quaternion math.
 
 ### Modularization, Nominal Dynamics & Safety Hardening (Phase 3.7)
 `adhere_controller` split `include/.../common/` into `dynamics/` (`ModelParams.h`, new

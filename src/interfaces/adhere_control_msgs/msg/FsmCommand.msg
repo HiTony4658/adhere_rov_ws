@@ -1,16 +1,17 @@
 # FSM state-switch request ONLY (CLAUDE.md Phase 3.2 Stage 2.1): published by fsm_console_node
 # or xbox_teleop_node's gamepad buttons, consumed by AdhereController's /rov/fsm_command
 # subscription. Intra-state setpoints/teleop now live on SetpointCommand/TeleopCommand instead.
+# Phase 4.3: state names follow the FUNCTION_ALGORITHM_CATEGORY convention; numeric IDs unchanged.
 std_msgs/Header header
 
 int32 NO_CHANGE = 0
-int32 PASSIVE = 1
-int32 DEPTH_HOLD = 2
-int32 OPEN_LOOP = 3
-int32 PID_HOLD = 4
-int32 ADHERE_PID = 5
-int32 ADHERE_SMC = 6
-int32 BASELINE_MPPI = 7
-int32 KAMR_MPPI = 8
+int32 IDLE_PASSIVE_NONE = 1
+int32 HOLD_PID_DEPTH = 2
+int32 TELEOP_OPENLOOP_6DOF = 3
+int32 HOLD_PID_6DOF = 4
+int32 ADHERE_PID_WBC = 5
+int32 ADHERE_SMC_WBC = 6
+int32 ADHERE_MPPI_BASELINE = 7
+int32 ADHERE_MPPI_KAMR = 8
 
-int32 command          # 0=NO_CHANGE, 1=PASSIVE, 2=DEPTH_HOLD, 3=OPEN_LOOP, 4=PID_HOLD, 5=ADHERE_PID, 6=ADHERE_SMC, 7=BASELINE_MPPI, 8=KAMR_MPPI
+int32 command          # 0=NO_CHANGE, 1=IDLE_PASSIVE_NONE, 2=HOLD_PID_DEPTH, 3=TELEOP_OPENLOOP_6DOF, 4=HOLD_PID_6DOF, 5=ADHERE_PID_WBC, 6=ADHERE_SMC_WBC, 7=ADHERE_MPPI_BASELINE, 8=ADHERE_MPPI_KAMR

@@ -7,7 +7,7 @@ namespace adhere_controller
 {
 
 StateOpenLoop::StateOpenLoop(CtrlInterfaces & ctrl_interfaces, const ModelParams & model_params)
-: FSMState(FSMStateName::OPEN_LOOP, "state_open_loop", ctrl_interfaces, model_params)
+: FSMState(FSMStateName::TELEOP_OPENLOOP_6DOF, "state_teleop_openloop_6dof", ctrl_interfaces, model_params)
 {
   b_pinv_ = buildThrusterAllocationPseudoInverse(
     buildThrusterAllocationMatrix(model_params_.thruster_pos, model_params_.thruster_dir));

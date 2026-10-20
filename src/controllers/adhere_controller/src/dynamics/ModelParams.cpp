@@ -192,6 +192,8 @@ ModelParams ModelParams::loadFromNode(const rclcpp::Node::SharedPtr & node)
   p.adhere_stage.standoff_x = autoDeclareDouble("adhere_standoff_x", p.adhere_stage.standoff_x);
   p.adhere_stage.depth_tol = autoDeclareDouble("adhere_depth_tol", p.adhere_stage.depth_tol);
   p.adhere_stage.vz_tol = autoDeclareDouble("adhere_vz_tol", p.adhere_stage.vz_tol);
+  p.adhere_stage.approach_vx_damp =
+    autoDeclareDouble("adhere_approach_vx_damp", p.adhere_stage.approach_vx_damp);
 
   p.estimation_mode = autoDeclareString("estimation_mode", p.estimation_mode);
   declareVec3("sensor_mount.r_imu_xyz", p.sensor_mount.r_imu);

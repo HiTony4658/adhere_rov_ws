@@ -39,6 +39,8 @@ public:
   // Reports the live hold setpoint: pos=p_d_world_, quat=q_d_.
   PoseTarget targetPose() const override;
 
+  bool targetValid() const override { return true; }
+
 private:
   Mat86 b_pinv_;
 

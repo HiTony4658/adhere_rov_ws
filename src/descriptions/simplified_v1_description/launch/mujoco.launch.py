@@ -25,8 +25,16 @@ import xacro
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
+from launch.actions import (
+    DeclareLaunchArgument,
+    EmitEvent,
+    IncludeLaunchDescription,
+    OpaqueFunction,
+    RegisterEventHandler,
+)
 from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -120,6 +128,25 @@ def generate_launch_description():
             condition=IfCondition(LaunchConfiguration("use_rviz")),
         )
 
+        adhere_mujoco_node_action = Node(
+            package="adhere_mujoco_hardware",
+            executable="adhere_mujoco_node",
+            name="adhere_mujoco_node",
+            output="screen",
+            parameters=[robot_control_yaml, adhere_mujoco_node_parameters],
+        )
+
+        # Cascade shutdown (Phase 4.3): adhere_mujoco_node is the main simulation engine --
+        # closing its embedded MuJoCo GLFW window (or any other exit) makes it exit, which should
+        # tear down robot_state_publisher/rviz2 and the whole teleop_gcs.launch.py subtree
+        # (joy_node/xbox_teleop_node/fsm_console_node) rather than leaving them running orphaned.
+        shutdown_on_mujoco_exit = RegisterEventHandler(
+            OnProcessExit(
+                target_action=adhere_mujoco_node_action,
+                on_exit=[EmitEvent(event=Shutdown(reason="adhere_mujoco_node exited"))],
+            )
+        )
+
         return [
             Node(
                 package="robot_state_publisher",
@@ -128,13 +155,8 @@ def generate_launch_description():
                 output="screen",
                 parameters=[{"robot_description": processed}],
             ),
-            Node(
-                package="adhere_mujoco_hardware",
-                executable="adhere_mujoco_node",
-                name="adhere_mujoco_node",
-                output="screen",
-                parameters=[robot_control_yaml, adhere_mujoco_node_parameters],
-            ),
+            adhere_mujoco_node_action,
+            shutdown_on_mujoco_exit,
             rviz,
         ]
 

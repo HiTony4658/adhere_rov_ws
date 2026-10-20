@@ -983,21 +983,49 @@ void MujocoViewer::drawOverlayTelemetry(mjrRect viewport)
   const double tau_mod = bridge_->wave_tau_mod.load();
   const char * hydro_name = ui_hydro_mode_ == 1 ? "Stonefish-Mesh" : "Lumped";
 
-  // Phase 4.2: adhere-mode target pose/stage telemetry (populated from AdhereController's
-  // /rov/controller_state via adhere_mujoco_node -> MujocoVisBridge). adhere_stage_code is
-  // 0 while no adhere FSM state is active -- that row is simply omitted then, since
-  // target_x/y/z/yaw are meaningless outside an adhere state's own reference pose.
+  // Phase 4.2 (generalized Phase 4.3): target pose/stage telemetry (populated from
+  // AdhereController's /rov/controller_state via adhere_mujoco_node -> MujocoVisBridge).
+  // target_valid gates whether target_x/y/z/yaw mean anything at all (false for
+  // IDLE_PASSIVE_NONE/TELEOP_OPENLOOP_6DOF); adhere_stage_code is additionally 0 while no
+  // ADHERE_* state is active.
   const int adhere_stage_code = bridge_->adhere_stage_code.load();
   const char * adhere_stage_name =
     adhere_stage_code == 1 ? "DEPTH_ALIGN" : (adhere_stage_code == 2 ? "WALL_ADHERE" : "n/a");
   // Mirrors ControllerState.msg::current_state's int32 encoding (comment in that .msg file) --
   // a plain local UI label lookup, not a link/header dependency on adhere_controller.
   static const char * kFsmStateNames[9] = {
-    "NONE", "PASSIVE", "DEPTH_HOLD", "OPEN_LOOP", "PID_HOLD", "ADHERE_PID", "ADHERE_SMC",
-    "BASELINE_MPPI", "KAMR_MPPI"};
+    "NONE", "IDLE_PASSIVE_NONE", "HOLD_PID_DEPTH", "TELEOP_OPENLOOP_6DOF", "HOLD_PID_6DOF",
+    "ADHERE_PID_WBC", "ADHERE_SMC_WBC", "ADHERE_MPPI_BASELINE", "ADHERE_MPPI_KAMR"};
   const int fsm_code = bridge_->fsm_current_state_code.load();
   const char * fsm_state_name =
     (fsm_code >= 0 && fsm_code <= 8) ? kFsmStateNames[fsm_code] : "UNKNOWN";
+
+  // Phase 4.3: Target Pos line format is per-FSM-category, not a single universal template --
+  // IDLE_PASSIVE_NONE/TELEOP_OPENLOOP_6DOF (fsm_code 1/3) have no target at all;
+  // HOLD_PID_DEPTH (2) only controls Z; ADHERE_* (5/6/7) visually pin X to the wall plane
+  // (world X=0, matching adhere_mujoco_node.cpp's marker logic) regardless of the live
+  // standoff/approach X; HOLD_PID_6DOF (4) is the only state with a free 3D position target.
+  char target_line[128];
+  const bool target_valid = bridge_->target_valid.load();
+  const double target_x = bridge_->target_x.load();
+  const double target_y = bridge_->target_y.load();
+  const double target_z = bridge_->target_z.load();
+  const double target_yaw_deg = bridge_->target_yaw_deg.load();
+  if (!target_valid) {
+    std::snprintf(target_line, sizeof(target_line), "Target Pos: None (Passive / Open-Loop)");
+  } else if (fsm_code == 2) {
+    std::snprintf(
+      target_line, sizeof(target_line), "Target Pos: [--, --, %.3f] m (Depth: %.2f m)", target_z,
+      -target_z);
+  } else if (fsm_code >= 5 && fsm_code <= 7) {
+    std::snprintf(
+      target_line, sizeof(target_line), "Target Pos: [0.000, %.3f, %.3f] m (Yaw: 0.0 deg)",
+      target_y, target_z);
+  } else {
+    std::snprintf(
+      target_line, sizeof(target_line), "Target Pos: [%.3f, %.3f, %.3f] m (Yaw: %.1f deg)",
+      target_x, target_y, target_z, target_yaw_deg);
+  }
 
   std::snprintf(
     title, sizeof(title),
@@ -1005,21 +1033,19 @@ void MujocoViewer::drawOverlayTelemetry(mjrRect viewport)
     "Pad TL / TR / BL / BR\nPose (X Y Z)\nPose (phi theta psi)\nBody Vel (vx vy vz)\n"
     "Body AngVel (wx wy wz)\nHydro Mode\nKern Margin M_kern\nActive Pads\n"
     "Liftoff Ratio (cum.)\nCorner-Trap Ratio (cum.)\nLiftoff Events\n"
-    "Target Pos (X Y Z Yaw)\nFSM State / Adhere Stage");
+    "\nFSM State / Adhere Stage");
   std::snprintf(
     content, sizeof(content),
     "%.1f Hz (work: %.3f ms)\n%.2f s\n%s (tau=%.2fs, cycle=%.2fs)\n[%.2f, %.2f, %.2f] m/s\n"
     "%.1f / %.1f / %.1f / %.1f N\n[%.3f, %.3f, %.3f] m\n[%.1f, %.1f, %.1f] deg\n[%.3f, %.3f, %.3f] m/s\n"
     "[%.3f, %.3f, %.3f] rad/s\n%s (%d patches)\n%.3f (K_val=%.3f)\n%d / 4\n%.1f%%\n%.1f%%\n%lld\n"
-    "[%.3f, %.3f, %.3f] m (Yaw: %.1f deg)\n%s / %s",
+    "%s\n%s / %s",
     hz, work_ms, sim_t, flow_mode == 2 ? "Gust" : "Calm", tau, tau_mod, flow[0], flow[1], flow[2],
     pad_force[0], pad_force[1], pad_force[2], pad_force[3], px, py, pz, phi * 57.2958, theta * 57.2958,
     psi * 57.2958, vx, vy, vz, wx, wy, wz, hydro_name, cached_hydro_patch_count_, cached_m_kern_,
     cached_kern_val_, cached_active_pads_, cached_liftoff_ratio_ * 100.0,
     cached_corner_trap_ratio_ * 100.0, cached_liftoff_events_,
-    bridge_->adhere_target_x.load(), bridge_->adhere_target_y.load(),
-    bridge_->adhere_target_z.load(), bridge_->adhere_target_yaw_deg.load(),
-    fsm_state_name, adhere_stage_name);
+    target_line, fsm_state_name, adhere_stage_name);
 
   mjr_overlay(mjFONT_NORMAL, mjGRID_TOPLEFT, viewport, title, content, &con_);
 }
@@ -1138,13 +1164,13 @@ void MujocoViewer::renderFrame()
     scn_.ngeom++;
   }
 
-  // Phase 4.2: green target-adhesion-spot sphere on the wall, world (0, Y_target, Z_target) --
-  // only while an adhere FSM state is actually active (adhere_stage_code != 0); hidden
-  // otherwise so it never misleads during PASSIVE/DEPTH_HOLD/OPEN_LOOP/PID_HOLD/BASELINE_MPPI's
-  // free-swimming use.
-  if (bridge_->adhere_stage_code.load() != 0 && scn_.ngeom < scn_.maxgeom) {
+  // Phase 4.2 (generalized Phase 4.3): green target sphere at the active state's reference
+  // pose -- shown whenever target_valid (HOLD_PID_DEPTH/HOLD_PID_6DOF/ADHERE_*), hidden for
+  // IDLE_PASSIVE_NONE/TELEOP_OPENLOOP_6DOF. bridge_->target_x already has the ADHERE_*
+  // category's visual X=0 pin baked in by adhere_mujoco_node.cpp's subscription callback.
+  if (bridge_->target_valid.load() && scn_.ngeom < scn_.maxgeom) {
     const mjtNum target_pos[3] = {
-      0.0, bridge_->adhere_target_y.load(), bridge_->adhere_target_z.load()};
+      bridge_->target_x.load(), bridge_->target_y.load(), bridge_->target_z.load()};
     mjvGeom * g = &scn_.geoms[scn_.ngeom];
     const float rgba[4] = {0.1f, 1.0f, 0.2f, 0.9f};
     const mjtNum size[3] = {0.035, 0.0, 0.0};

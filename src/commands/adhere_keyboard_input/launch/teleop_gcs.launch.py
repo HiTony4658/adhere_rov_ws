@@ -61,7 +61,7 @@ def generate_launch_description():
         cmd=[
             "bash", "-c",
             "if command -v gnome-terminal >/dev/null 2>&1; then "
-            "gnome-terminal --title='ROV FSM Console' -- "
+            "gnome-terminal --wait --title='ROV FSM Console' -- "
             "ros2 run adhere_keyboard_input fsm_console_node; "
             "elif command -v xterm >/dev/null 2>&1; then "
             "xterm -T 'ROV FSM Console' -e "

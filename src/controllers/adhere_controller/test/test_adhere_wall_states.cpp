@@ -324,7 +324,7 @@ DisturbanceTrial runDockThenDisturb(const ModelParams & params)
 }
 
 // SMC with a deliberately TIGHT boundary layer and high switching gain (CLAUDE.md Phase 3.8
-// Stage 3.1's "ADHERE_SMC with tight boundary layer" phrasing) -- the production default
+// Stage 3.1's "ADHERE_SMC_WBC with tight boundary layer" phrasing) -- the production default
 // adhere_smc.phi=0.05 is wide enough that this discrete-time (4ms), noise-free fake plant
 // settles smoothly without crossing the switching surface every tick; tightening phi (and
 // raising k_switch so the bang-bang term still dominates once saturated) reproduces the

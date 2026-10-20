@@ -6,11 +6,12 @@
 # state was switched via keyboard or via Xbox gamepad buttons.
 std_msgs/Header header
 
-int32 current_state                      # 1=PASSIVE, 2=DEPTH_HOLD, 3=OPEN_LOOP, 4=PID_HOLD, 5=ADHERE_PID, 6=ADHERE_SMC, 7=BASELINE_MPPI, 8=KAMR_MPPI
+int32 current_state                      # 1=IDLE_PASSIVE_NONE, 2=HOLD_PID_DEPTH, 3=TELEOP_OPENLOOP_6DOF, 4=HOLD_PID_6DOF, 5=ADHERE_PID_WBC, 6=ADHERE_SMC_WBC, 7=ADHERE_MPPI_BASELINE, 8=ADHERE_MPPI_KAMR
 string state_name
 string estimation_mode                   # "ground_truth" or "sensor_fusion" (CtrlInterfaces::active_state source)
-geometry_msgs/Pose target_pose           # Active reference pose (World frame, Quaternion), meaning is per-state
-string adhere_stage                      # "" except for ADHERE_PID/ADHERE_SMC/BASELINE_MPPI: "DEPTH_ALIGN" or "WALL_ADHERE" (Phase 4.2)
+geometry_msgs/Pose target_pose           # Active reference pose (World frame, Quaternion), meaning is per-state -- only meaningful when target_valid
+bool target_valid                        # Phase 4.3: true for HOLD_PID_DEPTH/HOLD_PID_6DOF/ADHERE_*, false for IDLE_PASSIVE_NONE/TELEOP_OPENLOOP_6DOF (no setpoint)
+string adhere_stage                      # "" except for ADHERE_PID_WBC/ADHERE_SMC_WBC/ADHERE_MPPI_BASELINE: "DEPTH_ALIGN" or "WALL_ADHERE" (Phase 4.2)
 geometry_msgs/Pose estimated_pose        # Active pose used by the controller (World frame, Quaternion)
 geometry_msgs/Twist estimated_twist_body # Active body-frame linear (m/s) & angular (rad/s) velocity
 float64[4] contact_forces                # Active 4 pad normal forces [TL, TR, BL, BR] (N), estimated via A_contact*u

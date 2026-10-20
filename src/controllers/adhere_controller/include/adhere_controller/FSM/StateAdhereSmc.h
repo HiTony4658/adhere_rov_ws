@@ -43,6 +43,8 @@ public:
 
   PoseTarget targetPose() const override;
 
+  bool targetValid() const override { return true; }
+
   bool isDocked() const { return docked_; }
 
   // Phase 4.2: whether Stage 1 (DEPTH_ALIGN) has completed and Stage 2 (WALL_ADHERE) has begun.
