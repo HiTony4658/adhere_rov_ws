@@ -90,9 +90,10 @@ public:
   // overridden true by every state that returns a real targetPose().
   virtual bool targetValid() const { return false; }
 
-  // Phase 4.2 two-stage adhere sequence: "" for every state except ADHERE_PID_WBC/
-  // ADHERE_SMC_WBC/ADHERE_MPPI_BASELINE, which report "DEPTH_ALIGN" or "WALL_ADHERE" (see each
-  // state's depth_aligned_ member). Read by AdhereController to populate
+  // Phase 4.2 wall-homing/adhesion sequence (renamed/extended this phase to 3 stages): "" for
+  // every state except ADHERE_PID_WBC/ADHERE_SMC_WBC/ADHERE_MPPI_BASELINE, which report
+  // "STANDOFF_HOMING", "SOFT_DOCKING" (PID/SMC only), or "WALL_ADHERED" (see each state's
+  // standoff_homed_/docked_ members). Read by AdhereController to populate
   // ControllerState.msg::adhere_stage.
   virtual const char * adhereStageName() const { return ""; }
 

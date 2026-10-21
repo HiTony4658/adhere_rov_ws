@@ -9,10 +9,17 @@ One-line usage:
     ros2 launch adhere_keyboard_input teleop_gcs.launch.py dev:=/dev/input/js1
 """
 import os
+import subprocess
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess
+from launch.actions import (
+    DeclareLaunchArgument,
+    ExecuteProcess,
+    OpaqueFunction,
+    RegisterEventHandler,
+)
+from launch.event_handlers import OnShutdown
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -72,6 +79,34 @@ def generate_launch_description():
         output="screen",
     )
 
+    # Root-cause fix for the Ctrl+C orphan-process bug: `gnome-terminal --wait` does not run
+    # fsm_console_node as a direct child of this launch's process tree -- it D-Bus-activates the
+    # shared `gnome-terminal-server` daemon, which forks the actual `ros2 run
+    # adhere_keyboard_input fsm_console_node` (and its nested state_cmd_console_node child) under
+    # that daemon instead. `ros2 launch`'s own SIGINT/Shutdown propagation only reaches processes
+    # in its own tree (confirmed empirically: joy_node/xbox_teleop_node/the fsm_console
+    # ExecuteProcess wrapper all exit cleanly on SIGINT, but the gnome-terminal-server-spawned
+    # fsm_console_node/state_cmd_console_node processes survive, reparented to systemd --user).
+    # `pkill -f` matches the full command line, so it reaches that detached tree regardless of its
+    # real parent. This MUST be a synchronous `OpaqueFunction` (blocking `subprocess.call`), not
+    # an `ExecuteProcess` action: empirically verified that `ros2 launch`'s Ctrl-C path calls
+    # `LaunchService._shutdown(force_sync=True)`, which emits the `Shutdown` event synchronously
+    # and tears the asyncio loop down immediately after -- an `ExecuteProcess` queued from
+    # `on_shutdown` never actually gets scheduled/started in that window (confirmed with a
+    # minimal repro: a `LogInfo` in the same `on_shutdown` list fires, but a sibling
+    # `ExecuteProcess` never produces output), while a blocking call inside `OpaqueFunction` runs
+    # to completion before shutdown proceeds.
+    def _kill_orphaned_consoles(context):
+        subprocess.call(["bash", "-c",
+                          "pkill -TERM -f fsm_console_node; "
+                          "pkill -TERM -f state_cmd_console_node; "
+                          "true"])
+        return None
+
+    kill_orphaned_consoles_on_shutdown = RegisterEventHandler(
+        OnShutdown(on_shutdown=[OpaqueFunction(function=_kill_orphaned_consoles)])
+    )
+
     return LaunchDescription(
         [
             declare_dev,
@@ -80,5 +115,6 @@ def generate_launch_description():
             joy_node,
             xbox_teleop_node,
             fsm_console,
+            kill_orphaned_consoles_on_shutdown,
         ]
     )

@@ -192,6 +192,60 @@ CallbackReturn AdhereController::on_configure(const rclcpp_lifecycle::State & /*
         ci.teleop_last_rx_time_sec.store(get_node()->now().seconds());
       });
 
+  // This phase: new 5th topic, strictly scoped to live-mutating the ADHERE_* wall target
+  // (CLAUDE.md Sec.3.4 amendment) -- resolves TAG_PRESET against model_params_.adhere_wall_tags,
+  // CUSTOM_* against the message's own fields, USE_CURRENT against the live active_state
+  // estimate, and writes the result into ctrl_interfaces_.adhere_target_ for every ADHERE_*
+  // FSMState to read lock-free.
+  adhere_target_command_subscription_ =
+    get_node()->create_subscription<adhere_control_msgs::msg::AdhereTargetCommand>(
+      "/rov/adhere_target_cmd", 10,
+      [this](const adhere_control_msgs::msg::AdhereTargetCommand::SharedPtr msg) {
+        // USE_CURRENT needs ActiveState, which is only ever safely read on the 500Hz thread
+        // (CLAUDE.md Phase 3.5's ground-truth isolation discipline) -- deferred to
+        // AdhereController::update() via use_current_requested/command_seq instead of resolved
+        // here. TAG_PRESET/CUSTOM_* are pure lookups against model_params_/the message itself,
+        // so they can be (and are) resolved immediately on this executor thread.
+        if (msg->command_type == adhere_control_msgs::msg::AdhereTargetCommand::USE_CURRENT) {
+          ctrl_interfaces_.adhere_target_.use_current_requested.store(true);
+          ctrl_interfaces_.adhere_target_.command_seq.fetch_add(1);
+          return;
+        }
+        double new_y = last_adhere_target_y_;
+        double new_depth_m = last_adhere_target_depth_m_;
+        switch (msg->command_type) {
+          case adhere_control_msgs::msg::AdhereTargetCommand::TAG_PRESET:
+            if (msg->tag_id < model_params_.adhere_wall_tags.size()) {
+              new_y = model_params_.adhere_wall_tags[msg->tag_id].y;
+              new_depth_m = model_params_.adhere_wall_tags[msg->tag_id].depth_m;
+            }
+            break;
+          case adhere_control_msgs::msg::AdhereTargetCommand::CUSTOM_Y:
+            new_y = msg->target_y;
+            break;
+          case adhere_control_msgs::msg::AdhereTargetCommand::CUSTOM_DEPTH:
+            new_depth_m = msg->target_depth_m;
+            break;
+          case adhere_control_msgs::msg::AdhereTargetCommand::CUSTOM_Y_DEPTH:
+            new_y = msg->target_y;
+            new_depth_m = msg->target_depth_m;
+            break;
+          default:
+            return;
+        }
+        const bool crossed_threshold =
+          std::abs(new_y - last_adhere_target_y_) > model_params_.adhere_stage.retarget_threshold ||
+          std::abs(new_depth_m - last_adhere_target_depth_m_) >
+            model_params_.adhere_stage.retarget_threshold;
+        ctrl_interfaces_.adhere_target_.target_y.store(new_y);
+        ctrl_interfaces_.adhere_target_.target_depth_m.store(new_depth_m);
+        if (crossed_threshold) {
+          ctrl_interfaces_.adhere_target_.changed_pending.store(true);
+        }
+        last_adhere_target_y_ = new_y;
+        last_adhere_target_depth_m_ = new_depth_m;
+      });
+
   controller_state_publisher_ = get_node()->create_publisher<adhere_control_msgs::msg::ControllerState>(
     "/rov/controller_state", 10);
 
@@ -320,6 +374,16 @@ CallbackReturn AdhereController::on_activate(const rclcpp_lifecycle::State & /*p
   // Phase 4.1: one-time GPU buffer allocation for the Baseline MPPI engine, same lifecycle point
   // as the A_contact/C_kern precompute above (on_activate(), using the SAME B/B^dagger).
   baseline_mppi_.init(model_params_, b_, b_pinv_, baseline_mppi_config_);
+
+  // This phase: seed the live wall-target bridge from the static config default --
+  // /rov/adhere_target_cmd (subscribed in on_configure()) only ever mutates it from here
+  // onward, so behavior is unchanged from Phase 4.3 until the first live command arrives.
+  ctrl_interfaces_.adhere_target_.target_y.store(model_params_.adhere_stage.target_y);
+  ctrl_interfaces_.adhere_target_.target_depth_m.store(model_params_.adhere_stage.target_depth_m);
+  ctrl_interfaces_.adhere_target_.valid.store(true);
+  ctrl_interfaces_.adhere_target_.changed_pending.store(false);
+  last_adhere_target_y_ = model_params_.adhere_stage.target_y;
+  last_adhere_target_depth_m_ = model_params_.adhere_stage.target_depth_m;
 
   // Async outer-loop worker skeleton (CLAUDE.md Phase 3.6 Stage 2.2): started here so a
   // deactivate/reactivate cycle always gets a fresh thread, joined in on_deactivate() below.
@@ -524,6 +588,31 @@ controller_interface::return_type AdhereController::update()
     for (size_t i = 0; i < kPadNames.size(); ++i) {
       ctrl_interfaces_.active_state.pad_force[i] = gt_pad_contact_state_interface_[i].get().get_value();
       ctrl_interfaces_.active_state.v_sep[i] = gt_pad_contact_state_interface_[4 + i].get().get_value();
+    }
+  }
+
+  // This phase: resolve a deferred USE_CURRENT wall-retarget request now that active_state is
+  // fresh for this tick (see AdhereTargetState's doc comment for why this can't be resolved on
+  // the executor thread).
+  {
+    const uint64_t seq = ctrl_interfaces_.adhere_target_.command_seq.load();
+    if (seq != last_adhere_command_seq_processed_ &&
+        ctrl_interfaces_.adhere_target_.use_current_requested.load())
+    {
+      const double new_y = ctrl_interfaces_.active_state.pos_w[1];
+      const double new_depth_m = -ctrl_interfaces_.active_state.pos_w[2];
+      const bool crossed_threshold =
+        std::abs(new_y - ctrl_interfaces_.adhere_target_.target_y.load()) >
+          model_params_.adhere_stage.retarget_threshold ||
+        std::abs(new_depth_m - ctrl_interfaces_.adhere_target_.target_depth_m.load()) >
+          model_params_.adhere_stage.retarget_threshold;
+      ctrl_interfaces_.adhere_target_.target_y.store(new_y);
+      ctrl_interfaces_.adhere_target_.target_depth_m.store(new_depth_m);
+      if (crossed_threshold) {
+        ctrl_interfaces_.adhere_target_.changed_pending.store(true);
+      }
+      ctrl_interfaces_.adhere_target_.use_current_requested.store(false);
+      last_adhere_command_seq_processed_ = seq;
     }
   }
 

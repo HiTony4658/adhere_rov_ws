@@ -54,12 +54,13 @@ struct ModelParams
 
   // Phase 3.8 wall-adhesion PID baseline (algorithms::pid::AdherePidController +
   // FSM::StateAdherePid): kp_pos/ki_pos/kd_vel/kp_att/ki_att/kd_att drive the X/Y/Z/attitude loop
-  // (via the shared SixDofPidController) in both APPROACH and ADHERED phases; the X component of
-  // kp_pos/ki_pos/kd_vel is exercised only during APPROACH in practice (ADHERED phase re-latches
-  // p_d_world_.x every tick so the position loop's X contribution stays ~0 there, and the
-  // dedicated force PI law below drives Fx instead) -- Z is actively regulated throughout (Phase
-  // 3.4's DEPTH_ALIGN stage requires it to converge to adhere_target_depth_m before WALL_ADHERE
-  // begins). approach_speed/dock_force_thresh/x_wall/x_dock_eps gate the APPROACH->ADHERED
+  // (via the shared SixDofPidController) in both SOFT_DOCKING and WALL_ADHERED phases; the X
+  // component of kp_pos/ki_pos/kd_vel is exercised only during SOFT_DOCKING in practice
+  // (WALL_ADHERED phase re-latches p_d_world_.x every tick so the position loop's X contribution
+  // stays ~0 there, and the dedicated force PI law below drives Fx instead) -- Y/Z are actively
+  // regulated throughout (the STANDOFF_HOMING stage requires both to converge to the live
+  // adhere_target_y/adhere_target_depth_m before SOFT_DOCKING/WALL_ADHERED begins).
+  // approach_speed/dock_force_thresh/x_wall/x_dock_eps gate the SOFT_DOCKING->WALL_ADHERED
   // transition; kp_force/ki_force/kd_x/f_preload/f_des/integral_force_max are
   // AdherePidController's own wall-normal force-regulation gains (see its header for the sign
   // convention: positive magnitudes here, the minus sign that turns them into a pressing -- not
@@ -98,6 +99,12 @@ struct ModelParams
     Vec6 kd = (Vec6() << 80.0, 80.0, 80.0, 20.0, 20.0, 20.0).finished();
     Vec6 k_switch = (Vec6() << 40.0, 40.0, 40.0, 10.0, 10.0, 10.0).finished();
     Vec6 phi = (Vec6() << 0.05, 0.05, 0.05, 0.05, 0.05, 0.05).finished();
+    // This phase: bounded integral-sliding-mode augmentation (s = e_nu + lambda*e_eta +
+    // ki*int(e_eta)dt), added because a pure P+switching surface has nothing to "ratchet up"
+    // against static Coulomb pad friction once wall preload is pressing -- defaults to all-zero
+    // so any other future SMC consumer is unaffected; only adhere_smc.ki in robot_control.yaml
+    // sets the Y/Z components nonzero.
+    Vec6 ki = (Vec6() << 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).finished();
     std::array<double, 6> max_teleop_vel = {0.25, 0.25, 0.25, 0.4, 0.4, 0.6};
     double max_tilt_deg = 30.0;
     double approach_speed = 0.15;
@@ -107,24 +114,46 @@ struct ModelParams
     double wall_preload_fx = 30.0;       // N magnitude; applied as -wall_preload_fx wrench
   };
 
-  // Phase 4.2 two-stage adhere sequence, shared by ADHERE_PID_WBC/ADHERE_SMC_WBC/ADHERE_MPPI_BASELINE: on
-  // entry, each first stabilizes depth/lateral position at a safe standoff distance from the
-  // wall (DEPTH_ALIGN) before approaching/adhering (WALL_ADHERE). Deliberately a single shared
+  // Phase 4.2 wall-homing/adhesion sequence (renamed/extended this phase to 3 stages), shared by
+  // ADHERE_PID_WBC/ADHERE_SMC_WBC/ADHERE_MPPI_BASELINE: on entry, each first stabilizes BOTH
+  // lateral and depth position at a safe standoff distance from the wall (STANDOFF_HOMING)
+  // before approaching (SOFT_DOCKING) and adhering (WALL_ADHERED). Deliberately a single shared
   // block (not duplicated per-algorithm like AdherePidGains/AdhereSmcGains) -- the point is one
   // zero-recompile target depth/standoff shared by all three baselines.
   struct AdhereStageParams
   {
     double target_depth_m = 1.0;  // m, Z_target = -target_depth_m
     double target_y = 0.0;        // m, world Y
-    double standoff_x = 0.35;     // m, DEPTH_ALIGN holds this far from the wall plane (X=0)
-    double depth_tol = 0.05;      // m, |z - Z_target| gate for DEPTH_ALIGN -> WALL_ADHERE
-    double vz_tol = 0.05;         // m/s, |v_z| gate for DEPTH_ALIGN -> WALL_ADHERE
+    double standoff_x = 0.35;     // m, STANDOFF_HOMING holds this far from the wall plane (X=0)
+    // This phase: STANDOFF_HOMING -> SOFT_DOCKING gate tightened from Z-only to Y+Z+planar-speed
+    // (previously named DEPTH_ALIGN -> WALL_ADHERE and gated on Z alone -- renamed/extended so
+    // lateral homing completes at a friction-free standoff distance *before* any wall preload
+    // engages, instead of relying on the Y-PID/SMC surface to fight Coulomb pad friction after
+    // docking).
+    double depth_tol = 0.03;      // m, |z - Z_target| gate for STANDOFF_HOMING -> SOFT_DOCKING
+    double y_tol = 0.03;          // m, |y - Y_target| gate for STANDOFF_HOMING -> SOFT_DOCKING
+    double vz_tol = 0.05;         // m/s, |v_z| gate (legacy name, kept for Vz-only consumers)
+    double vel_tol = 0.04;        // m/s, sqrt(vy^2+vz^2) planar-speed gate for STANDOFF_HOMING
     // Phase 4.3 soft-landing approach damping: ADHERE_PID_WBC/ADHERE_SMC_WBC subtract
-    // approach_vx_damp*max(0, v_x,body) from the commanded Fx during the pre-dock APPROACH
-    // ramp (WALL_ADHERE, !docked_) so the ROV decelerates into the wall instead of impacting at
-    // the ramp's constant approach_speed. Not applied once docked_ (the force PI/SMC preload
-    // law owns Fx from then on).
+    // approach_vx_damp*max(0, v_x,body) from the commanded Fx during the pre-dock SOFT_DOCKING
+    // ramp (!docked_) so the ROV decelerates into the wall instead of impacting at the ramp's
+    // constant approach_speed. Not applied once docked_ (the force PI/SMC preload law owns Fx
+    // from then on).
     double approach_vx_damp = 80.0;  // N/(m/s)
+    // This phase: 0.06m auto-detach threshold -- if the live wall target moves by more than this
+    // on either Y or Z while docked, the ADHERE_* state re-enters STANDOFF_HOMING instead of
+    // dragging itself sideways/vertically while still pressed against the wall.
+    double retarget_threshold = 0.06;  // m
+  };
+
+  // This phase: wall QR-code/AprilTag preset table (robot_control.yaml's adhere_wall_tags_y /
+  // adhere_wall_tags_depth_m parallel flat arrays, zipped by index -- ROS parameters have no
+  // array-of-struct type). Resolved by AdhereController's /rov/adhere_target_cmd subscription
+  // callback when command_type == TAG_PRESET.
+  struct AdhereWallTag
+  {
+    double y = 0.0;
+    double depth_m = 1.0;
   };
 
   // Phase 3.5 sensor mounting lever arms (body frame, relative to CoM), used by
@@ -206,6 +235,10 @@ struct ModelParams
   AdherePidGains adhere_pid;
   AdhereSmcGains adhere_smc;
   AdhereStageParams adhere_stage;
+  // Defaults match this phase's task spec: Tag0 (0,-1.0), Tag1 (+0.8,-1.0), Tag2 (-0.8,-1.5),
+  // Tag3 (+1.2,-2.0).
+  std::vector<AdhereWallTag> adhere_wall_tags = {
+    {0.00, 1.00}, {0.80, 1.00}, {-0.80, 1.50}, {1.20, 2.00}};
   SensorMount sensor_mount;
   DynamicsParams dynamics;
 

@@ -14,10 +14,10 @@ FSM 状态切换命令、状态内数值设定点、Xbox 手柄连续遥操作�
 
 ## 已实现的接口
 
-### 消息（`msg/`）：5 话题解耦契约（CLAUDE.md Phase 3.2，四元数化 + 实时诊断于 Phase 3.6）
+### 消息（`msg/`）：6 话题解耦契约（CLAUDE.md Phase 3.2，四元数化 + 实时诊断于 Phase 3.6，贴壁目标实时重定向于本阶段新增）
 
-状态切换、状态内离散设定点、连续手柄遥操作、控制器反馈、实时诊断是 5 个
-正交关注点，分别对应 5 个独立话题，互不混用：
+状态切换、状态内离散设定点、连续手柄遥操作、控制器反馈、实时诊断、贴壁目标
+实时重定向是 6 个正交关注点，分别对应 6 个独立话题，互不混用：
 
 | 文件 | 话题 / 发布方 | 字段摘要 | 用途 |
 |---|---|---|---|
@@ -26,6 +26,7 @@ FSM 状态切换命令、状态内数值设定点、Xbox 手柄连续遥操作�
 | `TeleopCommand.msg` | `/rov/teleop_cmd`，`xbox_teleop_node`，50Hz | `geometry_msgs/Vector3 linear`（surge/sway/heave）; `geometry_msgs/Vector3 angular`（roll_rate=RT/RB, pitch_rate=LT/LB, yaw_rate），均归一化至 `[-1,1]`; `bool active` | Xbox 手柄连续遥操作指令，被 `StateOpenLoop`/`StatePidHold`/`StateDepthHold`/`StateAdherePid`/`StateAdhereSmc` 消费；`AdhereController` 对其施加 `0.25s` 失联看门狗；Phase 3.6 由 6 个裸标量重构为 2 个 `Vector3` |
 | `ControllerState.msg` | `/rov/controller_state`，`AdhereController`，外环速率（替代 Phase 3.6 删除的 `FsmState.msg`） | `int32 current_state`; `string state_name`; `string estimation_mode`; `geometry_msgs/Pose target_pose`; `bool target_valid`（Phase 4.3，`HOLD_PID_DEPTH`/`HOLD_PID_6DOF`/`ADHERE_*` 为 `true`）; `geometry_msgs/Pose estimated_pose`; `geometry_msgs/Twist estimated_twist_body`; `float64[4] contact_forces`; `float64[8] thruster_cmds`; `float64 thrust_l2_norm`; `float64 thrust_power_proxy`; `float64 thrust_slew_rate_l2`; `float64 cumulative_energy_l2`; `float64 cumulative_impulse_l1`; `uint8 saturated_thruster_count`; `uint8 active_contact_pad_count`; `float64 kern_margin` | 控制器实时反馈，供 `fsm_console_node`/`state_cmd_console_node`/`rt_monitor_node`/`benchmark_evaluator_node` 消费；**100% Sim-to-Real 纯净**——不含任何地面真值字段（地面真值改由 `adhere_mujoco_node` 单独发布在 `/rov/ground_truth_odom`），姿态全部用四元数表示；Phase 3.8 新增 7 个效率/啁啾/安全遥测字段 |
 | `RuntimeDiagnostics.msg` | `/rov/runtime_diagnostics`，`AdhereController`，固定 10Hz（Phase 3.6 新增） | 9 路频率（Hz）+ 执行延迟/预算（ms）+ 超时计数 + `bool timing_healthy` | 实时频率/延迟可观测性，驱动 `/rov/diagnostics_hud_marker` RViz2 HUD 与 `rt_monitor_node` 实时终端表格 |
+| `AdhereTargetCommand.msg` | `/rov/adhere_target_cmd`，`state_cmd_console_node`（本阶段新增） | `uint8 command_type`（`1=TAG_PRESET, 2=CUSTOM_Y, 3=CUSTOM_DEPTH, 4=CUSTOM_Y_DEPTH, 5=USE_CURRENT`）; `uint8 tag_id`; `float64 target_y`; `float64 target_depth_m` | **仅**用于实时改写 `ADHERE_PID_WBC`/`ADHERE_SMC_WBC`/`ADHERE_MPPI_BASELINE` 共享的贴壁目标（墙面 QR 码/AprilTag 预设或自定义 Y/深度），与 `SetpointCommand` 正交——不携带通用 6-DOF 位姿，也不触发状态切换；`AdhereController` 据此写入 `CtrlInterfaces::adhere_target_`（三个贴壁状态唯一的实时目标来源），变化超过 `adhere_retarget_threshold`（`0.06m`）时强制重新进入 `STANDOFF_HOMING` |
 
 ## 规划中的接口列表（后续阶段实现）
 
@@ -41,7 +42,7 @@ FSM 状态切换命令、状态内数值设定点、Xbox 手柄连续遥操作�
 
 `CMakeLists.txt` 的 `rosidl_generate_interfaces(${PROJECT_NAME} "msg/FsmCommand.msg"
 "msg/SetpointCommand.msg" "msg/TeleopCommand.msg" "msg/ControllerState.msg"
-"msg/RuntimeDiagnostics.msg" DEPENDENCIES std_msgs geometry_msgs)`
+"msg/RuntimeDiagnostics.msg" "msg/AdhereTargetCommand.msg" DEPENDENCIES std_msgs geometry_msgs)`
 生成对应的 `adhere_control_msgs/msg/*.hpp`。其余 `.msg`/`.srv` 文件待后续阶段按上表
 实现后追加到该调用的文件列表中。
 

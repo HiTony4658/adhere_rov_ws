@@ -58,7 +58,7 @@ public:
   double lastSolveMs() const { return solve_profiler_.latestExecMs(); }
 
   // Phase 4.2: exposes the algorithm-scoped wall plane X (BaselineMppiConfig::x_wall) so
-  // StateBaselineMppi can compute its DEPTH_ALIGN standoff target without StateBaselineMppi
+  // StateBaselineMppi can compute its STANDOFF_HOMING standoff target without StateBaselineMppi
   // reaching into config_ directly or this algorithm's config being duplicated onto ModelParams.
   double xWall() const { return config_.x_wall; }
 

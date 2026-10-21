@@ -2536,3 +2536,143 @@ mujoco.launch.py headless:=true use_rviz:=false` 在 `adhere_controller`
 排查），因此本阶段的终端自动关闭/`target_valid`/贴壁调参改动只经过了
 gtest 套件验证，未经真实 MuJoCo 闭环烟雾测试复核，这点需要在下一次会话
 优先补上。
+
+## Phase 4.5（2026-10-20）：Ctrl+C 孤儿进程根因修复 + 三阶段贴壁定位序列 + 墙面 QR 码实时重定向 + Y 向防摩擦卡死修复
+
+### 动机
+
+本阶段收到的任务报告两个问题：① `ADHERE_PID_WBC`/`ADHERE_SMC_WBC`/`ADHERE_MPPI_BASELINE`
+贴壁后会被卡在触墙瞬间的 Y 坐标，而不是收敛到目标 Y；② `Ctrl+C` 无法干净关闭所有衍生进程。
+任务文本本身使用了 Phase 3.8 之前的旧 FSM 编号（`ADHERE_MPPI_BASELINE=6`），且假设 Y 卡死是
+`target_y` 被硬编码为 `0.0` 导致——排查确认这两点都不对：当前代码 `ADHERE_PID_WBC=5,
+ADHERE_SMC_WBC=6, ADHERE_MPPI_BASELINE=7`（Phase 3.8 起生效），且 `target_y`/`target_z`
+早已正确贯穿三个贴壁状态，从未硬编码为 `0`。用户确认：① Ctrl+C 问题仍在真实复现（`ps aux`
+显示多个存活 2 天以上的孤儿 `xbox_teleop_node`/`joy_node`），需要真正修复而非仅复核 Phase 4.3
+既有方案；② `ADHERE_SMC_WBC` 应与另外两个贴壁基线同等对待；③ 墙面目标实时重定向改用全新
+专属话题/消息（而非复用 `/rov/setpoint_cmd`），作为对 CLAUDE.md 第 3.4 节"4 话题正交契约"
+的一次刻意、文档化的修订。
+
+### Ctrl+C 孤儿进程根因与修复
+
+现场复现（`ros2 launch adhere_keyboard_input teleop_gcs.launch.py` 后 `kill -INT`）确认：
+`joy_node`/`xbox_teleop_node`/`fsm_console` 的 `ExecuteProcess` 包装器都能被 `ros2 launch`
+的 SIGINT 传播正常终止，但 `gnome-terminal --wait` 派生出的整条进程树（`gnome-terminal.real`、
+`ros2 run fsm_console_node`、`fsm_console_node` 本体）全部存活，被重新挂到 `systemd --user`
+下——根因是 `gnome-terminal --wait` 并不把真正执行的命令作为 `ros2 launch` 自身进程树的
+直接子进程，而是通过 D-Bus 激活共享的 `gnome-terminal-server` 守护进程来派生，`ros2 launch`
+的 SIGINT/`Shutdown` 事件传播完全触及不到那条独立的进程树。Phase 4.3 为 `fsm_console_node`/
+`state_cmd_console_node` 添加的信号处理器/看门狗线程/`prctl(PR_SET_PDEATHSIG)` 只在这些
+进程**直接**收到信号时才生效，对这个根因完全无效。
+
+修复：`teleop_gcs.launch.py` 新增一个 `OnShutdown` 事件处理器，执行
+`pkill -TERM -f fsm_console_node`/`state_cmd_console_node`（`pkill -f` 按完整命令行匹配，
+无论真实父进程是谁都能命中）。关键实现细节（现场验证发现）：这个清理动作**必须**是同步的
+`OpaqueFunction`（内部调用阻塞的 `subprocess.call`），不能用 `ExecuteProcess`——实测确认
+ROS 2 Foxy 的 `LaunchService._shutdown(force_sync=True)`（Ctrl-C 路径）同步发出 `Shutdown`
+事件后立即着手拆除 asyncio 事件循环，一个在 `on_shutdown` 回调里才入队的 `ExecuteProcess`
+根本没有机会被调度/启动（用一个仅含 `LogInfo`+`ExecuteProcess` 的最小复现脚本验证：
+`LogInfo` 的日志正常打出，但 `ExecuteProcess` 从未产生任何输出），而 `OpaqueFunction` 里的
+阻塞调用能在关闭流程继续之前完整跑完。修复后验证：全新 `teleop_gcs.launch.py` 启动 + 发送
+`SIGINT`，`joy_node`/`xbox_teleop_node`/`gnome-terminal`/`fsm_console_node` 全部在 6 秒观察
+窗口内干净退出，`ps aux` 零残留，无论作为独立 `ros2 launch` 运行还是被 `mujoco.launch.py`
+通过 `IncludeLaunchDescription` 内含运行均生效。
+
+排查过程中额外确认（而非引入）：会话开始时 `ps aux` 已有数个存活 1-6 天的孤儿
+`xbox_teleop_node`/`joy_node`/`robot_state_publisher`（本阶段开工前已手动清理），且
+`mujoco.launch.py` 的 `adhere_controller` `on_configure()` 挂起问题**仍然**复现（3 次独立
+复现，均卡在打印 `"Configuring controller 'adhere_controller'"` 之后，70 秒以上无进展）——
+确认排除了 Phase 4.3 猜测的 CUDA/GPU 上下文初始化原因（挂起点在 `on_activate()` 之前，
+`BaselineMppiController::init()` 根本还未被调用），也排除了内存里记录的
+`switch_controller()`-早于-`update()`-线程-启动经典死锁（`adhere_mujoco_node.cpp` 的
+`load_controller`/`configure_controller`/`switch_controller` 调用顺序已经是正确的）。
+真实根因本阶段未能在时间盒内定位——**遗留给下一阶段单独排查**（下一步可尝试：本工作站
+`ptrace_scope=1` 导致 `gdb -p <pid>` 无 root 权限不可用，需要 `sudo`，或改用启动时就
+attach 的 `strace -f`/`/proc/<pid>/task/*/stack`）。这直接导致本阶段的三阶段贴壁序列/
+实时重定向改动未能跑通真实 MuJoCo 闭环烟雾测试，只经过 gtest 套件验证，与 Phase 4.3 同样
+的诚实披露标准。
+
+### Y 向卡死 bug 的真实根因（不是硬编码）
+
+逐状态排查确认 `target_y_`/`target_z_` 早已正确贯穿 `StateAdherePid`/`StateAdhereSmc`/
+`StateBaselineMppi`。真实根因：Phase 4.3 把贴壁压力目标 `f_des`/`wall_preload_fx`/
+`preload_fx` 从 `30N`/`100N` 统一提高到 `120N` 后，库仑摩擦力随之增大，而：① `StateAdherePid`
+的 `AdherePidController` 是纯 Fx 力环，Y 向完全依赖 `SixDofPidController` 的 Y-PID 单独对抗
+摩擦力，原 `ki_pos.y=10.0` 在新摩擦量级下权限不足；② `SixDofSmcController` 的滑模面原本
+**完全没有积分项**（只有比例 `lambda` + 开关 `k_switch`），静止卡死时速度误差 `e_nu≈0`，
+开关项一旦饱和就不会随时间继续增大，没有任何机制能"攒力"压过静摩擦——这是三个基线里最
+严重的一个；③ 旧的两阶段门限（`DEPTH_ALIGN`）只检查深度收敛就允许压墙，若此时 Y 还未收敛，
+贴壁后就只能靠上述（权限不足的）Y 向控制对抗摩擦，而不是从一开始就避免压墙前 Y 未收敛的
+情况。
+
+### 三阶段贴壁定位序列：`STANDOFF_HOMING` → `SOFT_DOCKING` → `WALL_ADHERED`
+
+重命名/扩展 Phase 4.2 的两阶段 `DEPTH_ALIGN`/`WALL_ADHERE`（数值 ID 不变，仅字符串/门限
+扩展）。`ModelParams::AdhereStageParams` 新增 `y_tol`（`0.03m`）/`vel_tol`（`0.04m`，
+`sqrt(vy^2+vz^2)` 平面速度门限）/`retarget_threshold`（`0.06m`，见下）；`depth_tol` 默认从
+`0.05m` 收紧到 `0.03m`。三个贴壁状态的 `depth_aligned_` 粘滞标志改名为 `standoff_homed_`，
+门限从"仅深度"扩展为"**Y 与深度与平面速度三者同时**收敛"——这是本 bug 的直接结构性修复：
+压墙在结构上不可能发生在 Y 尚未收敛之前，与摩擦力大小/控制器权限无关。
+`FSMState::adhereStageName()` 现报告三段字符串：`"STANDOFF_HOMING"`（`!standoff_homed_`）、
+`"SOFT_DOCKING"`（`standoff_homed_ && !docked_`，仅 PID/SMC——MPPI 没有独立 `docked_` 子
+状态机，只报告 `STANDOFF_HOMING`/`WALL_ADHERED` 两种）、`"WALL_ADHERED"`（`docked_`）；
+`adhere_mujoco_hardware`（`adhere_mujoco_node.cpp`/`mujoco_viewer.cpp`/
+`mujoco_vis_bridge.hpp`）相应把贴壁阶段编码从 `0..2` 扩展为 `0..3` 并更新字符串映射表。
+
+`SixDofSmcController` 新增有界积分滑模项：滑模面 `s = e_nu + Lambda⊙e_eta + Ki⊙∫e_eta dt`
+（新增 `Gains::ki`，默认全零不影响任何其它潜在用户，`adhere_smc.ki` 只在 Y/Z 设为非零），
+`integral_e_eta_` 按固定设计常量 `kIntegralEtaClamp=2.0` 逐轴钳位防积分饱和；
+`computeWrench()` 相应从 `const` 方法改为非 `const` 并新增 `dt` 参数，`resetIntegrator()`
+纳入 `StateAdhereSmc::enter()`。`adhere_pid.ki_pos`/`adhere_smc.ki` 的 YAML 调参：
+`ki_pos.y/z: 10.0→15.0/20.0`（非对称），`adhere_smc.ki: [0,15,20,0,0,0]`。
+
+### 墙面 QR 码/AprilTag 预设与实时重定向：新话题 `/rov/adhere_target_cmd`
+
+新增 `adhere_control_msgs/msg/AdhereTargetCommand.msg`（第 6 个正交话题，`adhere_control_msgs`
+的"4 话题契约"经 Phase 3.6 扩到 5、本阶段扩到 6，CLAUDE.md 第 9 节同步记录这一刻意修订）：
+`command_type`（`1=TAG_PRESET, 2=CUSTOM_Y, 3=CUSTOM_DEPTH, 4=CUSTOM_Y_DEPTH, 5=USE_CURRENT`）
++ `tag_id` + `target_y`/`target_depth_m`。`ModelParams` 新增
+`std::vector<AdhereWallTag> adhere_wall_tags`（4 个默认预设，由 `robot_control.yaml` 的并行
+扁平数组 `adhere_wall_tags_y`/`adhere_wall_tags_depth_m` 驱动，ROS 参数没有结构体数组类型）。
+
+`CtrlInterfaces` 新增 `AdhereTargetState adhere_target_`（与既有 `OuterLoopCommand` 同款
+无锁 `std::atomic` 桥接模式）：`target_y`/`target_depth_m`/`valid`/`changed_pending`，加上
+`use_current_requested`/`command_seq` 两个专门处理 `USE_CURRENT` 的字段——`USE_CURRENT`
+需要读 `ActiveState`，而 `ActiveState` 按 Phase 3.5 的地面真值隔离纪律只能在 500Hz 线程上
+安全读取，因此 `AdhereController`'s 新 `/rov/adhere_target_cmd` 订阅回调（ROS 执行器线程）
+只对 `TAG_PRESET`/`CUSTOM_*`（纯查表/纯读消息字段，无需跨线程状态）立即解析，`USE_CURRENT`
+则仅记录请求+递增 `command_seq`，真正的 `ActiveState` 读取延后到 `AdhereController::
+update()` 的 500Hz 线程本体执行。`on_activate()` 用 `ModelParams::adhere_stage` 的初值
+种一次 `adhere_target_`，此后行为由该实时桥接唯一决定。三个贴壁 `FSMState::run()` 均改为
+读取 `ctrl_interfaces_.adhere_target_` 而非静态的 `model_params_.adhere_stage.target_y/
+target_depth_m`；每拍若检测到 `changed_pending`，立即把 `standoff_homed_`/`docked_` 清零
+并消费该标志，强制重新进入 `STANDOFF_HOMING`，门限用 `adhere_stage.retarget_threshold`
+（`0.06m`）。
+
+`state_cmd_console_node` 在既有 `mode:=5/6/7` 的 `z/y/x/roll/pitch/yaw/all/reset/h` 语法
+之外新增 `tag <0..3>`/`target y <val>`/`target d <depth>`/`target y <val> d <depth>`/
+`target here` 命令，发布到新话题。刻意用 `tag`/`target` 前缀而非裸的 `y`/`d`——裸
+`y <val>`/`z <val>` 在贴壁后仍保留既有"沿墙滑动设定点"功能（经由 `/rov/setpoint_cmd` 的
+`MODE_FULL_POSE`），与"改写贴壁定位目标"是两个不同的既有/新增功能，用不同命令前缀避免语义
+冲突。手柄摇杆微调目标的功能本阶段按计划推迟（非阻塞项）。
+
+### gtest 覆盖
+
+`test_adhere_wall_states.cpp`/`test_baseline_mppi.cpp` 均新增两类测试（PID/SMC/MPPI 三个
+状态各一份）：①`...HomesLateralBeforeDocking.../...HomesLateralBeforeTargetingWallPlane...`——
+从 `Y=0.75m` 大偏置起步，断言 `standoff_homed_`/`docked_` 首次变 `true` 的那一拍 Y 已经在
+容差内（而不是"最终"收敛），是本 bug 的直接回归测试；②`...ReHomesOnLiveTargetChange`——贴壁
+后直接写入 `ci.adhere_target_` 模拟一次 `tag 2` 到达，断言立即退出贴壁态并最终收敛到新目标。
+两个文件里所有直接构造 `CtrlInterfaces`/`ModelParams` 的既有测试都补上了 `adhere_target_`
+的显式种子赋值（此前隐式依赖 `ModelParams::adhere_stage` 默认值与 `AdhereTargetState` 的
+编译期默认值恰好相同这一偶然事实）。
+
+### 验证结果
+
+`export PATH=/usr/bin:/usr/local/cuda/bin:$PATH && colcon build --symlink-install`（5 个包）
+零警告零错误。`colcon test`：全部 11 个 gtest 可执行文件（含本阶段新增的 4 个用例）共 88 个
+gtest 用例 0 失败，零回归；lint 失败（copyright/cppcheck/cpplint/uncrustify，共 572 项测试
+中 370 项失败）逐一核对确认与既有基线完全一致（例如 copyright 的 56 项失败覆盖
+`adhere_controller` 包内**全部** `.h`/`.cpp` 文件，包括本阶段完全未触碰的 `StatePassive.cpp`/
+`test_thruster_allocator.cpp` 等——确认是 Phase 2.14 起已记录的全仓库缺版权头基线，未引入
+任何新增 lint 回归）。真实 MuJoCo 闭环烟雾测试：如上文所述，受 `on_configure()` 挂起阻塞
+未能完成，仅 `teleop_gcs.launch.py` 独立 Ctrl+C 清理验证通过（见上文）。

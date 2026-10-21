@@ -122,6 +122,28 @@ Current Depth: 2.000 m (Z = -2.000 m)   |   Target Depth: 2.500 m (Z = -2.500 m)
 `pitch`/`yaw` 意外清零。`reset` 发送 `MODE_LEVEL_ATTITUDE`（服务端用自己的
 实时目标重新计算，不依赖本地回填值）。
 
+### `mode:=5|6|7`（`ADHERE_*`）专属的墙面目标实时重定向命令（本阶段新增）
+
+`mode:=5/6/7` 在上述 `z/y/x/roll/pitch/yaw/all/reset/h` 语法之外，额外提供
+发布在新话题 `/rov/adhere_target_cmd`（`AdhereTargetCommand.msg`）上的三类
+命令（刻意用 `tag`/`target` 前缀，不与上面裸的 `y`/`z`——那两个仍然是贴壁
+后沿墙滑动设定点的既有功能——冲突）：
+
+```text
+'tag <0..3>'                       # 墙面 QR 码/AprilTag 预设（对应 robot_control.yaml 的
+                                    # adhere_wall_tags_y/adhere_wall_tags_depth_m）
+'target y <val>'                   # 只改贴壁目标 Y，深度不变
+'target d <depth>'                 # 只改贴壁目标深度，Y 不变
+'target y <val> d <depth>'         # 同时改 Y 与深度
+'target here'                      # 用 ROV 当前 Y/深度作为新目标
+```
+
+服务端（`AdhereController`）据此解析出新目标，写入三个贴壁状态共享的
+`CtrlInterfaces::adhere_target_`；若新目标与当前目标的 Y 或深度差超过
+`adhere_retarget_threshold`（`robot_control.yaml`，默认 `0.06m`），即使已经
+贴壁也会强制退回 `STANDOFF_HOMING` 重新定位，而不是带着压墙力横向/纵向
+拖动 ROV。
+
 ```bash
 ros2 run adhere_keyboard_input state_cmd_console_node --ros-args -p mode:=2
 ```

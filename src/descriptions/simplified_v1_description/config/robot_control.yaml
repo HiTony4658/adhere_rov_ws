@@ -132,14 +132,19 @@ adhere_mujoco_node:
 
     # StateAdherePid gains (CLAUDE.md Phase 3.8): Y/Z/attitude loop reuses the same
     # SixDofPidController shape as pid_hold (kp_pos/kd_vel's X component is only exercised during
-    # the APPROACH phase -- ADHERED re-latches p_d_world_.x() every tick); kp_force/ki_force/
-    # kd_x/f_preload/f_des/integral_force_max belong to the dedicated wall-normal force PI loop
-    # (algorithms/pid/AdherePidController.h) that overrides the Fx wrench component once docked.
+    # the SOFT_DOCKING phase -- WALL_ADHERED re-latches p_d_world_.x() every tick); kp_force/
+    # ki_force/kd_x/f_preload/f_des/integral_force_max belong to the dedicated wall-normal force
+    # PI loop (algorithms/pid/AdherePidController.h) that overrides the Fx wrench component once
+    # docked.
     # Z gain fixed from 0.0 to 120.0/10.0/60.0 in CLAUDE.md Phase 4.2: Z must be actively
-    # regulated during the new DEPTH_ALIGN stage (converges to -adhere_target_depth_m before
-    # WALL_ADHERE begins), matching Y's gains exactly.
+    # regulated during the STANDOFF_HOMING stage (converges to the live adhere_target_depth_m
+    # before SOFT_DOCKING/WALL_ADHERED begins), matching Y's gains exactly.
+    # ki_pos/kd_vel Y/Z raised this phase (10.0->15.0/20.0 asymmetric, 60.0 kd confirmed): a pure
+    # Fx-only AdherePidController + this Y-PID's prior integral gain lost authority against
+    # Coulomb pad friction once f_des was raised to 120N in Phase 4.3, pinning the ROV at
+    # whatever Y it first touched the wall at instead of converging to adhere_target_y.
     adhere_pid.kp_pos: [120.0, 120.0, 120.0]
-    adhere_pid.ki_pos: [10.0, 10.0, 10.0]
+    adhere_pid.ki_pos: [10.0, 15.0, 20.0]
     adhere_pid.kd_vel: [60.0, 60.0, 60.0]
     adhere_pid.kp_att: [40.0, 40.0, 25.0]
     adhere_pid.ki_att: [2.0, 2.0, 2.0]
@@ -167,6 +172,11 @@ adhere_mujoco_node:
     adhere_smc.kd: [80.0, 80.0, 80.0, 20.0, 20.0, 20.0]
     adhere_smc.k_switch: [40.0, 40.0, 40.0, 10.0, 10.0, 10.0]
     adhere_smc.phi: [0.05, 0.05, 0.05, 0.05, 0.05, 0.05]
+    # This phase: integral-sliding-mode augmentation on Y/Z only (s += ki*int(e)dt) -- the pure
+    # P+switching surface above has nothing to "ratchet up" against static pad friction once
+    # wall preload is pressing, the worst-affected baseline for the same Y-pinning bug as
+    # adhere_pid above. All-zero elsewhere so X/roll/pitch/yaw behavior is unchanged.
+    adhere_smc.ki: [0.0, 15.0, 20.0, 0.0, 0.0, 0.0]
     adhere_smc.max_teleop_vel: [0.25, 0.25, 0.25, 0.4, 0.4, 0.6]
     adhere_smc.max_tilt_deg: 30.0
     adhere_smc.approach_speed: 0.15
@@ -176,20 +186,40 @@ adhere_mujoco_node:
     adhere_smc.wall_preload_fx: 120.0    # N magnitude; applied as -wall_preload_fx wrench (Phase 4.3:
                                           # raised from 30.0, matches adhere_pid.f_des's firmer target)
 
-    # Two-stage adhere sequence (CLAUDE.md Phase 4.2), shared by all three wall-adhesion FSM
-    # states (ADHERE_PID_WBC/ADHERE_SMC_WBC/ADHERE_MPPI_BASELINE): on entry, each first stabilizes depth/lateral
-    # position at a safe standoff distance from the wall (DEPTH_ALIGN) before approaching and
-    # adhering (WALL_ADHERE). Deliberately NOT nested under adhere_pid.*/adhere_smc.*/
-    # baseline_mppi.* -- a single shared target depth/standoff is the point (zero-recompile
-    # tuning in one place for all three baselines).
-    adhere_target_depth_m: 1.0  # m, target depth below surface (Z_target = -1.0m)
-    adhere_target_y: 0.0        # m, world Y
-    adhere_standoff_x: 0.35     # m, DEPTH_ALIGN holds this far from the wall plane (X=0)
-    adhere_depth_tol: 0.05      # m, |z - Z_target| gate for DEPTH_ALIGN -> WALL_ADHERE
-    adhere_vz_tol: 0.05         # m/s, |v_z| gate for DEPTH_ALIGN -> WALL_ADHERE
+    # Three-stage wall homing/adhesion sequence (CLAUDE.md Phase 4.2, renamed/extended this
+    # phase), shared by all three wall-adhesion FSM states (ADHERE_PID_WBC/ADHERE_SMC_WBC/
+    # ADHERE_MPPI_BASELINE): STANDOFF_HOMING (friction-free standoff, converge Y AND Z before any
+    # wall preload engages) -> SOFT_DOCKING (ramp X to the wall) -> WALL_ADHERED (full preload).
+    # Deliberately NOT nested under adhere_pid.*/adhere_smc.*/baseline_mppi.* -- a single shared
+    # target depth/standoff is the point (zero-recompile tuning in one place for all three
+    # baselines). adhere_target_y/adhere_target_depth_m are now only the INITIAL value seeded at
+    # on_activate() -- /rov/adhere_target_cmd (this phase's new topic) live-mutates the actual
+    # runtime target from then on.
+    adhere_target_depth_m: 1.0  # m, initial target depth below surface (Z_target = -1.0m)
+    adhere_target_y: 0.0        # m, initial target world Y
+    adhere_standoff_x: 0.35     # m, STANDOFF_HOMING holds this far from the wall plane (X=0)
+    # depth_tol tightened 0.05->0.03 and y_tol/vel_tol added this phase: STANDOFF_HOMING ->
+    # SOFT_DOCKING now gates on BOTH lateral Y and depth Z (plus planar speed), not Z alone --
+    # the direct fix for the Y-pinning bug (lateral homing must complete at a friction-free
+    # standoff distance before any wall preload engages, not be left to fight Coulomb friction
+    # after docking).
+    adhere_depth_tol: 0.03      # m, |z - Z_target| gate for STANDOFF_HOMING -> SOFT_DOCKING
+    adhere_y_tol: 0.03          # m, |y - Y_target| gate for STANDOFF_HOMING -> SOFT_DOCKING
+    adhere_vz_tol: 0.05         # m/s, legacy |v_z| gate (kept for Vz-only consumers)
+    adhere_vel_tol: 0.04        # m/s, sqrt(vy^2+vz^2) planar-speed gate for STANDOFF_HOMING
     adhere_approach_vx_damp: 80.0  # N/(m/s), Phase 4.3 soft-landing approach damping (ADHERE_PID_WBC/
-                                   # ADHERE_SMC_WBC only, pre-dock APPROACH phase -- decelerates the
-                                   # ROV into the wall instead of impacting at a constant approach_speed)
+                                   # ADHERE_SMC_WBC only, pre-dock SOFT_DOCKING phase -- decelerates
+                                   # the ROV into the wall instead of impacting at a constant
+                                   # approach_speed)
+    adhere_retarget_threshold: 0.06  # m, auto-detach-and-rehome threshold on either Y or Z
+
+    # Wall QR-code/AprilTag preset table (this phase): simulates fixed markers pasted on the real
+    # tank wall for visual homing. Two parallel flat arrays (ROS parameters have no
+    # array-of-struct type), zipped by index into ModelParams::AdhereWallTag entries.
+    # state_cmd_console_node's `tag <0..3>` command resolves against this table via the new
+    # /rov/adhere_target_cmd topic.
+    adhere_wall_tags_y: [0.00, 0.80, -0.80, 1.20]
+    adhere_wall_tags_depth_m: [1.00, 1.00, 1.50, 2.00]
 
     # Baseline MPPI (CLAUDE.md Phase 4.1): algorithm-scoped config, parsed independently of
     # ModelParams by baseline_mppi::BaselineMppiConfig::loadFromNode() (not ModelParams::

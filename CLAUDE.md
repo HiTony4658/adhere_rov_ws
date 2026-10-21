@@ -184,20 +184,21 @@ adhere_robot_ws/
 ### Exact 5-Package Workspace Layout (as of Phase 4.3)
 ```text
 src/
-├── interfaces/adhere_control_msgs/        # FsmCommand, SetpointCommand, TeleopCommand, ControllerState (Phase 4.2: + adhere_stage), RuntimeDiagnostics (zero MuJoCo/CUDA/ros2_control deps)
-├── descriptions/simplified_v1_description/ # URDF/Xacro + mjcf/rov_wall.xml (Phase 4.2: wall extended to Z in [-10,+1.5]m) + config/robot_control.yaml (single source of model params, + Phase 4.2 adhere_target_*/adhere_standoff_x/adhere_depth_tol/adhere_vz_tol) + config/mujoco_sim.rviz
+├── interfaces/adhere_control_msgs/        # FsmCommand, SetpointCommand, TeleopCommand, ControllerState (Phase 4.2: + adhere_stage), RuntimeDiagnostics, AdhereTargetCommand (Phase 4.5) (zero MuJoCo/CUDA/ros2_control deps)
+├── descriptions/simplified_v1_description/ # URDF/Xacro + mjcf/rov_wall.xml (Phase 4.2: wall extended to Z in [-10,+1.5]m) + config/robot_control.yaml (single source of model params, + Phase 4.2 adhere_target_*/adhere_standoff_x/adhere_depth_tol/adhere_vz_tol, Phase 4.5: adhere_y_tol/adhere_vel_tol/adhere_retarget_threshold/adhere_wall_tags_y/adhere_wall_tags_depth_m/adhere_smc.ki) + config/mujoco_sim.rviz
 ├── hardwares/adhere_mujoco_hardware/       # AdhereMujocoHardware (500Hz SystemInterface) + FossenHydrodynamics + dual ground-truth/noisy sensor paths + runtime diagnostics mirror + MujocoViewer (Phase 4.2: live thruster-slider mirror + Manual Override + green adhere-target sphere) + adhere_mujoco_node (message-level adhere_control_msgs dep added Phase 4.2; zero config/ files)
-├── controllers/adhere_controller/          # AdhereController plugin (FSM: IDLE_PASSIVE_NONE/HOLD_PID_DEPTH/TELEOP_OPENLOOP_6DOF/HOLD_PID_6DOF/ADHERE_PID_WBC/ADHERE_SMC_WBC/ADHERE_MPPI_BASELINE) in modular dynamics/allocation/estimator/algorithms{pid,smc,wbc,mppi,baseline_mppi}/FSM/common subdirs (Phase 3.7/3.8/4.1) + async outer-loop worker now running a real pure-CUDA Baseline MPPI solve (Phase 4.1, first concrete occupant of that skeleton) + centralized efficiency/chattering/safety telemetry (Phase 3.8) + shared two-stage DEPTH_ALIGN->WALL_ADHERE sequence across ADHERE_PID_WBC/ADHERE_SMC_WBC/ADHERE_MPPI_BASELINE (Phase 4.2, `ModelParams::adhere_stage`)
-└── commands/adhere_keyboard_input/         # fsm_console_node + state_cmd_console_node + xbox_teleop_node + rt_monitor_node + benchmark_evaluator_node (Phase 3.8), all extended for ADHERE_MPPI_BASELINE (Phase 4.1) (zero MuJoCo/CUDA/ros2_control deps)
+├── controllers/adhere_controller/          # AdhereController plugin (FSM: IDLE_PASSIVE_NONE/HOLD_PID_DEPTH/TELEOP_OPENLOOP_6DOF/HOLD_PID_6DOF/ADHERE_PID_WBC/ADHERE_SMC_WBC/ADHERE_MPPI_BASELINE) in modular dynamics/allocation/estimator/algorithms{pid,smc,wbc,mppi,baseline_mppi}/FSM/common subdirs (Phase 3.7/3.8/4.1) + async outer-loop worker now running a real pure-CUDA Baseline MPPI solve (Phase 4.1, first concrete occupant of that skeleton) + centralized efficiency/chattering/safety telemetry (Phase 3.8) + shared three-stage STANDOFF_HOMING->SOFT_DOCKING->WALL_ADHERED sequence (renamed/extended Phase 4.5 from Phase 4.2's two-stage DEPTH_ALIGN->WALL_ADHERE) across ADHERE_PID_WBC/ADHERE_SMC_WBC/ADHERE_MPPI_BASELINE (`ModelParams::adhere_stage` + Phase 4.5's live `CtrlInterfaces::adhere_target_` bridge) + Phase 4.5's `SixDofSmcController` integral-sliding-mode term
+└── commands/adhere_keyboard_input/         # fsm_console_node + state_cmd_console_node + xbox_teleop_node + rt_monitor_node + benchmark_evaluator_node (Phase 3.8), all extended for ADHERE_MPPI_BASELINE (Phase 4.1), state_cmd_console_node extended Phase 4.5 with tag/target wall-retarget commands (zero MuJoCo/CUDA/ros2_control deps)
 ```
 `adhere_controller_common` and `adhere_kamr_controller` NO LONGER EXIST (merged into `adhere_controller` in Phase 3.3) — do not recreate them or reference their names in new code. `FsmState.msg` NO LONGER EXISTS (replaced by `ControllerState.msg` in Phase 3.6) — do not recreate it. `adhere_controller/include/adhere_controller/common/{ModelParams.h,ThrusterAllocator.h}` NO LONGER EXIST (moved to `dynamics/ModelParams.h`/`allocation/ThrusterAllocator.h` in Phase 3.7, now declaration-only with `.cpp` implementations) — update any stale `#include` to the new paths. `adhere_controller/config/controllers.yaml` and `adhere_mujoco_hardware/config/mujoco_sim.rviz` NO LONGER EXIST (Phase 3.7: the former was dead/unused, the latter moved to `simplified_v1_description/config/`).
 
-### 5 ROS Topics (`adhere_control_msgs`, orthogonal contract, Sec.3.4, quaternion-ized + 100% Sim-to-Real pure in Phase 3.6, renumbered in Phase 3.8)
+### 6 ROS Topics (`adhere_control_msgs`, orthogonal contract, Sec.3.4, quaternion-ized + 100% Sim-to-Real pure in Phase 3.6, renumbered in Phase 3.8, 6th topic added Phase 4.5)
 1. `/rov/fsm_command` (`FsmCommand`) — ONLY switches FSM state (`1=IDLE_PASSIVE_NONE, 2=HOLD_PID_DEPTH, 3=TELEOP_OPENLOOP_6DOF, 4=HOLD_PID_6DOF, 5=ADHERE_PID_WBC, 6=ADHERE_SMC_WBC, 7=ADHERE_MPPI_BASELINE, 8=ADHERE_MPPI_KAMR`; Phase 3.8 inserted `ADHERE_PID_WBC`/`ADHERE_SMC_WBC` at `5`/`6` and shifted `ADHERE_MPPI_BASELINE`/`ADHERE_MPPI_KAMR` from `5`/`6` to `7`/`8`).
 2. `/rov/setpoint_cmd` (`SetpointCommand`) — ONLY discrete numeric targets: `command_type` (`1=MODE_DEPTH_ONLY, 2=MODE_FULL_POSE, 3=MODE_LOCK_CURRENT, 4=MODE_LEVEL_ATTITUDE`) + `geometry_msgs/Pose target_pose` (position + unit quaternion, world frame).
 3. `/rov/teleop_cmd` (`TeleopCommand`) — ONLY `50Hz` continuous Xbox Mode-2 stick/trigger commands: `geometry_msgs/Vector3 linear` (surge/sway/heave) + `geometry_msgs/Vector3 angular` (roll_rate=RT/RB, pitch_rate=LT/LB, yaw_rate), both in `[-1,1]`.
 4. `/rov/controller_state` (`ControllerState`, replaces `FsmState` in Phase 3.6) — `25Hz` feedback, 100% Sim-to-Real pure (NO ground truth field at all): `current_state, state_name, estimation_mode, target_pose (Pose), estimated_pose (Pose), estimated_twist_body (Twist), contact_forces[4] (estimated via A_contact), thruster_cmds[8], thrust_l2_norm, thrust_power_proxy, thrust_slew_rate_l2, cumulative_energy_l2, cumulative_impulse_l1, saturated_thruster_count, active_contact_pad_count (Phase 3.8 efficiency/chattering/safety telemetry), kern_margin`. Published by `AdhereController`.
 5. `/rov/runtime_diagnostics` (`RuntimeDiagnostics`, Phase 3.6) — `10Hz` real-time frequency (Hz)/latency (ms)/overrun telemetry for every sensor/estimator/inner-loop/outer-loop channel, plus `timing_healthy`. Published by `AdhereController`; also drives `/rov/diagnostics_hud_marker` (RViz2 HUD) and `rt_monitor_node`'s live CLI table.
+6. `/rov/adhere_target_cmd` (`AdhereTargetCommand`, Phase 4.5) — ONLY live-mutates the shared `ModelParams::AdhereStageParams` wall-homing target (`target_y`/`target_depth_m`) consumed by `ADHERE_PID_WBC`/`ADHERE_SMC_WBC`/`ADHERE_MPPI_BASELINE`: `command_type` (`1=TAG_PRESET` resolved against `robot_control.yaml`'s `adhere_wall_tags_y`/`adhere_wall_tags_depth_m` preset table, `2=CUSTOM_Y`, `3=CUSTOM_DEPTH`, `4=CUSTOM_Y_DEPTH`, `5=USE_CURRENT` latches the ROV's own live Y/depth) + `tag_id` + `target_y`/`target_depth_m`. Published by `state_cmd_console_node`'s new `tag <0..3>`/`target y|d|here` commands (modes `5`/`6`/`7` only); consumed by `AdhereController`, which resolves the command and writes into `CtrlInterfaces::adhere_target_` (the live bridge every `ADHERE_*` `FSMState` reads instead of the static config default, which only seeds the initial value at `on_activate()`). A resolved target change exceeding `adhere_stage.retarget_threshold` (`0.06m`) on either axis forces the active `ADHERE_*` state back into `STANDOFF_HOMING` even if currently `WALL_ADHERED`, rather than dragging the ROV sideways/vertically while still pressed against the wall. This is a deliberate, documented amendment to this section's "orthogonal contract" count (`4`→`5` in Phase 3.6→`6` Phase 4.5) — a 6th topic strictly scoped to one new concern, not a reuse/overload of `/rov/setpoint_cmd`.
 
 Ground truth now lives EXCLUSIVELY on `adhere_mujoco_node`'s `/rov/ground_truth_odom` (`nav_msgs/Odometry`, renamed from `/rov/odom` in Phase 3.6) — offline-evaluation-only, never consumed by `adhere_controller`. `/rov/wave_mode_cmd` was renamed to `/rov/flow_mode_cmd` in Phase 3.6 (matches `FlowEnvironmentPlugin` terminology); `AdhereMujocoHardware::setWaveMode()/waveMode()` are now `setFlowMode()/flowMode()`.
 
@@ -207,23 +208,55 @@ Water surface at world `Z=0.0m`; tank floor at world `Z=-10.0m` (10m depth); wal
 ### Model-Decoupling Status (Sec.3.3)
 `ModelParams::loadFromNode()` (`adhere_controller/include/adhere_controller/dynamics/ModelParams.h`, Phase 3.7: moved out of `common/`) loads ALL thruster/pad geometry, Fossen hydro params, workspace bounds, per-FSM-state gains, `estimation_mode`, and sensor mounting lever arms from `simplified_v1_description/config/robot_control.yaml` at `on_configure()`. `allocation/ThrusterAllocator.h::buildThrusterAllocationMatrix()` builds `B` dynamically from `ModelParams`' loaded geometry (no hardcoded corner coordinates). `robot_control.yaml`'s `thruster_pos_xyz`/`thruster_dir_xyz` encode `rov_wall.xml`'s REAL geometry (all 8 thruster sites at body `X=0.0`, zero lever arm) — a documented, user-confirmed deviation from this file's own Sec.4.3 illustrative placeholder. `estimation_mode` is deliberately NOT a `robot_control.yaml` key (see that file's inline comment on the wildcard-vs-exact-node-name parameter-precedence gotcha) — it is set only via `mujoco.launch.py`'s `estimation_mode` launch argument (default `ground_truth`) or `ModelParams`' compiled-in default.
 
-### Two-Stage DEPTH_ALIGN -> WALL_ADHERE Sequence (Phase 4.2)
+### Three-Stage `STANDOFF_HOMING` -> `SOFT_DOCKING` -> `WALL_ADHERED` Sequence & Live Wall-Tag Retargeting (Phase 4.2, renamed/extended Phase 4.5)
 `ADHERE_PID_WBC`/`ADHERE_SMC_WBC`/`ADHERE_MPPI_BASELINE` share a single `ModelParams::AdhereStageParams`
-(`adhere_stage`, loaded from `robot_control.yaml`'s flat `adhere_target_depth_m`/
-`adhere_target_y`/`adhere_standoff_x`/`adhere_depth_tol`/`adhere_vz_tol` keys — deliberately
-NOT duplicated into each algorithm's own `adhere_pid.*`/`adhere_smc.*`/`baseline_mppi.*` block,
-since "align depth once, then each algorithm presses the wall its own way" is the point). Each
-state's sticky `depth_aligned_` (reset `false` in `enter()`, latched `true` once
-`|z-Z_target|<=depth_tol && |v_z|<=vz_tol`, never reverts) gates a `FSMState::adhereStageName()`
-override ("" for every other state) reported on `ControllerState.msg::adhere_stage`, consumed by
-`adhere_mujoco_hardware`'s embedded MuJoCo Viewer overlay/green target sphere and RViz2
-`/rov/environment_markers`. `StateAdherePid`/`StateAdhereSmc`: before `depth_aligned_`, every
-tick overrides the Y/Z/X target to `(adhere_target_y, -adhere_target_depth_m, x_wall+adhere_
-standoff_x)` and the existing APPROACH/ADHERED `docked_` gate is additionally conditioned on
-`depth_aligned_`. `StateBaselineMppi` has no separate `docked_` state machine — after
-`depth_aligned_` it simply re-targets X onto `BaselineMppiController::xWall()` (new public
-accessor) and lets the existing CUDA rollout wall-contact-penalty + `preload_fx` cost terms do
-the actual approach/press.
+(`adhere_stage`, loaded from `robot_control.yaml`'s flat `adhere_target_depth_m`/`adhere_target_y`/
+`adhere_standoff_x`/`adhere_depth_tol`/`adhere_y_tol`/`adhere_vz_tol`/`adhere_vel_tol`/
+`adhere_retarget_threshold` keys — deliberately NOT duplicated into each algorithm's own
+`adhere_pid.*`/`adhere_smc.*`/`baseline_mppi.*` block, since "home laterally once, then each
+algorithm presses the wall its own way" is the point) — but `adhere_target_y`/
+`adhere_target_depth_m` are now only the INITIAL value, seeded once into the new live
+`CtrlInterfaces::AdhereTargetState adhere_target_` bridge at `on_activate()`; every `ADHERE_*`
+`FSMState::run()` reads `adhere_target_.target_y`/`target_depth_m` instead of the static config
+field from then on (see the `/rov/adhere_target_cmd` topic entry above).
+
+**Root-cause fix for the "ROV gets pinned at the wrong Y" bug**: Phase 4.2's original gate only
+checked depth (`|z-Z_target|<=depth_tol`) before letting wall preload engage, so a large initial
+lateral offset could still begin docking while Y was nowhere near `adhere_target_y` — once
+pressing (`120N` preload since Phase 4.3), Coulomb pad friction could overpower the Y-PID's
+remaining authority, pinning the ROV at whatever Y it first touched the wall at. The gate was
+NOT a hardcoded-target bug (`target_y`/`target_z` were already threaded through correctly
+everywhere). The actual fix: each state's sticky `standoff_homed_` (renamed from `depth_aligned_`,
+reset `false` in `enter()`, latched `true` once `|y-Y_target|<=y_tol && |z-Z_target|<=depth_tol &&
+sqrt(vy^2+vz^2)<=vel_tol`, never reverts except via retargeting below) now gates wall preload on
+BOTH lateral and depth convergence plus planar speed, not depth alone — docking is structurally
+impossible until Y has already converged at the friction-free standoff distance.
+`SixDofSmcController` (the worst-affected baseline, whose sliding surface previously had zero
+integral action) also gained a bounded integral-sliding-mode term (`ki.integral(e_eta)dt`,
+`adhere_smc.ki`, default nonzero only on Y/Z) so a statically-stuck ROV has something to "ratchet
+up" against static friction; `adhere_pid.ki_pos`/`kd_vel` Y/Z were also retuned.
+
+`standoff_homed_` gates a 3-way `FSMState::adhereStageName()` override ("" for every other
+state) reported on `ControllerState.msg::adhere_stage`: `"STANDOFF_HOMING"` (`!standoff_homed_`),
+`"SOFT_DOCKING"` (`standoff_homed_ && !docked_`, `StateAdherePid`/`StateAdhereSmc` only —
+`StateBaselineMppi` has no separate `docked_` sub-phase, so it only ever reports
+`"STANDOFF_HOMING"`/`"WALL_ADHERED"`), or `"WALL_ADHERED"` (`docked_`); consumed by
+`adhere_mujoco_hardware`'s embedded MuJoCo Viewer overlay/green target sphere (now a 4-way
+`0..3` integer code, not the former `0..2`) and RViz2 `/rov/environment_markers`.
+`StateAdherePid`/`StateAdhereSmc`: before `standoff_homed_`, every tick overrides the Y/Z/X
+target to `(adhere_target_.target_y, -adhere_target_.target_depth_m, x_wall+adhere_
+standoff_x)` and the existing `docked_` gate is additionally conditioned on `standoff_homed_`.
+`StateBaselineMppi` still has no separate `docked_` state machine — after `standoff_homed_` it
+simply re-targets X onto `BaselineMppiController::xWall()` and lets the existing CUDA rollout
+wall-contact-penalty + `preload_fx` cost terms do the actual approach/press.
+
+**Live wall-tag retargeting**: a new `std::vector<ModelParams::AdhereWallTag> adhere_wall_tags`
+(loaded from parallel flat arrays `adhere_wall_tags_y`/`adhere_wall_tags_depth_m`, 4 default
+presets) backs `/rov/adhere_target_cmd`'s `TAG_PRESET` resolution. Any resolved target change
+exceeding `adhere_stage.retarget_threshold` (`0.06m`) on either axis sets
+`adhere_target_.changed_pending`, which every `ADHERE_*` state consumes on its very next tick by
+resetting `standoff_homed_`/`docked_` back to `false` — forcing a fresh `STANDOFF_HOMING` pass
+instead of dragging the ROV sideways/vertically while still pressed against the wall.
 
 ### `FUNCTION_ALGORITHM_CATEGORY` FSM Rename, Terminal Auto-Close, Universal Target Display & Adhere Tuning (Phase 4.3)
 
@@ -325,6 +358,45 @@ not the wider `72;75;80;86` a literal reading of a looser task spec might sugges
 `CMAKE_CUDA_COMPILER` is unset (this workstation's CUDA 11.4 toolkit is not on the mandated build
 command's `$PATH`) and uses the legacy `find_package(CUDA REQUIRED)` module (this workstation's
 CMake 3.16 predates `FindCUDAToolkit`, which needs 3.17+).
+
+### Ctrl+C Orphan-Process Root Cause & Fix (Phase 4.5)
+
+Phase 4.3's signal-handler/watchdog/`OnProcessExit→Shutdown` mechanism did not actually fix the
+reported terminal-cleanup bug — live `ps aux` at the start of Phase 4.5 showed multiple
+orphaned `xbox_teleop_node`/`joy_node` processes dating back 2+ days. Root cause (confirmed by
+instrumented repro): `teleop_gcs.launch.py`'s `gnome-terminal --wait` does not run
+`fsm_console_node` (or its forked `state_cmd_console_node`) as a direct child of the launch's own
+process tree — `gnome-terminal` D-Bus-activates the shared `gnome-terminal-server` daemon, which
+forks the actual command under itself instead. `ros2 launch`'s `SIGINT`/`Shutdown` propagation
+only reaches processes in its own tree (confirmed: `joy_node`/`xbox_teleop_node`/the
+`gnome-terminal` wrapper's own `ExecuteProcess` all exit cleanly, but the
+`gnome-terminal-server`-spawned console processes survive, reparented to `systemd --user`).
+Fix: `teleop_gcs.launch.py` gained an `OnShutdown` handler that `pkill -TERM -f
+fsm_console_node`/`state_cmd_console_node`s (the pattern matches regardless of real parent,
+since `pkill -f` matches the full command line). This MUST be a synchronous `OpaqueFunction`
+(blocking `subprocess.call`), not an `ExecuteProcess` action — empirically verified that ROS 2
+Foxy's `LaunchService._shutdown(force_sync=True)` (the Ctrl-C path) emits the `Shutdown` event
+and tears the asyncio loop down immediately after, so an `ExecuteProcess` queued from
+`on_shutdown` never actually gets scheduled/started in that window, while a blocking call inside
+`OpaqueFunction` runs to completion first. Verified empirically: a fresh `teleop_gcs.launch.py`
+launch followed by `SIGINT` now leaves zero orphan processes (`joy_node`/`xbox_teleop_node`/
+`gnome-terminal`/`fsm_console_node` all gone within the test's 6s observation window), both
+standalone and included from `mujoco.launch.py`.
+
+Separately, `mujoco.launch.py`'s `adhere_controller` `on_configure()` still hangs indefinitely
+(reproduced 3 times Phase 4.5, unaffected by any change in Phase 4.5) immediately after
+logging `"Configuring controller 'adhere_controller'"` — confirmed NOT the GPU/CUDA-context
+hypothesis Phase 4.3 speculated (the hang is before any CUDA call: `BaselineMppiController::
+init()` only runs in `on_activate()`, which is never reached) and NOT a regression of the
+documented `switch_controller()`-called-before-`update()`-thread-starts deadlock (`adhere_
+mujoco_node.cpp`'s `load_controller`/`configure_controller`/`switch_controller` ordering around
+the physics thread start is already correct). Root cause not found within Phase 4.5's
+time-box — **unresolved, needs dedicated diagnosis next session** (try: `gdb -p <pid>` requires
+`ptrace_scope=0` or root on this workstation; a `/proc/<pid>/task/*/stack` or `strace -f`
+attached at launch time would be the next things to try). This blocks any real MuJoCo
+closed-loop smoke test of Phase 4.5's `ADHERE_*`/`/rov/adhere_target_cmd` changes — they are
+verified via `colcon test` (gtest) only, same honesty standard as Phase 4.3's own unresolved
+note.
 
 ### Wall-Adhesion `ADHERE_PID_WBC`/`ADHERE_SMC_WBC` Baselines & Efficiency/Safety Telemetry (Phase 3.8)
 

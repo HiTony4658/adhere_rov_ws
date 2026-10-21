@@ -989,8 +989,9 @@ void MujocoViewer::drawOverlayTelemetry(mjrRect viewport)
   // IDLE_PASSIVE_NONE/TELEOP_OPENLOOP_6DOF); adhere_stage_code is additionally 0 while no
   // ADHERE_* state is active.
   const int adhere_stage_code = bridge_->adhere_stage_code.load();
-  const char * adhere_stage_name =
-    adhere_stage_code == 1 ? "DEPTH_ALIGN" : (adhere_stage_code == 2 ? "WALL_ADHERE" : "n/a");
+  const char * adhere_stage_name = adhere_stage_code == 1
+    ? "STANDOFF_HOMING"
+    : (adhere_stage_code == 2 ? "SOFT_DOCKING" : (adhere_stage_code == 3 ? "WALL_ADHERED" : "n/a"));
   // Mirrors ControllerState.msg::current_state's int32 encoding (comment in that .msg file) --
   // a plain local UI label lookup, not a link/header dependency on adhere_controller.
   static const char * kFsmStateNames[9] = {

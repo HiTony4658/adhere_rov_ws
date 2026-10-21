@@ -118,8 +118,10 @@ struct MujocoVisBridge
   // /rov/environment_markers publisher both reflect the exact same live reference pose. Plain
   // lock-free atomics, same pattern as the other hardware->GUI telemetry above;
   // fsm_current_state_code mirrors ControllerState::current_state's int32 encoding (0 = no
-  // controller active yet) and adhere_stage_code is 0=not an adhere state / 1=DEPTH_ALIGN /
-  // 2=WALL_ADHERE -- both plain integer codes (not strings) to stay lock-free-atomic-friendly;
+  // controller active yet) and adhere_stage_code is 0=not an adhere state / 1=STANDOFF_HOMING /
+  // 2=SOFT_DOCKING (PID/SMC only) / 3=WALL_ADHERED (renamed/extended this phase from the former
+  // 0/1/2=none/DEPTH_ALIGN/WALL_ADHERE) -- plain integer codes (not strings) to stay
+  // lock-free-atomic-friendly;
   // human-readable names are derived locally by each consumer from these codes. target_* was
   // adhere_target_* through Phase 4.2 (adhere-only); Phase 4.3 made target_valid/target_pose
   // universal (HOLD_PID_DEPTH/HOLD_PID_6DOF/ADHERE_*), so the fields were renamed to drop the

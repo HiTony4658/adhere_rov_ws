@@ -62,7 +62,7 @@ void StateAdherePid::enter()
 
   pid_.resetIntegrators();
   force_pid_.resetIntegrator();
-  depth_aligned_ = false;
+  standoff_homed_ = false;
   docked_ = false;
 }
 
@@ -86,21 +86,41 @@ void StateAdherePid::run(const rclcpp::Time & /*time*/, const rclcpp::Duration &
   const RotMat r = quatToRotMat(q_est);
   const auto & stage = model_params_.adhere_stage;
 
-  // Stage 1 -> Stage 2 gate (CLAUDE.md Phase 4.2): DEPTH_ALIGN must stabilize depth/vertical
-  // speed before WALL_ADHERE's APPROACH/ADHERED ramp-then-dock logic (below) is allowed to run.
-  // Sticky, like docked_ below -- never un-aligns itself once reached.
-  if (!depth_aligned_) {
-    const double depth_err = pos_world.z() - (-stage.target_depth_m);
-    const double vz_world = (r * vel_body).z();
-    if (std::abs(depth_err) <= stage.depth_tol && std::abs(vz_world) <= stage.vz_tol) {
-      depth_aligned_ = true;
+  // This phase: live wall-target retarget bridge (replaces the static stage.target_y/
+  // target_depth_m read everywhere below). If the target just moved by more than
+  // stage.retarget_threshold, force a fresh STANDOFF_HOMING pass instead of dragging the ROV
+  // sideways/vertically while still pressed against the wall.
+  const double live_target_y = ctrl_interfaces_.adhere_target_.target_y.load();
+  const double live_target_z = -ctrl_interfaces_.adhere_target_.target_depth_m.load();
+  if (ctrl_interfaces_.adhere_target_.changed_pending.load()) {
+    standoff_homed_ = false;
+    docked_ = false;
+    ctrl_interfaces_.adhere_target_.changed_pending.store(false);
+  }
+
+  // Stage 1 -> Stage 2 gate (CLAUDE.md Phase 4.2, extended this phase): STANDOFF_HOMING must
+  // converge BOTH lateral Y and depth Z (plus planar speed) before SOFT_DOCKING/WALL_ADHERED's
+  // ramp-then-dock logic (below) is allowed to run -- previously gated on depth alone, which let
+  // wall preload engage before Y had converged, pinning the ROV at whatever Y it first touched
+  // the wall at (friction then overpowers the Y-PID). Sticky, like docked_ below -- never
+  // un-homes itself except via the retarget check above.
+  if (!standoff_homed_) {
+    const double depth_err = pos_world.z() - live_target_z;
+    const double y_err = pos_world.y() - live_target_y;
+    const Vec3 vel_world = r * vel_body;
+    const double planar_speed = std::sqrt(vel_world.y() * vel_world.y() + vel_world.z() * vel_world.z());
+    if (std::abs(depth_err) <= stage.depth_tol && std::abs(y_err) <= stage.y_tol &&
+      planar_speed <= stage.vel_tol)
+    {
+      standoff_homed_ = true;
     }
   }
 
-  // APPROACH -> ADHERED gate (CLAUDE.md Phase 3.8 Stage 2.2.1): sticky -- never un-docks itself.
-  // Gated on depth_aligned_ (Phase 4.2) so the sum-of-pad-forces/x_dock_eps check is never even
-  // evaluated while the ROV is still away from the wall at the DEPTH_ALIGN standoff.
-  if (depth_aligned_ && !docked_ && sum_f >= gains.dock_force_thresh &&
+  // SOFT_DOCKING -> WALL_ADHERED gate (CLAUDE.md Phase 3.8 Stage 2.2.1): sticky -- never
+  // un-docks itself. Gated on standoff_homed_ (Phase 4.2) so the sum-of-pad-forces/x_dock_eps
+  // check is never even evaluated while the ROV is still away from the wall at the
+  // STANDOFF_HOMING standoff.
+  if (standoff_homed_ && !docked_ && sum_f >= gains.dock_force_thresh &&
     pos_world.x() <= gains.x_wall + gains.x_dock_eps)
   {
     docked_ = true;
@@ -154,21 +174,22 @@ void StateAdherePid::run(const rclcpp::Time & /*time*/, const rclcpp::Duration &
     q_d_ = quatFromRPY(q_d_rpy);
   }
 
-  if (!depth_aligned_) {
-    // Stage 1 DEPTH_ALIGN (CLAUDE.md Phase 4.2): hold Y/Z at the shared target and X at a safe
-    // standoff distance from the wall -- not pressing in yet. Overrides whatever the
+  if (!standoff_homed_) {
+    // Stage 1 STANDOFF_HOMING (CLAUDE.md Phase 4.2): hold Y/Z at the live wall target and X at a
+    // safe standoff distance from the wall -- not pressing in yet. Overrides whatever the
     // setpoint/teleop handling above just computed for Y/Z (X is untouched by that handling in
     // this state already).
-    p_d_world_.y() = stage.target_y;
-    p_d_world_.z() = -stage.target_depth_m;
+    p_d_world_.y() = live_target_y;
+    p_d_world_.z() = live_target_z;
     p_d_world_.x() = gains.x_wall + stage.standoff_x;
   } else if (!docked_) {
-    // Stage 2 APPROACH: ramp p_d_world_.x() toward the wall; SixDofPidController drives all 6 DOF.
+    // Stage 2 SOFT_DOCKING: ramp p_d_world_.x() toward the wall; SixDofPidController drives all
+    // 6 DOF.
     const double step = gains.approach_speed * dt;
     p_d_world_.x() = std::max(p_d_world_.x() - step, gains.x_wall);
   } else {
-    // Stage 2 ADHERED: re-latch X every tick so SixDofPidController's position loop contributes
-    // ~0 on Fx, leaving the force PI law as the sole driver of that axis.
+    // Stage 2 WALL_ADHERED: re-latch X every tick so SixDofPidController's position loop
+    // contributes ~0 on Fx, leaving the force PI law as the sole driver of that axis.
     p_d_world_.x() = pos_world.x();
   }
 
@@ -185,7 +206,7 @@ void StateAdherePid::run(const rclcpp::Time & /*time*/, const rclcpp::Duration &
   Vec6 wrench = pid_.computeWrench(in, dt);
   if (docked_) {
     wrench(0) = force_pid_.computeNormalForceWrench(gains.f_des, sum_f, vel_body.x(), dt);
-  } else if (depth_aligned_) {
+  } else if (standoff_homed_) {
     // Phase 4.3 soft-landing: decelerate into the wall during the pre-dock APPROACH ramp
     // instead of impacting at a constant approach_speed (the Kelvin-Voigt pads' zeta~0.2 would
     // otherwise bounce the ROV off on first contact).

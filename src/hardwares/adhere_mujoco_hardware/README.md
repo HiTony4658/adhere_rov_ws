@@ -505,8 +505,8 @@ Phase 4.2：20m×20m×10m 水箱把 MuJoCo 自动估算的 `model_->stat.meansiz
   60Hz 渲染快照节流影响，可被 `Reset Stats` 按钮清零重新统计；Phase 4.2
   新增 `Target Pos (X Y Z Yaw)`（当前激活 FSM 状态的参考位姿，经
   `adhere_mujoco_node` 订阅 `/rov/controller_state` 转发写入
-  `MujocoVisBridge`）与 `FSM State / Adhere Stage`（FSM 状态名 + `DEPTH_
-  ALIGN`/`WALL_ADHERE`/`n/a`） |
+  `MujocoVisBridge`）与 `FSM State / Adhere Stage`（FSM 状态名 + `STANDOFF_
+  HOMING`/`SOFT_DOCKING`/`WALL_ADHERED`/`n/a`） |
 
 Phase 4.2：`ADHERE_PID_WBC`/`ADHERE_SMC_WBC`/`ADHERE_MPPI_BASELINE` 任一贴壁状态激活时，
 视口内额外渲染一个亮绿色目标球（`mjGEOM_SPHERE`，半径 `0.035m`，RGBA

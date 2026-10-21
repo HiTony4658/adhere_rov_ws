@@ -277,6 +277,13 @@ TEST(BaselineMppi, ClosedLoopPositionTrackingWithin15cm)
   // as test_adhere_wall_states.cpp's StateAdherePid/StateAdhereSmc tests.
   FakePlant plant;
   plant.setPosition(1.0, 0.1, -2.1);
+  // This phase: StateBaselineMppi now reads the LIVE ctrl_interfaces_.adhere_target_ bridge
+  // instead of the static model_params_.adhere_stage.target_y/target_depth_m (which only ever
+  // seeds it inside AdhereController::on_activate() in production) -- replicate that seeding
+  // step here, same as every other FakePlant setup step that normally happens on_activate().
+  plant.ci.adhere_target_.target_y.store(kModelParams.adhere_stage.target_y);
+  plant.ci.adhere_target_.target_depth_m.store(kModelParams.adhere_stage.target_depth_m);
+  plant.ci.adhere_target_.valid.store(true);
 
   adhere_controller::StateBaselineMppi state(plant.ci, kModelParams, planner);
   state.enter();
@@ -313,6 +320,138 @@ TEST(BaselineMppi, ClosedLoopPositionTrackingWithin15cm)
   EXPECT_NEAR(plant.position().x(), planner.xWall(), 0.15);
   EXPECT_NEAR(plant.position().y(), kModelParams.adhere_stage.target_y, 0.15);
   EXPECT_NEAR(plant.position().z(), -kModelParams.adhere_stage.target_depth_m, 0.15);
+}
+
+// This phase: direct regression test for the Y-pinning bug, StateBaselineMppi variant. The
+// extended STANDOFF_HOMING gate (Y AND Z AND planar speed, not depth alone) makes it
+// structurally impossible for the target to move onto the wall plane while Y is still far from
+// adhere_target_y.
+TEST(BaselineMppi, HomesLateralBeforeTargetingWallPlaneFromLargeYOffset)
+{
+  const Mat68 b = buildB();
+  const Mat86 b_pinv = buildBPinv(b);
+  BaselineMppiConfig cfg;
+
+  BaselineMppiController planner;
+  planner.init(kModelParams, b, b_pinv, cfg);
+
+  FakePlant plant;
+  plant.setPosition(1.0, 0.75, -2.0);
+  plant.ci.adhere_target_.target_y.store(kModelParams.adhere_stage.target_y);
+  plant.ci.adhere_target_.target_depth_m.store(kModelParams.adhere_stage.target_depth_m);
+  plant.ci.adhere_target_.valid.store(true);
+
+  adhere_controller::StateBaselineMppi state(plant.ci, kModelParams, planner);
+  state.enter();
+
+  const rclcpp::Time t0(0, 0, RCL_ROS_TIME);
+  const rclcpp::Duration period = rclcpp::Duration::from_seconds(kDt);
+
+  bool was_aligned = false;
+  double y_at_align_transition = 0.0;
+  const int kOuterSteps = static_cast<int>(32.0 / kOuterDt);  // 32.0s simulated
+  for (int outer = 0; outer < kOuterSteps; ++outer) {
+    const auto target = state.targetPose();
+    const Vec3 pos(
+      plant.ci.active_state.pos_w[0], plant.ci.active_state.pos_w[1],
+      plant.ci.active_state.pos_w[2]);
+    const Quat quat(
+      plant.ci.active_state.quat_w[0], plant.ci.active_state.quat_w[1],
+      plant.ci.active_state.quat_w[2], plant.ci.active_state.quat_w[3]);
+    const Vec3 vel(
+      plant.ci.active_state.vel_body[0], plant.ci.active_state.vel_body[1],
+      plant.ci.active_state.vel_body[2]);
+    const auto u_star = planner.solve(pos, quat, vel, Vec3::Zero(), target.pos, target.quat);
+    for (int i = 0; i < 8; ++i) {
+      plant.ci.outer_loop_cmd_.u_star[i].store(u_star[i]);
+    }
+    plant.ci.outer_loop_cmd_.valid.store(true);
+
+    for (int inner = 0; inner < kInnerPerOuter; ++inner) {
+      state.run(t0, period);
+      plant.writeCommands();
+      plant.step(kDt);
+      if (!was_aligned && state.isDepthAligned()) {
+        was_aligned = true;
+        y_at_align_transition = plant.position().y();
+      }
+    }
+  }
+
+  ASSERT_TRUE(was_aligned) << "never completed STANDOFF_HOMING within the 32s budget";
+  EXPECT_NEAR(
+    y_at_align_transition, kModelParams.adhere_stage.target_y,
+    kModelParams.adhere_stage.y_tol + 0.01)
+    << "Y must already be within tolerance the moment the target first moves onto the wall "
+       "plane, not just eventually afterward";
+  EXPECT_NEAR(plant.position().x(), planner.xWall(), 0.15);
+  EXPECT_NEAR(plant.position().y(), kModelParams.adhere_stage.target_y, 0.15);
+  EXPECT_NEAR(plant.position().z(), -kModelParams.adhere_stage.target_depth_m, 0.15);
+}
+
+// This phase: a live /rov/adhere_target_cmd arrival while WALL_ADHERED (target already on the
+// wall plane) must force a fresh STANDOFF_HOMING pass.
+TEST(BaselineMppi, ReHomesOnLiveTargetChange)
+{
+  const Mat68 b = buildB();
+  const Mat86 b_pinv = buildBPinv(b);
+  BaselineMppiConfig cfg;
+
+  BaselineMppiController planner;
+  planner.init(kModelParams, b, b_pinv, cfg);
+
+  FakePlant plant;
+  plant.setPosition(1.0, 0.0, -2.1);
+  plant.ci.adhere_target_.target_y.store(kModelParams.adhere_stage.target_y);
+  plant.ci.adhere_target_.target_depth_m.store(kModelParams.adhere_stage.target_depth_m);
+  plant.ci.adhere_target_.valid.store(true);
+
+  adhere_controller::StateBaselineMppi state(plant.ci, kModelParams, planner);
+  state.enter();
+
+  const rclcpp::Time t0(0, 0, RCL_ROS_TIME);
+  const rclcpp::Duration period = rclcpp::Duration::from_seconds(kDt);
+
+  auto driveOuterLoop = [&](int outer_steps) {
+    for (int outer = 0; outer < outer_steps; ++outer) {
+      const auto target = state.targetPose();
+      const Vec3 pos(
+        plant.ci.active_state.pos_w[0], plant.ci.active_state.pos_w[1],
+        plant.ci.active_state.pos_w[2]);
+      const Quat quat(
+        plant.ci.active_state.quat_w[0], plant.ci.active_state.quat_w[1],
+        plant.ci.active_state.quat_w[2], plant.ci.active_state.quat_w[3]);
+      const Vec3 vel(
+        plant.ci.active_state.vel_body[0], plant.ci.active_state.vel_body[1],
+        plant.ci.active_state.vel_body[2]);
+      const auto u_star = planner.solve(pos, quat, vel, Vec3::Zero(), target.pos, target.quat);
+      for (int i = 0; i < 8; ++i) {
+        plant.ci.outer_loop_cmd_.u_star[i].store(u_star[i]);
+      }
+      plant.ci.outer_loop_cmd_.valid.store(true);
+      for (int inner = 0; inner < kInnerPerOuter; ++inner) {
+        state.run(t0, period);
+        plant.writeCommands();
+        plant.step(kDt);
+      }
+    }
+  };
+
+  driveOuterLoop(static_cast<int>(20.0 / kOuterDt));
+  ASSERT_TRUE(state.isDepthAligned());
+
+  plant.ci.adhere_target_.target_y.store(0.80);
+  plant.ci.adhere_target_.target_depth_m.store(1.50);
+  plant.ci.adhere_target_.changed_pending.store(true);
+
+  driveOuterLoop(1);
+  EXPECT_FALSE(state.isDepthAligned())
+    << "a retarget crossing the auto-detach threshold must immediately re-enter STANDOFF_HOMING";
+
+  driveOuterLoop(static_cast<int>(32.0 / kOuterDt));
+  EXPECT_TRUE(state.isDepthAligned());
+  EXPECT_NEAR(plant.position().y(), 0.80, 0.15);
+  EXPECT_NEAR(plant.position().z(), -1.50, 0.15);
 }
 
 }  // namespace

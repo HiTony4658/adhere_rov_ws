@@ -19,6 +19,7 @@ SixDofSmcController::Gains adhereSmcGainsToController(const ModelParams::AdhereS
   out.kd = g.kd;
   out.k_switch = g.k_switch;
   out.phi = g.phi;
+  out.ki = g.ki;
   out.wall_preload_fx = g.wall_preload_fx;
   return out;
 }
@@ -39,7 +40,8 @@ void StateAdhereSmc::enter()
   const auto & active = ctrl_interfaces_.active_state;
   p_d_world_ = Vec3(active.pos_w[0], active.pos_w[1], active.pos_w[2]);
   q_d_ = Quat(active.quat_w[0], active.quat_w[1], active.quat_w[2], active.quat_w[3]);
-  depth_aligned_ = false;
+  smc_.resetIntegrator();
+  standoff_homed_ = false;
   docked_ = false;
 }
 
@@ -63,17 +65,32 @@ void StateAdhereSmc::run(const rclcpp::Time & /*time*/, const rclcpp::Duration &
   const RotMat r = quatToRotMat(q_est);
   const auto & stage = model_params_.adhere_stage;
 
-  // Stage 1 -> Stage 2 gate (CLAUDE.md Phase 4.2): see StateAdherePid.cpp for the full
-  // rationale -- identical sticky DEPTH_ALIGN -> WALL_ADHERE gate.
-  if (!depth_aligned_) {
-    const double depth_err = pos_world.z() - (-stage.target_depth_m);
-    const double vz_world = (r * vel_body).z();
-    if (std::abs(depth_err) <= stage.depth_tol && std::abs(vz_world) <= stage.vz_tol) {
-      depth_aligned_ = true;
+  // This phase: live wall-target retarget bridge -- see StateAdherePid.cpp for the full
+  // rationale.
+  const double live_target_y = ctrl_interfaces_.adhere_target_.target_y.load();
+  const double live_target_z = -ctrl_interfaces_.adhere_target_.target_depth_m.load();
+  if (ctrl_interfaces_.adhere_target_.changed_pending.load()) {
+    standoff_homed_ = false;
+    docked_ = false;
+    ctrl_interfaces_.adhere_target_.changed_pending.store(false);
+  }
+
+  // Stage 1 -> Stage 2 gate (CLAUDE.md Phase 4.2, extended this phase): see StateAdherePid.cpp
+  // for the full rationale -- identical sticky STANDOFF_HOMING -> SOFT_DOCKING/WALL_ADHERED
+  // gate, now requiring both Y and Z convergence plus planar speed, not depth alone.
+  if (!standoff_homed_) {
+    const double depth_err = pos_world.z() - live_target_z;
+    const double y_err = pos_world.y() - live_target_y;
+    const Vec3 vel_world = r * vel_body;
+    const double planar_speed = std::sqrt(vel_world.y() * vel_world.y() + vel_world.z() * vel_world.z());
+    if (std::abs(depth_err) <= stage.depth_tol && std::abs(y_err) <= stage.y_tol &&
+      planar_speed <= stage.vel_tol)
+    {
+      standoff_homed_ = true;
     }
   }
 
-  if (depth_aligned_ && !docked_ && sum_f >= gains.dock_force_thresh &&
+  if (standoff_homed_ && !docked_ && sum_f >= gains.dock_force_thresh &&
     pos_world.x() <= gains.x_wall + gains.x_dock_eps)
   {
     docked_ = true;
@@ -122,9 +139,9 @@ void StateAdhereSmc::run(const rclcpp::Time & /*time*/, const rclcpp::Duration &
     q_d_ = quatFromRPY(q_d_rpy);
   }
 
-  if (!depth_aligned_) {
-    p_d_world_.y() = stage.target_y;
-    p_d_world_.z() = -stage.target_depth_m;
+  if (!standoff_homed_) {
+    p_d_world_.y() = live_target_y;
+    p_d_world_.z() = live_target_z;
     p_d_world_.x() = gains.x_wall + stage.standoff_x;
   } else if (!docked_) {
     const double step = gains.approach_speed * dt;
@@ -143,8 +160,8 @@ void StateAdhereSmc::run(const rclcpp::Time & /*time*/, const rclcpp::Duration &
   in.v_est_body = vel_body;
   in.omega_est_body = omega_body;
 
-  Vec6 wrench = smc_.computeWrench(in, docked_);
-  if (depth_aligned_ && !docked_) {
+  Vec6 wrench = smc_.computeWrench(in, docked_, dt);
+  if (standoff_homed_ && !docked_) {
     // Phase 4.3 soft-landing: see StateAdherePid.cpp's identical term for the rationale.
     wrench(0) -= stage.approach_vx_damp * std::max(0.0, vel_body.x());
   }

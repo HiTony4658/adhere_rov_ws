@@ -32,6 +32,15 @@ namespace adhere_controller
 // terms cancel the real dynamics and -M*Lambda*e_nu cancels the Lambda*e_eta contribution to
 // s_dot): verified empirically by the closed-loop gtest rather than a symbolic Lyapunov proof,
 // matching the validation approach already used for FossenDynamics/SixDofPidController.
+//
+// This phase: bounded integral-sliding-mode augmentation, s = e_nu + Lambda.e_eta + Ki.integral_
+// e_eta_ (integral_e_eta_ accumulates e_eta every tick, clamped per-axis to kIntegralEtaClamp).
+// Motivation -- a pure P (Lambda) + switching (Ksw) surface has nothing to "ratchet up" against
+// static Coulomb pad friction once wall preload is pressing: a statically-stuck ROV has zero
+// velocity error (e_nu~0) and the switching term saturates at a FIXED magnitude once |s|>phi, so
+// neither term grows over time the way an integral does. gains_.ki defaults to all-zero (no
+// behavior change for any future SMC consumer); only adhere_smc.ki in robot_control.yaml sets
+// the Y/Z components nonzero.
 class SixDofSmcController
 {
 public:
@@ -41,6 +50,7 @@ public:
     Vec6 kd = Vec6::Zero();
     Vec6 k_switch = Vec6::Zero();
     Vec6 phi = Vec6::Ones();
+    Vec6 ki = Vec6::Zero();  // This phase: integral-sliding-mode gain, see class comment
     double wall_preload_fx = 0.0;  // N magnitude; see class comment for sign
   };
 
@@ -62,12 +72,17 @@ public:
   }
 
   // apply_wall_preload gates the constant pressing bias (StateAdhereSmc passes true only once
-  // docked) -- no integrator state in this controller, so no resetIntegrators() is needed.
-  Vec6 computeWrench(const Inputs & in, bool apply_wall_preload) const;
+  // docked). This phase: no longer const -- accumulates integral_e_eta_ every call (see
+  // resetIntegrator() below, which StateAdhereSmc::enter() must now call, same pattern as
+  // SixDofPidController/AdherePidController's own integrator resets).
+  Vec6 computeWrench(const Inputs & in, bool apply_wall_preload, double dt);
+
+  void resetIntegrator() { integral_e_eta_ = Vec6::Zero(); }
 
 private:
   Gains gains_;
   const FossenDynamics & dynamics_;
+  Vec6 integral_e_eta_ = Vec6::Zero();
 };
 
 }  // namespace adhere_controller

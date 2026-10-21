@@ -28,7 +28,7 @@ void StateBaselineMppi::enter()
   // so run() never writes a leftover command from before this enter().
   planner_.warmStart(p_d_world_, q_d_);
   ctrl_interfaces_.outer_loop_cmd_.valid.store(false);
-  depth_aligned_ = false;
+  standoff_homed_ = false;
 
   // Safe-default contract (CLAUDE.md Phase 3.1 Stage 3.1, same as StatePassive::enter()): zeros
   // out any stale command left behind by the previous FSM state so the thrusters command 0 for
@@ -52,13 +52,27 @@ void StateBaselineMppi::run(const rclcpp::Time & /*time*/, const rclcpp::Duratio
   const RotMat r = quatToRotMat(q_est);
   const auto & stage = model_params_.adhere_stage;
 
-  // Stage 1 -> Stage 2 gate (CLAUDE.md Phase 4.2): identical sticky DEPTH_ALIGN -> WALL_ADHERE
-  // gate as StateAdherePid/StateAdhereSmc.
-  if (!depth_aligned_) {
-    const double depth_err = pos_world.z() - (-stage.target_depth_m);
-    const double vz_world = (r * vel_body).z();
-    if (std::abs(depth_err) <= stage.depth_tol && std::abs(vz_world) <= stage.vz_tol) {
-      depth_aligned_ = true;
+  // This phase: live wall-target retarget bridge -- see StateAdherePid.cpp for the full
+  // rationale. No separate docked_ gate here, so a retarget simply re-homes standoff_homed_.
+  const double live_target_y = ctrl_interfaces_.adhere_target_.target_y.load();
+  const double live_target_z = -ctrl_interfaces_.adhere_target_.target_depth_m.load();
+  if (ctrl_interfaces_.adhere_target_.changed_pending.load()) {
+    standoff_homed_ = false;
+    ctrl_interfaces_.adhere_target_.changed_pending.store(false);
+  }
+
+  // Stage 1 -> Stage 2 gate (CLAUDE.md Phase 4.2, extended this phase): identical sticky
+  // STANDOFF_HOMING -> WALL_ADHERED gate as StateAdherePid/StateAdhereSmc, now requiring both Y
+  // and Z convergence plus planar speed, not depth alone.
+  if (!standoff_homed_) {
+    const double depth_err = pos_world.z() - live_target_z;
+    const double y_err = pos_world.y() - live_target_y;
+    const Vec3 vel_world = r * vel_body;
+    const double planar_speed = std::sqrt(vel_world.y() * vel_world.y() + vel_world.z() * vel_world.z());
+    if (std::abs(depth_err) <= stage.depth_tol && std::abs(y_err) <= stage.y_tol &&
+      planar_speed <= stage.vel_tol)
+    {
+      standoff_homed_ = true;
     }
   }
 
@@ -107,15 +121,15 @@ void StateBaselineMppi::run(const rclcpp::Time & /*time*/, const rclcpp::Duratio
     q_d_ = quatFromRPY(q_d_rpy);
   }
 
-  // Stage 1 DEPTH_ALIGN (CLAUDE.md Phase 4.2): overrides whatever the setpoint/teleop handling
-  // above just computed, holding Y/Z at the shared target and X at a safe standoff distance from
-  // the wall. Once depth_aligned_, the target simply moves onto the wall plane (x_wall) for
-  // Stage 2 WALL_ADHERE -- the CUDA planner's own rollout cost (wall contact penalty +
-  // preload_fx) does the actual approach/press, there is no separate ramp/dock state machine
-  // here like StateAdherePid/StateAdhereSmc have.
-  if (!depth_aligned_) {
-    p_d_world_.y() = stage.target_y;
-    p_d_world_.z() = -stage.target_depth_m;
+  // Stage 1 STANDOFF_HOMING (CLAUDE.md Phase 4.2): overrides whatever the setpoint/teleop
+  // handling above just computed, holding Y/Z at the live wall target and X at a safe standoff
+  // distance from the wall. Once standoff_homed_, the target simply moves onto the wall plane
+  // (x_wall) for Stage 2 WALL_ADHERED -- the CUDA planner's own rollout cost (wall contact
+  // penalty + preload_fx) does the actual approach/press, there is no separate ramp/dock state
+  // machine here like StateAdherePid/StateAdhereSmc have.
+  if (!standoff_homed_) {
+    p_d_world_.y() = live_target_y;
+    p_d_world_.z() = live_target_z;
     p_d_world_.x() = planner_.xWall() + stage.standoff_x;
   } else {
     p_d_world_.x() = planner_.xWall();

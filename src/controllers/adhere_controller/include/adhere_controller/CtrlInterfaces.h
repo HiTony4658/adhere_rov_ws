@@ -96,6 +96,31 @@ struct OuterLoopCommand
   }
 };
 
+// Live wall-target retarget bridge (this phase): AdhereController's /rov/adhere_target_cmd
+// subscription callback resolves TAG_PRESET/CUSTOM_*/USE_CURRENT against ModelParams'
+// adhere_wall_tags table (or the ROV's own current estimate) and writes the result here;
+// StateAdherePid/StateAdhereSmc/StateBaselineMppi read it lock-free every tick instead of the
+// static ModelParams::adhere_stage.target_y/target_depth_m (which only seeds the initial value
+// at on_activate()). changed_pending is set true whenever the newly-resolved target differs from
+// the previously-active one by more than the 0.06m auto-detach threshold; each ADHERE_* state
+// clears it after resetting its own docked_/standoff_homed_ gates to force a fresh homing pass.
+struct AdhereTargetState
+{
+  std::atomic<double> target_y{0.0};
+  std::atomic<double> target_depth_m{1.0};
+  std::atomic<bool> valid{false};
+  std::atomic<bool> changed_pending{false};
+
+  // Raw resolved-on-the-executor-thread request, same seq-counter idiom as ControlInputs::
+  // setpoint_seq above: AdhereController's /rov/adhere_target_cmd callback resolves TAG_PRESET/
+  // CUSTOM_* immediately (pure lookups against model_params_, no cross-thread state touched),
+  // but defers USE_CURRENT's active_state read to AdhereController::update() on the 500Hz
+  // thread -- the only thread ActiveState is ever safely read from -- by stashing
+  // use_current_requested here and bumping command_seq.
+  std::atomic<bool> use_current_requested{false};
+  std::atomic<uint64_t> command_seq{0};
+};
+
 // Zero-copy FSM/hardware bridge, modeled after quadruped_ros2_control's CtrlInterfaces: holds
 // LoanedCommandInterface references bound by AdhereController's on_activate(). Slot order
 // within thruster_command_interface_ matches adhere_mujoco_hardware's documented layout
@@ -127,6 +152,9 @@ struct CtrlInterfaces
   // Phase 4.1: async outer-loop (25Hz CUDA Baseline MPPI) -> StateBaselineMppi's 250Hz
   // Zero-Order-Hold bridge (see OuterLoopCommand's doc comment above).
   OuterLoopCommand outer_loop_cmd_;
+
+  // This phase: live wall-target retarget bridge (see AdhereTargetState's doc comment above).
+  AdhereTargetState adhere_target_;
 
   CtrlInterfaces() = default;
 

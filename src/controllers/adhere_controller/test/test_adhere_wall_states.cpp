@@ -163,6 +163,19 @@ private:
 
 constexpr double kDt = 0.004;  // 250Hz inner loop
 
+// This phase: StateAdherePid/StateAdhereSmc now read the LIVE ctrl_interfaces_.adhere_target_
+// bridge instead of the static model_params_.adhere_stage.target_y/target_depth_m (which only
+// ever seeds it inside AdhereController::on_activate() in production) -- tests that construct
+// CtrlInterfaces directly must replicate that seeding step themselves, same as every other
+// FakeWallPlant/FakePlant test setup step that normally happens inside on_activate().
+void seedAdhereTarget(CtrlInterfaces & ci, const ModelParams & p)
+{
+  ci.adhere_target_.target_y.store(p.adhere_stage.target_y);
+  ci.adhere_target_.target_depth_m.store(p.adhere_stage.target_depth_m);
+  ci.adhere_target_.valid.store(true);
+  ci.adhere_target_.changed_pending.store(false);
+}
+
 }  // namespace
 
 TEST(AdhereWallStates, StateAdherePidDocksAndHoldsAllFourPadsWithPositiveKernMargin)
@@ -170,6 +183,7 @@ TEST(AdhereWallStates, StateAdherePidDocksAndHoldsAllFourPadsWithPositiveKernMar
   // Start 1.0m from the wall, free-swimming.
   FakeWallPlant plant;
   plant.setPosition(1.0, 0.1, -2.1);
+  seedAdhereTarget(plant.ci, kTestModelParams);
 
   adhere_controller::StateAdherePid state(plant.ci, kTestModelParams);
   state.enter();
@@ -216,6 +230,7 @@ TEST(AdhereWallStates, StateAdhereSmcDocksAndHoldsAllFourPadsWithPositiveKernMar
 {
   FakeWallPlant plant;
   plant.setPosition(1.0, 0.1, -2.1);
+  seedAdhereTarget(plant.ci, kTestModelParams);
 
   adhere_controller::StateAdhereSmc state(plant.ci, kTestModelParams);
   state.enter();
@@ -273,6 +288,7 @@ DisturbanceTrial runDockThenDisturb(const ModelParams & params)
 {
   FakeWallPlant plant;
   plant.setPosition(1.0, 0.0, -2.1);
+  seedAdhereTarget(plant.ci, params);
 
   StateT state(plant.ci, params);
   state.enter();
@@ -356,6 +372,113 @@ TEST(AdhereWallStates, StateAdhereSmcRejectsDisturbanceBetterButChattersMoreThan
 
   EXPECT_LT(smc_trial.max_abs_y_error, pid_trial.max_abs_y_error);
   EXPECT_GT(smc_slew_rms, pid_slew_rms);
+}
+
+// This phase: direct regression test for the Y-pinning bug. Root cause was NEVER a hardcoded
+// target_y=0.0 (it was already correctly threaded through) -- it was that the old 2-stage gate
+// only checked Z before letting SOFT_DOCKING/WALL_ADHERED engage wall preload, so a large initial
+// Y offset could still be docking-in-progress while Y was nowhere near target_y. The extended
+// STANDOFF_HOMING gate (Y AND Z AND planar speed) makes this structurally impossible: isDocked()
+// can only ever become true once Y is already within y_tol, regardless of friction (this
+// synthetic plant has no Y/Z friction model at all -- that's not what's being tested here; the
+// state-machine ORDERING guarantee is).
+template<typename StateT>
+void expectHomesLateralBeforeDocking(const ModelParams & params)
+{
+  FakeWallPlant plant;
+  plant.setPosition(1.0, 0.75, -2.0);
+  seedAdhereTarget(plant.ci, params);
+
+  StateT state(plant.ci, params);
+  state.enter();
+
+  const rclcpp::Time t0(0, 0, RCL_ROS_TIME);
+  const rclcpp::Duration period = rclcpp::Duration::from_seconds(kDt);
+
+  bool was_docked = false;
+  double y_at_dock_transition = 0.0;
+  for (int i = 0; i < 8000; ++i) {
+    state.run(t0, period);
+    plant.writeCommands();
+    plant.step(kDt);
+    if (!was_docked && state.isDocked()) {
+      was_docked = true;
+      y_at_dock_transition = plant.position().y();
+    }
+  }
+
+  ASSERT_TRUE(was_docked) << "never docked within the 32s budget";
+  EXPECT_NEAR(
+    y_at_dock_transition, params.adhere_stage.target_y, params.adhere_stage.y_tol + 0.01)
+    << "Y must already be within tolerance at the moment docking first engages, not just "
+       "eventually afterward";
+  EXPECT_NEAR(plant.position().y(), params.adhere_stage.target_y, 0.02);
+  EXPECT_NEAR(plant.position().z(), -params.adhere_stage.target_depth_m, 0.05);
+}
+
+TEST(AdhereWallStates, StateAdherePidHomesLateralBeforeDockingFromLargeYOffset)
+{
+  expectHomesLateralBeforeDocking<adhere_controller::StateAdherePid>(kTestModelParams);
+}
+
+TEST(AdhereWallStates, StateAdhereSmcHomesLateralBeforeDockingFromLargeYOffset)
+{
+  expectHomesLateralBeforeDocking<adhere_controller::StateAdhereSmc>(kTestModelParams);
+}
+
+// This phase: a live /rov/adhere_target_cmd arrival (simulated here by writing directly into
+// ctrl_interfaces_.adhere_target_, same as AdhereController's subscription callback would) while
+// WALL_ADHERED must force a fresh STANDOFF_HOMING pass rather than dragging the ROV sideways/
+// vertically while still pressed against the wall.
+template<typename StateT>
+void expectReHomesOnLiveTargetChange(const ModelParams & params)
+{
+  FakeWallPlant plant;
+  plant.setPosition(1.0, 0.0, -2.1);
+  seedAdhereTarget(plant.ci, params);
+
+  StateT state(plant.ci, params);
+  state.enter();
+
+  const rclcpp::Time t0(0, 0, RCL_ROS_TIME);
+  const rclcpp::Duration period = rclcpp::Duration::from_seconds(kDt);
+
+  for (int i = 0; i < 5000; ++i) {
+    state.run(t0, period);
+    plant.writeCommands();
+    plant.step(kDt);
+  }
+  ASSERT_TRUE(state.isDocked());
+
+  // Simulate the resolved result of a "tag 2" console command (Y=+0.80, depth=1.50m).
+  plant.ci.adhere_target_.target_y.store(0.80);
+  plant.ci.adhere_target_.target_depth_m.store(1.50);
+  plant.ci.adhere_target_.changed_pending.store(true);
+
+  state.run(t0, period);
+  plant.writeCommands();
+  plant.step(kDt);
+  EXPECT_FALSE(state.isDocked())
+    << "a retarget crossing the auto-detach threshold must immediately un-dock";
+
+  for (int i = 0; i < 9000; ++i) {
+    state.run(t0, period);
+    plant.writeCommands();
+    plant.step(kDt);
+  }
+  EXPECT_TRUE(state.isDocked());
+  EXPECT_NEAR(plant.position().y(), 0.80, 0.02);
+  EXPECT_NEAR(plant.position().z(), -1.50, 0.05);
+}
+
+TEST(AdhereWallStates, StateAdherePidReHomesOnLiveTargetChange)
+{
+  expectReHomesOnLiveTargetChange<adhere_controller::StateAdherePid>(kTestModelParams);
+}
+
+TEST(AdhereWallStates, StateAdhereSmcReHomesOnLiveTargetChange)
+{
+  expectReHomesOnLiveTargetChange<adhere_controller::StateAdhereSmc>(kTestModelParams);
 }
 
 int main(int argc, char ** argv)

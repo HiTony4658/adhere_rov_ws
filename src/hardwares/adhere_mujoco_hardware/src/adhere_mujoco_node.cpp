@@ -229,8 +229,12 @@ int main(int argc, char ** argv)
   auto controller_state_sub = node->create_subscription<adhere_control_msgs::msg::ControllerState>(
     "/rov/controller_state", 10,
     [](const adhere_control_msgs::msg::ControllerState::SharedPtr msg) {
-      const int stage_code =
-        msg->adhere_stage == "DEPTH_ALIGN" ? 1 : (msg->adhere_stage == "WALL_ADHERE" ? 2 : 0);
+      // This phase: 3-stage rename (DEPTH_ALIGN/WALL_ADHERE -> STANDOFF_HOMING/SOFT_DOCKING/
+      // WALL_ADHERED); SOFT_DOCKING is PID/SMC-only (MPPI only ever reports STANDOFF_HOMING/
+      // WALL_ADHERED), hence the 4-way (0..3) code instead of the former 3-way (0..2).
+      const int stage_code = msg->adhere_stage == "STANDOFF_HOMING"
+        ? 1
+        : (msg->adhere_stage == "SOFT_DOCKING" ? 2 : (msg->adhere_stage == "WALL_ADHERED" ? 3 : 0));
       const bool is_adhere_state = msg->current_state >= 5 && msg->current_state <= 7;
       const double sphere_x = is_adhere_state ? 0.0 : msg->target_pose.position.x;
       latest_target_valid.store(msg->target_valid);

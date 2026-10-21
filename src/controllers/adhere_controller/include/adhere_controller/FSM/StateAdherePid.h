@@ -17,15 +17,22 @@ namespace adhere_controller
 // MPPI comparison (free-swimming StatePidHold cannot serve this role -- it never regulates
 // wall-normal preload).
 //
-// APPROACH phase: while not yet docked (sum of the 4 estimated pad normal forces below
-// adhere_pid.dock_force_thresh, or still further than adhere_pid.x_dock_eps from the wall),
-// p_d_world_.x() ramps toward adhere_pid.x_wall at adhere_pid.approach_speed and the full 6-DOF
-// wrench comes straight from the shared SixDofPidController (ordinary position/attitude hold,
-// same law StatePidHold uses).
+// Three reported stages (adhereStageName(), renamed/extended this phase from the former
+// 2-stage DEPTH_ALIGN/WALL_ADHERE): STANDOFF_HOMING (!standoff_homed_) holds Y/Z at the live
+// wall target AND X at a friction-free standoff distance until BOTH lateral and depth error are
+// within tolerance (previously gated on depth alone -- the direct fix for a bug where the ROV
+// got pinned at whatever Y it first touched the wall at, since fighting Coulomb pad friction
+// after docking is much harder than converging to Y before any preload engages).
 //
-// ADHERED phase (sticky: once docked, this state never un-docks itself -- only an explicit
-// /rov/fsm_command state switch leaves it): p_d_world_.x() is re-latched to the current estimate
-// every tick (keeps SixDofPidController's X contribution ~0 so it never fights the force loop),
+// SOFT_DOCKING phase (standoff_homed_ && !docked_): p_d_world_.x() ramps toward adhere_pid.x_wall
+// at adhere_pid.approach_speed and the full 6-DOF wrench comes straight from the shared
+// SixDofPidController (ordinary position/attitude hold, same law StatePidHold uses).
+//
+// WALL_ADHERED phase (sticky: once docked, this state never un-docks itself on its own -- only
+// an explicit /rov/fsm_command state switch, or a live wall-target change via
+// /rov/adhere_target_cmd that crosses adhere_stage.retarget_threshold, forces it back to
+// STANDOFF_HOMING): p_d_world_.x() is re-latched to the current estimate every tick (keeps
+// SixDofPidController's X contribution ~0 so it never fights the force loop),
 // SixDofPidController still drives Y/Z/attitude, and the dedicated AdherePidController
 // overwrites the wrench's Fx component with a wall-normal force PI law (preload + force-error
 // P/I - receding-velocity damping, see AdherePidController.h for the exact sign convention).
@@ -56,13 +63,16 @@ public:
   // transitioned from APPROACH to ADHERED.
   bool isDocked() const { return docked_; }
 
-  // Phase 4.2: whether Stage 1 (DEPTH_ALIGN) has completed and Stage 2 (APPROACH/ADHERED, i.e.
-  // WALL_ADHERE) has begun.
-  bool isDepthAligned() const { return depth_aligned_; }
+  // Phase 4.2 (renamed this phase): whether Stage 1 (STANDOFF_HOMING) has completed and Stage 2
+  // (SOFT_DOCKING/WALL_ADHERED) has begun. Name kept for test/caller source compatibility.
+  bool isDepthAligned() const { return standoff_homed_; }
 
   const char * adhereStageName() const override
   {
-    return depth_aligned_ ? "WALL_ADHERE" : "DEPTH_ALIGN";
+    if (!standoff_homed_) {
+      return "STANDOFF_HOMING";
+    }
+    return docked_ ? "WALL_ADHERED" : "SOFT_DOCKING";
   }
 
 private:
@@ -75,10 +85,10 @@ private:
   Vec3 p_d_world_ = Vec3::Zero();
   Quat q_d_ = Quat(1.0, 0.0, 0.0, 0.0);
 
-  // Phase 4.2 two-stage adhere sequence: Stage 1 DEPTH_ALIGN (hold standoff_x/target_y/
-  // target_depth_m) must complete before Stage 2 WALL_ADHERE (the existing APPROACH/ADHERED
-  // ramp-then-dock logic below) begins -- docked_ can only become true once depth_aligned_ is.
-  bool depth_aligned_ = false;
+  // Phase 4.2 two-stage adhere sequence (renamed/extended this phase): Stage 1 STANDOFF_HOMING
+  // (hold standoff_x/live Y+Z target) must complete before Stage 2 (SOFT_DOCKING/WALL_ADHERED
+  // ramp-then-dock logic below) begins -- docked_ can only become true once standoff_homed_ is.
+  bool standoff_homed_ = false;
   bool docked_ = false;
   uint64_t last_seen_setpoint_seq_ = 0;
 };

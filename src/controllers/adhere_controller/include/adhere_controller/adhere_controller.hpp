@@ -13,6 +13,7 @@
 #include "controller_interface/controller_interface.hpp"
 #include "visualization_msgs/msg/marker.hpp"
 
+#include "adhere_control_msgs/msg/adhere_target_command.hpp"
 #include "adhere_control_msgs/msg/controller_state.hpp"
 #include "adhere_control_msgs/msg/fsm_command.hpp"
 #include "adhere_control_msgs/msg/runtime_diagnostics.hpp"
@@ -131,6 +132,17 @@ private:
     setpoint_command_subscription_;
   rclcpp::Subscription<adhere_control_msgs::msg::TeleopCommand>::SharedPtr
     teleop_command_subscription_;
+  rclcpp::Subscription<adhere_control_msgs::msg::AdhereTargetCommand>::SharedPtr
+    adhere_target_command_subscription_;
+  // Previously-active resolved target, tracked on the executor thread only (the subscription
+  // callback), used purely to decide whether a new command crosses adhere_stage.retarget_
+  // threshold -- never read by the 500Hz thread (ctrl_interfaces_.adhere_target_ is the only
+  // cross-thread field).
+  double last_adhere_target_y_ = 0.0;
+  double last_adhere_target_depth_m_ = 1.0;
+  // 500Hz-thread-side counter for detecting a new USE_CURRENT request (see AdhereTargetState's
+  // command_seq doc comment in CtrlInterfaces.h).
+  uint64_t last_adhere_command_seq_processed_ = 0;
   // Phase 3.6: replaces FsmState.msg/fsm_state_publisher_ -- 100% Sim-to-Real pure, no ground
   // truth field at all (that now only exists on adhere_mujoco_node's /rov/ground_truth_odom).
   rclcpp::Publisher<adhere_control_msgs::msg::ControllerState>::SharedPtr controller_state_publisher_;

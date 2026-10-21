@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cmath>
 #include <csignal>
+#include <cstdint>
 #include <iostream>
 #include <mutex>
 #include <sstream>
@@ -24,6 +25,7 @@
 
 #include "rclcpp/rclcpp.hpp"
 
+#include "adhere_control_msgs/msg/adhere_target_command.hpp"
 #include "adhere_control_msgs/msg/controller_state.hpp"
 #include "adhere_control_msgs/msg/setpoint_command.hpp"
 
@@ -160,8 +162,17 @@ void printPidHoldPrompt(int mode)
             << "Enter 'z <val>' (depth), 'y <val>' (lateral), 'x <val>' (wall dist, ignored "
                "once ADHERE_PID_WBC/ADHERE_SMC_WBC have docked), 'roll <deg>', 'pitch <deg>', "
                "'yaw <deg>', 'all <x> <y> <z> <yaw_deg>', 'reset' (roll/pitch -> 0), or 'h' "
-               "(lock current pose): "
-            << std::flush;
+               "(lock current pose)";
+  if (mode == 5 || mode == 6 || mode == 7) {
+    // This phase: distinct "target"-prefixed commands for the NEW live wall-homing retarget
+    // (published on /rov/adhere_target_cmd) -- deliberately NOT bare 'y'/'d' to avoid colliding
+    // with the pre-existing bare 'y'/'z' setpoint-slide commands above (which keep sliding the
+    // already-docked pose via /rov/setpoint_cmd, a different and still-useful feature).
+    std::cout << ", 'tag <0..3>' (wall QR-code preset), 'target y <val>' / 'target d <depth>' / "
+                 "'target y <val> d <depth>' (custom wall-homing target), or 'target here' "
+                 "(use current Y/depth as the new target)";
+  }
+  std::cout << ": " << std::flush;
 }
 
 }  // namespace
@@ -188,6 +199,10 @@ int main(int argc, char ** argv)
 
   auto setpoint_pub = node->create_publisher<adhere_control_msgs::msg::SetpointCommand>(
     "/rov/setpoint_cmd", 10);
+  // This phase: live wall-homing-target retarget, ADHERE_* modes only.
+  auto adhere_target_pub =
+    node->create_publisher<adhere_control_msgs::msg::AdhereTargetCommand>(
+      "/rov/adhere_target_cmd", 10);
   auto controller_state_sub = node->create_subscription<adhere_control_msgs::msg::ControllerState>(
     "/rov/controller_state", 10,
     [](const adhere_control_msgs::msg::ControllerState::SharedPtr msg) {
@@ -235,6 +250,74 @@ int main(int argc, char ** argv)
     }
     if (line == "q" || line == "Q") {
       break;
+    }
+
+    // This phase: 'tag <0..3>' / 'target y|d|here ...' -- ADHERE_* modes only, published on the
+    // new /rov/adhere_target_cmd topic instead of /rov/setpoint_cmd.
+    if (mode == 5 || mode == 6 || mode == 7) {
+      std::istringstream peek(line);
+      std::string head;
+      peek >> head;
+      if (head == "tag" || head == "target") {
+        adhere_control_msgs::msg::AdhereTargetCommand tcmd;
+        tcmd.header.stamp = node->now();
+        bool tag_valid = true;
+        if (head == "tag") {
+          int tag_id = -1;
+          peek >> tag_id;
+          if (peek.fail() || tag_id < 0 || tag_id > 255) {
+            tag_valid = false;
+          } else {
+            tcmd.command_type = adhere_control_msgs::msg::AdhereTargetCommand::TAG_PRESET;
+            tcmd.tag_id = static_cast<uint8_t>(tag_id);
+          }
+        } else {
+          std::string sub;
+          peek >> sub;
+          if (sub == "here") {
+            tcmd.command_type = adhere_control_msgs::msg::AdhereTargetCommand::USE_CURRENT;
+          } else {
+            bool have_y = false, have_d = false;
+            double val_y = 0.0, val_d = 0.0;
+            std::string rest_token = sub;
+            while (!rest_token.empty()) {
+              if (rest_token == "y") {
+                peek >> val_y;
+                have_y = !peek.fail();
+              } else if (rest_token == "d") {
+                peek >> val_d;
+                have_d = !peek.fail();
+              } else {
+                tag_valid = false;
+                break;
+              }
+              if (!(peek >> rest_token)) {
+                break;
+              }
+            }
+            if (!tag_valid || (!have_y && !have_d)) {
+              tag_valid = false;
+            } else if (have_y && have_d) {
+              tcmd.command_type = adhere_control_msgs::msg::AdhereTargetCommand::CUSTOM_Y_DEPTH;
+              tcmd.target_y = val_y;
+              tcmd.target_depth_m = std::abs(val_d);
+            } else if (have_y) {
+              tcmd.command_type = adhere_control_msgs::msg::AdhereTargetCommand::CUSTOM_Y;
+              tcmd.target_y = val_y;
+            } else {
+              tcmd.command_type = adhere_control_msgs::msg::AdhereTargetCommand::CUSTOM_DEPTH;
+              tcmd.target_depth_m = std::abs(val_d);
+            }
+          }
+        }
+        if (!tag_valid) {
+          std::cout << "Invalid input \"" << line << "\", ignored.\n\n";
+          continue;
+        }
+        adhere_target_pub->publish(tcmd);
+        std::cout << "-> wall-homing target command published.\n\n";
+        continue;
+      }
     }
 
     adhere_control_msgs::msg::SetpointCommand cmd;

@@ -20,6 +20,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/TeleopCommand.msg"
   "msg/ControllerState.msg"
   "msg/RuntimeDiagnostics.msg"
+  "msg/AdhereTargetCommand.msg"
   DEPENDENCIES std_msgs geometry_msgs
 )
 

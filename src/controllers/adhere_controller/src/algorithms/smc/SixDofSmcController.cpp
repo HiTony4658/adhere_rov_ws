@@ -5,7 +5,15 @@
 namespace adhere_controller
 {
 
-Vec6 SixDofSmcController::computeWrench(const Inputs & in, bool apply_wall_preload) const
+namespace
+{
+// Anti-windup clamp on integral_e_eta_ (position-meters/attitude-radians * seconds), same
+// fixed-design-constant role as StateAdherePid.cpp's kIntegralPosMax/kIntegralAttMax -- not
+// part of robot_control.yaml's adhere_smc.* schema.
+constexpr double kIntegralEtaClamp = 2.0;
+}  // namespace
+
+Vec6 SixDofSmcController::computeWrench(const Inputs & in, bool apply_wall_preload, double dt)
 {
   const RotMat r = quatToRotMat(in.q_est);
   const Quat q_est_aligned = alignQuaternionHemisphere(in.q_d, in.q_est);
@@ -26,7 +34,11 @@ Vec6 SixDofSmcController::computeWrench(const Inputs & in, bool apply_wall_prelo
   Vec6 e_eta;
   e_eta << e_eta_lin, e_eta_ang;
 
-  const Vec6 s = e_nu + gains_.lambda.cwiseProduct(e_eta);
+  // This phase: bounded integral-sliding-mode accumulation (see class header comment).
+  integral_e_eta_ += e_eta * dt;
+  integral_e_eta_ = integral_e_eta_.cwiseMax(-kIntegralEtaClamp).cwiseMin(kIntegralEtaClamp);
+
+  const Vec6 s = e_nu + gains_.lambda.cwiseProduct(e_eta) + gains_.ki.cwiseProduct(integral_e_eta_);
   const Vec6 s_over_phi = s.cwiseQuotient(gains_.phi);
   const Vec6 sat_s = s_over_phi.cwiseMax(-1.0).cwiseMin(1.0);
 

@@ -174,6 +174,7 @@ ModelParams ModelParams::loadFromNode(const rclcpp::Node::SharedPtr & node)
   declareVec6("adhere_smc.kd", p.adhere_smc.kd);
   declareVec6("adhere_smc.k_switch", p.adhere_smc.k_switch);
   declareVec6("adhere_smc.phi", p.adhere_smc.phi);
+  declareVec6("adhere_smc.ki", p.adhere_smc.ki);
   declareDoubleArray("adhere_smc.max_teleop_vel", p.adhere_smc.max_teleop_vel);
   p.adhere_smc.max_tilt_deg =
     autoDeclareDouble("adhere_smc.max_tilt_deg", p.adhere_smc.max_tilt_deg);
@@ -191,9 +192,35 @@ ModelParams ModelParams::loadFromNode(const rclcpp::Node::SharedPtr & node)
   p.adhere_stage.target_y = autoDeclareDouble("adhere_target_y", p.adhere_stage.target_y);
   p.adhere_stage.standoff_x = autoDeclareDouble("adhere_standoff_x", p.adhere_stage.standoff_x);
   p.adhere_stage.depth_tol = autoDeclareDouble("adhere_depth_tol", p.adhere_stage.depth_tol);
+  p.adhere_stage.y_tol = autoDeclareDouble("adhere_y_tol", p.adhere_stage.y_tol);
   p.adhere_stage.vz_tol = autoDeclareDouble("adhere_vz_tol", p.adhere_stage.vz_tol);
+  p.adhere_stage.vel_tol = autoDeclareDouble("adhere_vel_tol", p.adhere_stage.vel_tol);
   p.adhere_stage.approach_vx_damp =
     autoDeclareDouble("adhere_approach_vx_damp", p.adhere_stage.approach_vx_damp);
+  p.adhere_stage.retarget_threshold =
+    autoDeclareDouble("adhere_retarget_threshold", p.adhere_stage.retarget_threshold);
+
+  // This phase: wall QR-code/AprilTag preset table, stored as two parallel flat arrays (ROS
+  // parameters have no array-of-struct type) and zipped back into AdhereWallTag entries here.
+  {
+    std::vector<double> def_y;
+    std::vector<double> def_depth;
+    def_y.reserve(p.adhere_wall_tags.size());
+    def_depth.reserve(p.adhere_wall_tags.size());
+    for (const auto & tag : p.adhere_wall_tags) {
+      def_y.push_back(tag.y);
+      def_depth.push_back(tag.depth_m);
+    }
+    const auto flat_y = autoDeclareVec("adhere_wall_tags_y", def_y);
+    const auto flat_depth = autoDeclareVec("adhere_wall_tags_depth_m", def_depth);
+    if (flat_y.size() == flat_depth.size() && !flat_y.empty()) {
+      p.adhere_wall_tags.clear();
+      p.adhere_wall_tags.reserve(flat_y.size());
+      for (size_t i = 0; i < flat_y.size(); ++i) {
+        p.adhere_wall_tags.push_back({flat_y[i], flat_depth[i]});
+      }
+    }
+  }
 
   p.estimation_mode = autoDeclareString("estimation_mode", p.estimation_mode);
   declareVec3("sensor_mount.r_imu_xyz", p.sensor_mount.r_imu);

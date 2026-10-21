@@ -37,16 +37,18 @@ public:
 
   bool targetValid() const override { return true; }
 
-  // Phase 4.2: whether Stage 1 (DEPTH_ALIGN) has completed and Stage 2 (WALL_ADHERE) has begun.
-  // Unlike StateAdherePid/StateAdhereSmc, there is no separate docked_/force-threshold gate here
-  // -- once depth_aligned_, the target simply moves to the wall plane and the CUDA planner's own
-  // rollout cost (wall contact penalty + preload_fx, CLAUDE.md Phase 4.1 Sec.3.1) handles the
-  // actual approach/press, same as it already does for any other target near the wall.
-  bool isDepthAligned() const { return depth_aligned_; }
+  // Phase 4.2 (renamed/extended this phase): whether Stage 1 (STANDOFF_HOMING, now gated on
+  // both Y and Z convergence plus planar speed, not depth alone) has completed and Stage 2
+  // (WALL_ADHERED) has begun. Unlike StateAdherePid/StateAdhereSmc, there is no separate
+  // docked_/SOFT_DOCKING sub-phase here -- once standoff_homed_, the target simply moves to the
+  // wall plane and the CUDA planner's own rollout cost (wall contact penalty + preload_fx,
+  // CLAUDE.md Phase 4.1 Sec.3.1) handles the entire approach+press as one continuous process,
+  // so only 2 stages are reported.
+  bool isDepthAligned() const { return standoff_homed_; }
 
   const char * adhereStageName() const override
   {
-    return depth_aligned_ ? "WALL_ADHERE" : "DEPTH_ALIGN";
+    return standoff_homed_ ? "WALL_ADHERED" : "STANDOFF_HOMING";
   }
 
 private:
@@ -55,7 +57,7 @@ private:
   Vec3 p_d_world_ = Vec3::Zero();
   Quat q_d_ = Quat(1.0, 0.0, 0.0, 0.0);
 
-  bool depth_aligned_ = false;
+  bool standoff_homed_ = false;
   uint64_t last_seen_setpoint_seq_ = 0;
 };
 
