@@ -75,9 +75,11 @@ Every architectural design, C++ class, and documentation file must anchor at the
   2. `/rov/setpoint_cmd` (`SetpointCommand.msg`): **ONLY** for discrete numeric targets (e.g. target depth in `DEPTH_HOLD`, target pose `[x, y, z, yaw]` or `lock_current_pose` in `PID_HOLD`).
   3. `/rov/teleop_cmd` (`TeleopCommand.msg`): **ONLY** for `50Hz` continuous Xbox Mode-2 (美国手) normalized stick commands (`surge_x, sway_y, heave_z, yaw_rate` $\in [-1, 1]$).
   4. `/rov/fsm_state` (`FsmState.msg`): `20Hz/25Hz` live feedback from `AdhereController` (`current_state, state_name, target_pose, actual_pose`).
-- **Multi-Terminal Decoupling (`adhere_keyboard_input`)**:
-  - `fsm_console_node` is the Master FSM Switcher (only switches states `1/2/3/4` and monitors `/rov/fsm_state` to automatically spawn/close the state-specific child terminal `state_cmd_console_node` for `DEPTH_HOLD` or `PID_HOLD`).
-  - `adhere_control_msgs` and `adhere_keyboard_input` must have **ZERO dependencies** on MuJoCo, CUDA, or `ros2_control` so they can be compiled and launched standalone (`ros2 launch adhere_keyboard_input teleop_gcs.launch.py`) on a remote Upper-Computer (GCS) laptop!
+
+  **(Original-design snapshot above frozen as-authored; see Sec.9 for the current, amended, 8-topic contract — `FsmState.msg` was replaced by `ControllerState.msg` in Phase 3.6, and 4 more topics were added across Phase 4.5/5.0 Stage 6/7.)**
+- **Multi-Terminal Decoupling (originally `adhere_keyboard_input`, split into `adhere_teleop_gcs`/`adhere_monitor` in Phase 5.0 Stage 5)**:
+  - `fsm_console_node` is the Master FSM Switcher (only switches FSM states and monitors `/rov/controller_state`/`/rov/runtime_diagnostics` for a live status readout — Phase 5.0 Stage 1 deleted the per-state child-terminal auto-spawn machinery described here originally; manual numeric setpoints go via `ros2 topic pub` directly).
+  - `adhere_control_msgs`/`adhere_teleop_gcs`/`adhere_monitor`/`perception/adhere_apriltag_detector` must have **ZERO dependencies** on MuJoCo, CUDA, or `ros2_control` so they can be compiled and launched standalone (`ros2 launch adhere_teleop_gcs teleop_gcs.launch.py`) on a remote Upper-Computer (GCS) laptop!
 
 ---
 

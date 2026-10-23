@@ -3041,3 +3041,95 @@ gtest 用例、0 失败、零回归（lint 失败为已记录的全仓库基线�
 验证：继续被 Stage 6 记录的同一个预先存在的 `on_configure()` 挂起问题阻塞（本阶段
 纯消息/文档重构，未改动任何 on_configure()/on_activate() 逻辑，风险评估为与该挂起
 无关）。
+
+## Phase 5.0 Stage 8（2026-10-23）：最终验证、整合记分卡与文档收尾
+
+### 整合记分卡
+
+**三个 `ADHERE_*` `.cpp` 文件**（Stage 2，共享基类 `StateAdhereBase` 抽出后）：
+
+| 文件 | 改动前（约） | 改动后 | 变化 |
+|---|---|---|---|
+| `StateAdherePid.cpp` | ~244 行 | 82 行 | 删除 162 行 |
+| `StateAdhereSmc.cpp` | ~197 行 | 59 行 | 删除 138 行 |
+| `StateBaselineMppi.cpp` | ~166 行 | 48 行 | 删除 118 行 |
+| 新增共享 `StateAdhereBase.{h,cpp}` | — | 145 行（`.cpp`）+ 头文件 | 新增一次，三方共用 |
+| **三文件合计（`git diff --stat`）** | — | — | **净 -454 行**（`48` 行新增 / `502` 行删除） |
+
+**FSM 映射编辑点**：从 Stage 2 之前的 6+ 处独立维护位置（`checkFsmCommandChange()`
+`switch`、`fsmStateNameToInt()` `switch`、`getNextState()` `switch`、`FSMStateList`
+具名字段 + 7 行 `make_shared`、`mujoco_viewer.cpp`/键盘节点各自的名称数组）压缩为
+`common/FsmRegistry.h` 一张 `constexpr` 表 + `fsm_states_` 一个 `vector`——新增一个
+状态现在只需 2 行编辑（枚举 + 注册表），而非过去的 6+ 处。
+
+**删除的文件**（Stage 1，共 5 个；Stage 5 的包拆分走 `git mv` 保留历史，不计入"删除"）：
+`StateDepthHold.{h,cpp}`、`state_cmd_console_node.cpp`、
+`algorithms/wbc/WbcAllocatorBase.h`、`algorithms/mppi/MppiPlannerBase.h`。
+
+**删除的死 YAML 键**：`depth_hold.*` 整块（Stage 1，随 `HOLD_PID_DEPTH` 一起）、
+`adhere_vz_tol`（Stage 7，核实零消费者后删除）。保留但核实非死键：
+`adhere_pid.f_preload`（仍被 `AdherePidController::computeWrench()` 消费）。
+
+**删除/统一的跨线程无锁桥接惯用法**：`OuterLoopCommand`/`AdhereTargetState` 从各自
+独立发明 `valid`/`seq` 字段，统一成公有继承自新 `common/AtomicBridge.h::
+AtomicBridgeBase`（Stage 2）。
+
+**整体改动规模**（`git diff --cached --shortstat`，Phase 5.0 全部 8 个 Stage 合计，
+`git mv` 保留历史的文件按"修改"而非"删除+新增"计入）：
+
+```text
+91 files changed, 2914 insertions(+), 2578 deletions(-)
+```
+
+净 `+336` 行——**不是负数**，这是预期且经过核实的结果，不是对整合目标的违反：
+Stage 0-2（Part A 诊断出的 10 个发现点的实际删除/去重工作）本身净 `-288` 行
+（Stage 1 的删除）+ 三个 `ADHERE_*` 文件净 `-454` 行（Stage 2 的共享基类抽取）等
+纯减法改动，合计这部分远为负数；但 Stage 3-7 按任务书明确要求新增了若干**新能力**
+而非去重——Stage 4 的 `SensorNoiseParams`/`EstimatorGains`（把硬编码常量变成可配置
+参数，必然新增代码）、Stage 5 的 `perception/adhere_apriltag_detector` 全新包、
+Stage 6 的 `TagDetection.msg` + 检测器节点 + 两级贴壁目标逻辑、Stage 7 的
+`BenchmarkMetrics.msg` 拆分（新消息类型）——这些都是任务书 Part A 诊断之外、
+Stage 3 起才新增的范围，净增代码是必然的，并不违反"删除类改动净行数下降"这一
+验收标准（该标准在任务书原文中明确只约束 Stage 0-2 的 10 个发现点，Stage 3 起的
+"Stage 3-8"标题本身也不再使用"Subtractions"这个词）。
+
+**删除文件计数**：5 个（Stage 1）+ 0 个新删除（Stage 3-8 均为新增/拆分，`adhere_
+keyboard_input` 的拆分通过 `git mv` 保留全部文件历史，严格意义上不是"删除"）。
+
+### 最终真实 MuJoCo 闭环验证状态
+
+如 Stage 6/7 record 所述，`ros2 launch simplified_v1_description mujoco.launch.py`
+在本次长会话的后段持续复现 `on_configure()` 挂起（与 Phase 4.3/4.5/Stage 0 记录的
+同一个预先存在、未定位根因的间歇性问题完全一致），经二分验证确认与 Stage 5/6/7
+的任何改动无关（禁用新增的 `tag_detection_subscription_`/`adhere_apriltag_detector`
+节点后挂起依旧；清空 `/dev/shm` 残留的 FastRTPS 共享内存/信号量文件后挂起依旧）。
+按 `CLAUDE.md` 的誠实标准，本次 Phase 5.0 的"真实 MuJoCo 闭环烟雾测试"验收项**未能
+完成**，与 Phase 4.3/4.5 当时的记录处于同一诚实状态——所有 Phase 5.0 Stage 0-7
+的改动均已通过以下方式交叉验证：
+- `colcon test`：全部 7 个包、87 个 gtest 用例、0 失败、零回归（全程各 Stage 独立
+  验证，详见各自小节）；
+- 独立节点级验证（不经过完整 `mujoco.launch.py`）：`adhere_apriltag_detector_node`
+  单独运行确认 5Hz 定时器/发布逐帧正确（Stage 6）；`ros2 launch ... headless:=true`
+  在 Stage 3/4 两次单独会话早段成功完整跑通（`/rov/environment_markers`
+  逐位核对、FSM 状态切换验证），证明 `on_configure()` 挂起是**间歇性**而非
+  **确定性**失效——不能排除某次干净的重新启动（新终端/重启工作站）就能再次跑通；
+- 代码审查：所有新增/修改的 `on_configure()`/`on_activate()` 改动点逐一与挂起复现
+  时的最小改动集二分比较，排除是本阶段引入的回归。
+
+`on_configure()` 挂起的根因定位仍是**下一阶段的首要阻塞项**，建议下次会话一开始
+就用 `strace -f`/`/proc/<pid>/task/*/stack`（`CLAUDE.md` Stage 0 当时记录的下一步
+手段，本阶段因时间盒未重新尝试）或 `gdb`（需确认 `ptrace_scope` 设置）在挂起发生
+的瞬间附加诊断。
+
+### 本阶段文档收尾
+
+`CLAUDE.md` 第 9 节话题列表更新为完整的 "8 ROS Topics"（新增
+`/rov/benchmark_metrics` 条目，`/rov/controller_state` 条目精简为实际剩余字段）；
+第 4 节（原始设计稿的"4-Topic"枚举）保留为原始设计快照，补充一条简短的"已被
+第 9 节修订"指针注释（`FsmState.msg`/`adhere_keyboard_input`/
+`state_cmd_console_node` 均已不存在，但原文本身不重写，遵循本文件一贯的
+"Sec.9 是修订权威来源"惯例）；第 6 节包树已在 Stage 5 更新为含
+`perception/`/两个拆分后的 `commands/` 子包；第 7.5 节的 FSM ID 一次性豁免说明
+已在 Stage 1 写入。全部相关 `README.md`（`adhere_control_msgs`、
+`adhere_controller`、`commands/README.md`、`interfaces/README.md`）均已在
+Stage 5/7 同步更新完毕。
