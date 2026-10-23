@@ -16,7 +16,6 @@ xbox_teleop_node:
 
     button_passive: 0     # A -> IDLE_PASSIVE_NONE (instant safety zero-thrust)
     button_pid_hold: 1    # B -> HOLD_PID_6DOF
-    button_depth_hold: 2  # X -> HOLD_PID_DEPTH
     button_open_loop: 3   # Y -> TELEOP_OPENLOOP_6DOF
     button_pitch_reverse: 4  # LB (Phase 3.5): held while pressing LT -> pitch_rate < 0
     button_roll_reverse: 5   # RB (Phase 3.5): held while pressing RT -> roll_rate < 0

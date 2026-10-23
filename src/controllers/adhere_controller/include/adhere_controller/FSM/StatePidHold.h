@@ -6,6 +6,7 @@
 
 #include "adhere_controller/algorithms/pid/SixDofPidController.h"
 #include "adhere_controller/common/mathTypes.h"
+#include "adhere_controller/common/PoseSetpointIntegrator.h"
 #include "adhere_controller/dynamics/FossenDynamics.h"
 #include "adhere_controller/FSM/FSMState.h"
 
@@ -34,8 +35,6 @@ public:
 
   void exit() override;
 
-  FSMStateName checkChange() override;
-
   // Reports the live hold setpoint: pos=p_d_world_, quat=q_d_.
   PoseTarget targetPose() const override;
 
@@ -47,13 +46,9 @@ private:
   FossenDynamics dynamics_;
   SixDofPidController pid_;
 
-  Vec3 p_d_world_ = Vec3::Zero();
-  // Attitude setpoint as a unit quaternion (Phase 3.6, replaces phi_d_/theta_d_/psi_d_ Euler
-  // targets -- see mathTools.h's quatError()/quatFromRPY()/smallAngleQuat() for the SO(3) math
-  // this drives).
-  Quat q_d_ = Quat(1.0, 0.0, 0.0, 0.0);
-
-  uint64_t last_seen_setpoint_seq_ = 0;
+  // Setpoint/teleop integration (CLAUDE.md Phase 5.0 Stage 2.2): owns p_d_world_/q_d_ (see
+  // mathTools.h's quatError()/quatFromRPY()/smallAngleQuat() for the SO(3) math it drives).
+  PoseSetpointIntegrator setpoint_;
 };
 
 }  // namespace adhere_controller

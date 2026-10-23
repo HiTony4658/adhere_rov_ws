@@ -21,6 +21,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ControllerState.msg"
   "msg/RuntimeDiagnostics.msg"
   "msg/AdhereTargetCommand.msg"
+  "msg/TagDetection.msg"
+  "msg/BenchmarkMetrics.msg"
   DEPENDENCIES std_msgs geometry_msgs
 )
 

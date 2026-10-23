@@ -1,0 +1,34 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>adhere_teleop_gcs</name>
+  <version>0.1.0</version>
+  <description>
+    Operator-input / Ground Control Station (GCS) bridge for the KAMR-MPPI ROV (CLAUDE.md Phase
+    5.0 Stage 5, split out of the former adhere_keyboard_input): fsm_console_node (master FSM
+    state-switcher + status readout) and xbox_teleop_node (joy -> TeleopCommand/FsmCommand
+    bridge). Zero dependency on MuJoCo/CUDA/ros2_control, so it deploys standalone on a remote
+    Upper-Computer (GCS) laptop.
+  </description>
+  <maintainer email="chesnuttbattiste@gmail.com">HiTony4658</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>adhere_control_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+
+  <!-- Runtime-only: xbox_teleop_node consumes sensor_msgs/msg/Joy published by the official
+       ROS 2 joy package's joy_node, launched alongside it in launch/teleop_gcs.launch.py. This
+       package never includes any joy header, so exec_depend (not depend) is correct. -->
+  <exec_depend>joy</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

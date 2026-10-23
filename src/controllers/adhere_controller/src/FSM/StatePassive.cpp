@@ -28,9 +28,4 @@ void StatePassive::exit()
 {
 }
 
-FSMStateName StatePassive::checkChange()
-{
-  return checkFsmCommandChange();
-}
-
 }  // namespace adhere_controller

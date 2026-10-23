@@ -1,6 +1,6 @@
 # Mode-2 (美国手) continuous joystick teleop command (Phase 3.6 quaternion refactor), published
 # at 50Hz by xbox_teleop_node on /rov/teleop_cmd. Normalized inputs in [-1.0, 1.0]; consumed by
-# StateOpenLoop/StatePidHold/StateDepthHold, with a 0.25s staleness watchdog enforced centrally
+# StateOpenLoop/StatePidHold/StateAdhere*, with a 0.25s staleness watchdog enforced centrally
 # by AdhereController.
 std_msgs/Header header
 

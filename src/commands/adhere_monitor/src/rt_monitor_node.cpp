@@ -1,9 +1,9 @@
 // rt_monitor_node: live CLI dashboard for /rov/runtime_diagnostics (CLAUDE.md Phase 3.6 Stage
-// 3.2) and /rov/controller_state's Phase 3.8 efficiency/safety telemetry. Subscribes to both
-// (never raw hardware topics) and redraws a full-screen ANSI table on every message from either
-// topic, highlighting any overrun, off-target frequency, saturation, or non-positive Rhombic
+// 3.2) and /rov/benchmark_metrics' Phase 3.8 efficiency/safety telemetry (repointed off
+// /rov/controller_state in Phase 5.0 Stage 7). Subscribes to both (never raw hardware topics)
+// and redraws a full-screen ANSI table on every message from either topic, highlighting any overrun, off-target frequency, saturation, or non-positive Rhombic
 // Kern margin in red. Zero dependency on MuJoCo/CUDA/ros2_control, so it runs standalone on a
-// remote Upper-Computer (GCS) laptop like the other adhere_keyboard_input nodes.
+// remote Upper-Computer (GCS) laptop like adhere_teleop_gcs's/this package's other nodes.
 #include <cmath>
 #include <cstdio>
 #include <mutex>
@@ -11,7 +11,7 @@
 
 #include "rclcpp/rclcpp.hpp"
 
-#include "adhere_control_msgs/msg/controller_state.hpp"
+#include "adhere_control_msgs/msg/benchmark_metrics.hpp"
 #include "adhere_control_msgs/msg/runtime_diagnostics.hpp"
 
 namespace
@@ -22,12 +22,12 @@ constexpr const char * kGreen = "\033[32m";
 constexpr const char * kReset = "\033[0m";
 constexpr const char * kClearScreen = "\033[2J\033[H";
 
-// Latest Phase 3.8 efficiency/safety telemetry (updated by the /rov/controller_state
+// Latest Phase 3.8 efficiency/safety telemetry (updated by the /rov/benchmark_metrics
 // subscription, read by the /rov/runtime_diagnostics subscription's redraw so both tables stay
 // on screen together regardless of which topic's message triggered this particular redraw).
 std::mutex g_metrics_mutex;
 bool g_have_metrics = false;
-adhere_control_msgs::msg::ControllerState g_latest_controller_state;
+adhere_control_msgs::msg::BenchmarkMetrics g_latest_benchmark_metrics;
 
 std::string colorize(double measured, double target, const std::string & text)
 {
@@ -86,23 +86,23 @@ void printDiagnosticsTable(const adhere_control_msgs::msg::RuntimeDiagnostics & 
     colorizeOverrun(msg.outer_loop_overruns).c_str(), status.c_str());
 }
 
-// Phase 3.8 efficiency/chattering/safety table, built from the latest /rov/controller_state
+// Phase 3.8 efficiency/chattering/safety table, built from the latest /rov/benchmark_metrics
 // message (if any has arrived yet).
 void printMetricsTable()
 {
-  adhere_control_msgs::msg::ControllerState m;
+  adhere_control_msgs::msg::BenchmarkMetrics m;
   bool have = false;
   {
     std::lock_guard<std::mutex> lock(g_metrics_mutex);
     have = g_have_metrics;
-    m = g_latest_controller_state;
+    m = g_latest_benchmark_metrics;
   }
   std::printf(
     "============================================================\n"
-    "  Phase 3.8 Efficiency/Safety Telemetry (/rov/controller_state)\n"
+    "  Phase 3.8 Efficiency/Safety Telemetry (/rov/benchmark_metrics)\n"
     "============================================================\n");
   if (!have) {
-    std::printf("  (no /rov/controller_state message received yet)\n");
+    std::printf("  (no /rov/benchmark_metrics message received yet)\n");
     return;
   }
   char line[256];
@@ -138,12 +138,12 @@ int main(int argc, char ** argv)
   rclcpp::init(argc, argv);
   auto node = std::make_shared<rclcpp::Node>("rt_monitor_node");
 
-  auto controller_state_sub =
-    node->create_subscription<adhere_control_msgs::msg::ControllerState>(
-      "/rov/controller_state", 10,
-      [](const adhere_control_msgs::msg::ControllerState::SharedPtr msg) {
+  auto benchmark_metrics_sub =
+    node->create_subscription<adhere_control_msgs::msg::BenchmarkMetrics>(
+      "/rov/benchmark_metrics", 10,
+      [](const adhere_control_msgs::msg::BenchmarkMetrics::SharedPtr msg) {
         std::lock_guard<std::mutex> lock(g_metrics_mutex);
-        g_latest_controller_state = *msg;
+        g_latest_benchmark_metrics = *msg;
         g_have_metrics = true;
       });
 

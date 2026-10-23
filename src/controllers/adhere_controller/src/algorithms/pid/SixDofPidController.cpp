@@ -1,6 +1,7 @@
 #include "adhere_controller/algorithms/pid/SixDofPidController.h"
 
 #include "adhere_controller/common/mathTools.h"
+#include "adhere_controller/dynamics/FossenDynamics.h"
 
 namespace adhere_controller
 {

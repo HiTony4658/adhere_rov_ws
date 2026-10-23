@@ -20,6 +20,7 @@
 #include "adhere_mujoco_hardware/mujoco_vis_bridge.hpp"
 #include "adhere_mujoco_hardware/mujoco_viewer.hpp"
 #include "adhere_mujoco_hardware/rhombic_kern.hpp"
+#include "adhere_mujoco_hardware/sensor_noise_params.hpp"
 
 namespace adhere_mujoco_hardware
 {
@@ -175,9 +176,12 @@ private:
 
   // Sensor-noise RNG (Phase 3.5): a single deterministic-seed generator shared by every noisy
   // channel computed in read(). gyro_bias_ is a slow random-walk state (CLAUDE.md Stage 2.1
-  // `gyro_bias_rw_std`), reset to zero on configure().
+  // `gyro_bias_rw_std`), reset to zero on configure(). sensor_noise_ holds the compiled-in
+  // defaults, optionally overridden per-model via rov_wall.xml's <custom><numeric
+  // name="sensor_noise_*"/> entries at configure() time (CLAUDE.md Phase 5.0 Stage 4).
   std::mt19937 rng_{std::random_device{}()};
   Eigen::Vector3d gyro_bias_ = Eigen::Vector3d::Zero();
+  SensorNoiseParams sensor_noise_;
 
   // Finite-difference body-frame angular acceleration (Phase 3.5): needed for the IMU's
   // lever-arm centripetal/tangential terms when r_imu_body_ != 0. Latched alongside

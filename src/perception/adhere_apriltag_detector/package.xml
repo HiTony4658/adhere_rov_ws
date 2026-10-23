@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>adhere_apriltag_detector</name>
+  <version>0.1.0</version>
+  <description>
+    Wall-tag station detection for the KAMR-MPPI ROV (CLAUDE.md Phase 5.0 Stage 6): publishes
+    TagDetection on /rov/tag_detection, the authoritative measured override for the coarse
+    adhere_wall_tags preset. The simulated node (this package) is a proximity-triggered point
+    publisher, not a vision pipeline -- the real robot's equivalent is apriltag_ros publishing
+    the identical message on the identical topic, so AdhereController's consumer logic is
+    unchanged between sim and real. Subscribes only to /rov/controller_state's estimated pose
+    (never ground truth), staying Sim-to-Real pure. Zero dependency on MuJoCo/CUDA/ros2_control.
+  </description>
+  <maintainer email="chesnuttbattiste@gmail.com">HiTony4658</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>adhere_control_msgs</depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

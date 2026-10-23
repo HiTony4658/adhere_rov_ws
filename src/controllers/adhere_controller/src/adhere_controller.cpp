@@ -99,31 +99,6 @@ bool findAndAppend(
   return false;
 }
 
-// Inverse of FSMState::checkFsmCommandChange()'s int -> FSMStateName mapping, used to populate
-// FsmState.msg::current_state with the ACTIVE state (not whatever raw command value happens to
-// be latched in ControlInputs, which may be stale or mid-transition).
-int32_t fsmStateNameToInt(FSMStateName name)
-{
-  switch (name) {
-    case FSMStateName::IDLE_PASSIVE_NONE:
-      return 1;
-    case FSMStateName::HOLD_PID_DEPTH:
-      return 2;
-    case FSMStateName::TELEOP_OPENLOOP_6DOF:
-      return 3;
-    case FSMStateName::HOLD_PID_6DOF:
-      return 4;
-    case FSMStateName::ADHERE_PID_WBC:
-      return 5;
-    case FSMStateName::ADHERE_SMC_WBC:
-      return 6;
-    case FSMStateName::ADHERE_MPPI_BASELINE:
-      return 7;
-    default:
-      return 0;
-  }
-}
-
 }  // namespace
 
 controller_interface::InterfaceConfiguration
@@ -203,12 +178,12 @@ CallbackReturn AdhereController::on_configure(const rclcpp_lifecycle::State & /*
       [this](const adhere_control_msgs::msg::AdhereTargetCommand::SharedPtr msg) {
         // USE_CURRENT needs ActiveState, which is only ever safely read on the 500Hz thread
         // (CLAUDE.md Phase 3.5's ground-truth isolation discipline) -- deferred to
-        // AdhereController::update() via use_current_requested/command_seq instead of resolved
+        // AdhereController::update() via use_current_requested/seq instead of resolved
         // here. TAG_PRESET/CUSTOM_* are pure lookups against model_params_/the message itself,
         // so they can be (and are) resolved immediately on this executor thread.
         if (msg->command_type == adhere_control_msgs::msg::AdhereTargetCommand::USE_CURRENT) {
           ctrl_interfaces_.adhere_target_.use_current_requested.store(true);
-          ctrl_interfaces_.adhere_target_.command_seq.fetch_add(1);
+          ctrl_interfaces_.adhere_target_.seq.fetch_add(1);
           return;
         }
         double new_y = last_adhere_target_y_;
@@ -233,21 +208,36 @@ CallbackReturn AdhereController::on_configure(const rclcpp_lifecycle::State & /*
           default:
             return;
         }
-        const bool crossed_threshold =
-          std::abs(new_y - last_adhere_target_y_) > model_params_.adhere_stage.retarget_threshold ||
-          std::abs(new_depth_m - last_adhere_target_depth_m_) >
-            model_params_.adhere_stage.retarget_threshold;
-        ctrl_interfaces_.adhere_target_.target_y.store(new_y);
-        ctrl_interfaces_.adhere_target_.target_depth_m.store(new_depth_m);
-        if (crossed_threshold) {
-          ctrl_interfaces_.adhere_target_.changed_pending.store(true);
+        applyResolvedAdhereTarget(new_y, new_depth_m);
+      });
+
+  // Phase 5.0 Stage 6: measured wall-tag detections (adhere_apriltag_detector, sim or real
+  // apriltag_ros -- identical topic contract) feed the SAME resolved-target bridge/threshold
+  // logic as /rov/adhere_target_cmd above, kept on a strictly separate topic since this is a
+  // MEASUREMENT, not a human/preset command (CLAUDE.md Sec.9's TagDetection doc comment). A
+  // fresh valid detection supersedes whatever is currently active (preset or an earlier
+  // detection) -- last-writer-wins on this single shared bridge is exactly the "a received tag
+  // governs over a later disagreeing preset until explicitly re-presetted" contract: either
+  // channel can re-assert at any time, and the detector keeps re-publishing while the ROV stays
+  // in range, so a stale preset never silently lingers near an instrumented station.
+  tag_detection_subscription_ =
+    get_node()->create_subscription<adhere_control_msgs::msg::TagDetection>(
+      "/rov/tag_detection", 10,
+      [this](const adhere_control_msgs::msg::TagDetection::SharedPtr msg) {
+        if (!msg->valid) {
+          return;
         }
-        last_adhere_target_y_ = new_y;
-        last_adhere_target_depth_m_ = new_depth_m;
+        applyResolvedAdhereTarget(msg->target_y, msg->target_depth_m);
       });
 
   controller_state_publisher_ = get_node()->create_publisher<adhere_control_msgs::msg::ControllerState>(
     "/rov/controller_state", 10);
+
+  // CLAUDE.md Phase 5.0 Stage 7: offline-evaluation/benchmark telemetry, split off
+  // ControllerState -- only benchmark_evaluator_node consumes this.
+  benchmark_metrics_publisher_ =
+    get_node()->create_publisher<adhere_control_msgs::msg::BenchmarkMetrics>(
+      "/rov/benchmark_metrics", 10);
 
   runtime_diagnostics_publisher_ =
     get_node()->create_publisher<adhere_control_msgs::msg::RuntimeDiagnostics>(
@@ -266,18 +256,27 @@ CallbackReturn AdhereController::on_configure(const rclcpp_lifecycle::State & /*
   // Model-decoupled parameters (CLAUDE.md Phase 3.3 Sec.3): loaded exactly once per configure,
   // same lifecycle point as cm_update_rate_/inner_decimation_/outer_decimation_ above.
   model_params_ = ModelParams::loadFromNode(get_node());
+  // Phase 5.0 Stage 4: (re)construct the estimator with the just-loaded gains -- same lifecycle
+  // point model_params_ itself is populated, so a reconfigure always picks up a fresh YAML read.
+  estimator_ = RovStateEstimator(model_params_.estimator);
   // Phase 4.1: algorithm-scoped config, loaded independently of ModelParams (CLAUDE.md Sec.6 of
   // this phase's task spec) -- same lifecycle point, own parser (BaselineMppiConfig.cpp).
   baseline_mppi_config_ = baseline_mppi::BaselineMppiConfig::loadFromNode(get_node());
 
-  decimator_ = std::make_shared<MultiRateDecimator>(
-    cm_update_rate_, inner_decimation_, outer_decimation_);
-  inner_period_ = rclcpp::Duration::from_seconds(decimator_->innerPeriodSeconds());
-
-  // Runtime diagnostics publish rate (CLAUDE.md Phase 3.6 Stage 1.2): fixed at 10Hz,
-  // independent of inner_decimation_/outer_decimation_ (so changing those never silently
-  // changes the diagnostics rate too).
-  diag_decimation_ = std::max(1, cm_update_rate_ / 10);
+  // Named-channel multi-rate registry (CLAUDE.md Phase 5.0 Stage 3): every rate this controller
+  // runs at is one registered channel, replacing the former separate decimator_/diag_decimation_/
+  // diag_tick_count_ mechanisms. "diag" is fixed at 10Hz, independent of inner_decimation_/
+  // outer_decimation_ (so changing those never silently changes the diagnostics rate too).
+  // "estimator" is registered as decimation=1 purely to document its every-tick cadence
+  // explicitly -- it is still gated on model_params_.estimation_mode=="sensor_fusion" in
+  // update(), not on this channel's due-ness, since it legitimately does not run at all in
+  // "ground_truth" mode.
+  decimator_ = std::make_shared<MultiRateDecimator>(cm_update_rate_);
+  inner_channel_ = decimator_->addChannel("inner", inner_decimation_);
+  outer_channel_ = decimator_->addChannel("outer", outer_decimation_);
+  diag_channel_ = decimator_->addChannel("diag", std::max(1, cm_update_rate_ / 10));
+  estimator_channel_ = decimator_->addChannel("estimator", 1);
+  inner_period_ = rclcpp::Duration::from_seconds(decimator_->periodSeconds(inner_channel_));
 
   return CallbackReturn::SUCCESS;
 }
@@ -303,7 +302,6 @@ CallbackReturn AdhereController::on_activate(const rclcpp_lifecycle::State & /*p
   sensor_dvl_profiler_.reset();
   have_last_depth_diag_ = false;
   have_last_dvl_diag_ = false;
-  diag_tick_count_ = 0;
 
   for (const auto * name : kThrusterNames) {
     findAndAppend(
@@ -394,18 +392,24 @@ CallbackReturn AdhereController::on_activate(const rclcpp_lifecycle::State & /*p
   ctrl_interfaces_.outer_loop_cmd_.valid.store(false);
   outer_worker_thread_ = std::thread(&AdhereController::outerWorkerLoop, this);
 
-  state_list_.passive = std::make_shared<StatePassive>(ctrl_interfaces_, model_params_);
-  state_list_.depth_hold = std::make_shared<StateDepthHold>(ctrl_interfaces_, model_params_);
-  state_list_.open_loop = std::make_shared<StateOpenLoop>(ctrl_interfaces_, model_params_);
-  state_list_.pid_hold = std::make_shared<StatePidHold>(ctrl_interfaces_, model_params_);
-  state_list_.adhere_pid = std::make_shared<StateAdherePid>(ctrl_interfaces_, model_params_);
-  state_list_.adhere_smc = std::make_shared<StateAdhereSmc>(ctrl_interfaces_, model_params_);
-  state_list_.baseline_mppi =
-    std::make_shared<StateBaselineMppi>(ctrl_interfaces_, model_params_, baseline_mppi_);
+  // Single FSM instance table (CLAUDE.md Phase 5.0 Stage 2.1), order matches
+  // common/FsmRegistry.h's kFsmRegistry (not load-bearing, just conventional).
+  fsm_states_ = {
+    {FSMStateName::IDLE_PASSIVE_NONE, std::make_shared<StatePassive>(ctrl_interfaces_, model_params_)},
+    {FSMStateName::TELEOP_OPENLOOP_6DOF,
+      std::make_shared<StateOpenLoop>(ctrl_interfaces_, model_params_)},
+    {FSMStateName::HOLD_PID_6DOF, std::make_shared<StatePidHold>(ctrl_interfaces_, model_params_)},
+    {FSMStateName::ADHERE_PID_WBC,
+      std::make_shared<StateAdherePid>(ctrl_interfaces_, model_params_)},
+    {FSMStateName::ADHERE_SMC_WBC,
+      std::make_shared<StateAdhereSmc>(ctrl_interfaces_, model_params_)},
+    {FSMStateName::ADHERE_MPPI_BASELINE,
+      std::make_shared<StateBaselineMppi>(ctrl_interfaces_, model_params_, baseline_mppi_)},
+  };
 
   // Default-boots in IDLE_PASSIVE_NONE (CLAUDE.md Phase 3.1 Stage 2.3): launching mujoco_sim.launch.py
   // immediately brings up the FSM in the safe zero-thrust state.
-  current_state_ = state_list_.passive;
+  current_state_ = getNextState(FSMStateName::IDLE_PASSIVE_NONE);
   current_state_->enter();
   next_state_ = current_state_;
   next_state_name_ = current_state_->state_name;
@@ -462,8 +466,12 @@ CallbackReturn AdhereController::on_shutdown(const rclcpp_lifecycle::State & /*p
 controller_interface::return_type AdhereController::update()
 {
   // ControllerManager calls update() on every 500Hz physics tick (CLAUDE.md Phase 3.1.1 Sec.3);
-  // the decimator reports which of the uniform inner/outer schedules are due on this tick.
-  const auto tick = decimator_->tick();
+  // the decimator reports, per registered channel, which of the uniform schedules are due on
+  // this tick (CLAUDE.md Phase 5.0 Stage 3).
+  const auto due = decimator_->tick();
+  const bool inner_due = due[inner_channel_];
+  const bool outer_due = due[outer_channel_];
+  const bool diag_due = due[diag_channel_];
 
   if (!current_state_) {
     return controller_interface::return_type::OK;
@@ -556,10 +564,8 @@ controller_interface::return_type AdhereController::update()
     const Vec3 est_vel = estimator_.velocityBody();
     const Vec3 est_omega = estimator_.angularVelocityBody();
     const Quat est_quat = estimator_.orientation();
-    const Vec3 est_rpy = estimator_.rpy();
     for (int i = 0; i < 3; ++i) {
       ctrl_interfaces_.active_state.pos_w[i] = est_pos(i);
-      ctrl_interfaces_.active_state.rpy[i] = est_rpy(i);
       ctrl_interfaces_.active_state.vel_body[i] = est_vel(i);
       ctrl_interfaces_.active_state.omega_body[i] = est_omega(i);
     }
@@ -575,10 +581,8 @@ controller_interface::return_type AdhereController::update()
     estimator_profiler_.endExec();
   } else {
     estimator_initialized_ = false;
-    const Vec3 gt_rpy = rotMatToRPY(quatToRotMat(gt_quat));
     for (int i = 0; i < 3; ++i) {
       ctrl_interfaces_.active_state.pos_w[i] = gt_pos(i);
-      ctrl_interfaces_.active_state.rpy[i] = gt_rpy(i);
       ctrl_interfaces_.active_state.vel_body[i] = gt_vel_body(i);
       ctrl_interfaces_.active_state.omega_body[i] = gt_omega_body(i);
     }
@@ -595,7 +599,7 @@ controller_interface::return_type AdhereController::update()
   // fresh for this tick (see AdhereTargetState's doc comment for why this can't be resolved on
   // the executor thread).
   {
-    const uint64_t seq = ctrl_interfaces_.adhere_target_.command_seq.load();
+    const uint64_t seq = ctrl_interfaces_.adhere_target_.seq.load();
     if (seq != last_adhere_command_seq_processed_ &&
         ctrl_interfaces_.adhere_target_.use_current_requested.load())
     {
@@ -616,7 +620,7 @@ controller_interface::return_type AdhereController::update()
     }
   }
 
-  if (tick.inner_due) {
+  if (inner_due) {
     inner_profiler_.tickMarker();
     inner_profiler_.beginExec();
 
@@ -685,14 +689,14 @@ controller_interface::return_type AdhereController::update()
     inner_profiler_.endExec();
   }
 
-  if (tick.outer_due) {
+  if (outer_due) {
     outer_profiler_.tickMarker();
     outer_profiler_.beginExec();
 
     // Live terminal feedback (CLAUDE.md Phase 3.6's ControllerState.msg, 100% Sim-to-Real pure
-    // -- no ground truth here at all): published here (not gated on tick.inner_due) so
-    // fsm_console_node/state_cmd_console_node see live estimated_pose/target_pose at the
-    // outer-loop rate regardless of which inner-loop state is active.
+    // -- no ground truth here at all): published here (not gated on inner_due) so
+    // fsm_console_node sees live estimated_pose/target_pose at the outer-loop rate regardless
+    // of which inner-loop state is active.
     adhere_control_msgs::msg::ControllerState controller_state_msg;
     controller_state_msg.header.stamp = time;
     controller_state_msg.current_state = fsmStateNameToInt(current_state_->state_name);
@@ -799,30 +803,57 @@ controller_interface::return_type AdhereController::update()
          f_contact_est(3) * model_params_.pad_pos[3].z()) / sum_f;
       k_val = std::abs(p_y) / kern_l_y_ + std::abs(p_z) / kern_l_z_;
     }
-    controller_state_msg.kern_margin = 1.0 - k_val;
-
-    // Phase 3.8 efficiency/chattering/safety telemetry: latest_metrics_ is computed at the
-    // 250Hz inner-loop rate (see tick.inner_due above) and simply carried forward here at the
-    // outer-loop publish rate.
-    controller_state_msg.thrust_l2_norm = latest_metrics_.thrust_l2_norm;
-    controller_state_msg.thrust_power_proxy = latest_metrics_.thrust_power_proxy;
-    controller_state_msg.thrust_slew_rate_l2 = latest_metrics_.thrust_slew_rate_l2;
-    controller_state_msg.cumulative_energy_l2 = latest_metrics_.cumulative_energy_l2;
-    controller_state_msg.cumulative_impulse_l1 = latest_metrics_.cumulative_impulse_l1;
-    controller_state_msg.saturated_thruster_count = latest_metrics_.saturated_thruster_count;
-    controller_state_msg.active_contact_pad_count = latest_metrics_.active_contact_pad_count;
+    // CLAUDE.md Phase 5.0 Stage 7: kern_margin moved off ControllerState onto BenchmarkMetrics
+    // (published separately at the 10Hz diag rate, see publishRuntimeDiagnostics() call site
+    // below) -- cached here since f_contact_est/sum_f are only available in this outer_due
+    // block, not the diag_due one.
+    latest_kern_margin_ = 1.0 - k_val;
 
     controller_state_publisher_->publish(controller_state_msg);
     outer_profiler_.endExec();
   }
 
   // Real-time diagnostics (CLAUDE.md Phase 3.6 Stage 1.2): fixed 10Hz, independent of the
-  // inner/outer decimation schedule above.
-  if (++diag_tick_count_ % static_cast<uint64_t>(diag_decimation_) == 0) {
+  // inner/outer decimation schedule above (the "diag" channel registered in on_configure()).
+  if (diag_due) {
     publishRuntimeDiagnostics(time);
+
+    // CLAUDE.md Phase 5.0 Stage 7: BenchmarkMetrics, same 10Hz "diag" channel as
+    // RuntimeDiagnostics above -- latest_metrics_/latest_kern_margin_ are both already updated
+    // (at the 250Hz inner rate / outer_due block respectively) by the time this fires.
+    adhere_control_msgs::msg::BenchmarkMetrics benchmark_msg;
+    benchmark_msg.header.stamp = time;
+    if (current_state_) {
+      benchmark_msg.current_state = fsmStateNameToInt(current_state_->state_name);
+      benchmark_msg.state_name = current_state_->state_name_string;
+    }
+    benchmark_msg.thrust_l2_norm = latest_metrics_.thrust_l2_norm;
+    benchmark_msg.thrust_power_proxy = latest_metrics_.thrust_power_proxy;
+    benchmark_msg.thrust_slew_rate_l2 = latest_metrics_.thrust_slew_rate_l2;
+    benchmark_msg.cumulative_energy_l2 = latest_metrics_.cumulative_energy_l2;
+    benchmark_msg.cumulative_impulse_l1 = latest_metrics_.cumulative_impulse_l1;
+    benchmark_msg.saturated_thruster_count = latest_metrics_.saturated_thruster_count;
+    benchmark_msg.active_contact_pad_count = latest_metrics_.active_contact_pad_count;
+    benchmark_msg.kern_margin = latest_kern_margin_;
+    benchmark_metrics_publisher_->publish(benchmark_msg);
   }
 
   return controller_interface::return_type::OK;
+}
+
+void AdhereController::applyResolvedAdhereTarget(double new_y, double new_depth_m)
+{
+  const bool crossed_threshold =
+    std::abs(new_y - last_adhere_target_y_) > model_params_.adhere_stage.retarget_threshold ||
+    std::abs(new_depth_m - last_adhere_target_depth_m_) >
+      model_params_.adhere_stage.retarget_threshold;
+  ctrl_interfaces_.adhere_target_.target_y.store(new_y);
+  ctrl_interfaces_.adhere_target_.target_depth_m.store(new_depth_m);
+  if (crossed_threshold) {
+    ctrl_interfaces_.adhere_target_.changed_pending.store(true);
+  }
+  last_adhere_target_y_ = new_y;
+  last_adhere_target_depth_m_ = new_depth_m;
 }
 
 void AdhereController::publishRuntimeDiagnostics(const rclcpp::Time & time)
@@ -957,24 +988,14 @@ void AdhereController::outerWorkerLoop()
 std::shared_ptr<FSMState> AdhereController::getNextState(
   FSMStateName state_name) const
 {
-  switch (state_name) {
-    case FSMStateName::IDLE_PASSIVE_NONE:
-      return state_list_.passive;
-    case FSMStateName::HOLD_PID_DEPTH:
-      return state_list_.depth_hold;
-    case FSMStateName::TELEOP_OPENLOOP_6DOF:
-      return state_list_.open_loop;
-    case FSMStateName::HOLD_PID_6DOF:
-      return state_list_.pid_hold;
-    case FSMStateName::ADHERE_PID_WBC:
-      return state_list_.adhere_pid;
-    case FSMStateName::ADHERE_SMC_WBC:
-      return state_list_.adhere_smc;
-    case FSMStateName::ADHERE_MPPI_BASELINE:
-      return state_list_.baseline_mppi;
-    default:
-      return state_list_.passive;
+  for (const auto & [name, state] : fsm_states_) {
+    if (name == state_name) {
+      return state;
+    }
   }
+  // Unknown/INVALID falls back to the first registered state (IDLE_PASSIVE_NONE), matching the
+  // previous switch's default case.
+  return fsm_states_.front().second;
 }
 
 }  // namespace adhere_controller

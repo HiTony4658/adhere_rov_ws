@@ -21,7 +21,6 @@ public:
 
   void exit() override;
 
-  FSMStateName checkChange() override;
 };
 
 }  // namespace adhere_controller

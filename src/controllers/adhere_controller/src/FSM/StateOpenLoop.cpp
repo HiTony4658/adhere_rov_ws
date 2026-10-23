@@ -52,9 +52,4 @@ void StateOpenLoop::exit()
   }
 }
 
-FSMStateName StateOpenLoop::checkChange()
-{
-  return checkFsmCommandChange();
-}
-
 }  // namespace adhere_controller

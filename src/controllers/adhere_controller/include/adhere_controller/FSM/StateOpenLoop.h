@@ -25,8 +25,6 @@ public:
 
   void exit() override;
 
-  FSMStateName checkChange() override;
-
 private:
   Mat86 b_pinv_;
 };

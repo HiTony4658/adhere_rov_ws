@@ -28,21 +28,10 @@ std::atomic<AdhereMujocoHardware *> g_active_instance{nullptr};
 constexpr const char * kPadSiteNames[4] = {
   "pad_TL_site", "pad_TR_site", "pad_BL_site", "pad_BR_site"};
 
-// Phase 3.5 realistic sensor noise/bias/decimation defaults (CLAUDE.md Stage 2.1). Hardcoded
-// here rather than read from robot_control.yaml: AdhereMujocoHardware is a plain
-// hardware_interface::SystemInterface, not an rclcpp::Node, so it has no ROS parameter access
-// (the same reason HydroParams' own noise-unrelated constants are hardcoded defaults, only
-// overridable via MJCF <custom><numeric> entries -- see HydroParams::applyMjModelOverrides).
-constexpr double kGyroNoiseStd = 0.005;       // rad/s
-constexpr double kGyroBiasRwStd = 0.0005;     // rad/s, per-tick random-walk std
-constexpr double kAccelNoiseStd = 0.02;       // m/s^2
-constexpr double kAttNoiseStd = 0.003;        // rad, small-angle AHRS orientation noise
-constexpr double kDepthNoiseStd = 0.005;      // m
-constexpr double kDvlVelNoiseStd = 0.008;     // m/s
-constexpr double kDvlRangeNoiseStd = 0.003;   // m
-constexpr double kLoadcellNoiseStd = 0.15;    // N
-constexpr long long kDepthDecimation = 10;    // 500 / 10 = 50 Hz
-constexpr long long kDvlDecimation = 25;      // 500 / 25 = 20 Hz
+// Phase 3.5 realistic sensor noise/bias/decimation parameters (CLAUDE.md Phase 5.0 Stage 4:
+// moved out of this anonymous namespace into SensorNoiseParams, with the exact same compiled-in
+// defaults, so a model can override any subset via MJCF <custom><numeric name="sensor_noise_*"/>
+// entries -- see SensorNoiseParams::applyMjModelOverrides(), mirroring HydroParams' own hook).
 
 // Phase 4.2: the station-keeping gust preset's two half-sine pulses (StationKeepingGustPlugin)
 // are authored within a nominal 12.0s window; wrapping the relative wave clock
@@ -216,6 +205,54 @@ hardware_interface::return_type AdhereMujocoHardware::configure(
       model_->site_pos[3 * site_id + 2]};
   }
 
+  // CLAUDE.md Phase 5.0 Stage 4: environment marker geometry (wall/water surface/tank floor),
+  // resolved once here from model_'s own static geom/body arrays instead of hand-copied literals
+  // in adhere_mujoco_node.cpp -- rov_wall.xml is now the single source of truth; a future model
+  // with a different tank/wall layout never desyncs the RViz2 markers again. All 3 geoms are
+  // direct children of the world body (id 0, always at the identity transform in MuJoCo), so
+  // geomWorldPos below only needs to compose one body transform, not walk a kinematic chain.
+  {
+    auto geomWorldPos = [this](int geom_id) -> std::array<double, 3> {
+      const int body_id = model_->geom_bodyid[geom_id];
+      const Eigen::Vector3d body_pos(
+        model_->body_pos[3 * body_id + 0], model_->body_pos[3 * body_id + 1],
+        model_->body_pos[3 * body_id + 2]);
+      const Eigen::Quaterniond body_quat(
+        model_->body_quat[4 * body_id + 0], model_->body_quat[4 * body_id + 1],
+        model_->body_quat[4 * body_id + 2], model_->body_quat[4 * body_id + 3]);
+      const Eigen::Vector3d geom_pos(
+        model_->geom_pos[3 * geom_id + 0], model_->geom_pos[3 * geom_id + 1],
+        model_->geom_pos[3 * geom_id + 2]);
+      const Eigen::Vector3d world = body_pos + body_quat * geom_pos;
+      return {world.x(), world.y(), world.z()};
+    };
+    const int wall_gid = mj_name2id(model_, mjOBJ_GEOM, "wall_geom");
+    const int floor_gid = mj_name2id(model_, mjOBJ_GEOM, "floor_geom");
+    const int water_gid = mj_name2id(model_, mjOBJ_GEOM, "water_surface");
+    if (wall_gid < 0 || floor_gid < 0 || water_gid < 0) {
+      RCLCPP_ERROR(
+        logger(), "wall_geom/floor_geom/water_surface not found in MJCF '%s'", mjcf_path.c_str());
+      mj_deleteModel(model_);
+      model_ = nullptr;
+      return hardware_interface::return_type::ERROR;
+    }
+    vis_bridge_->wall_pos_world = geomWorldPos(wall_gid);
+    // geom_size holds HALF-extents for box/plane types; the RViz CUBE marker's scale is the
+    // FULL extent, hence the 2x below (verified bit-for-bit against the former hardcoded wall
+    // marker: size (0.01, 10.0, 5.75) -> scale (0.02, 20.0, 11.5)).
+    vis_bridge_->wall_size_full = {
+      2.0 * model_->geom_size[3 * wall_gid + 0], 2.0 * model_->geom_size[3 * wall_gid + 1],
+      2.0 * model_->geom_size[3 * wall_gid + 2]};
+    const auto floor_pos = geomWorldPos(floor_gid);
+    vis_bridge_->floor_z = floor_pos[2];
+    vis_bridge_->floor_extent_xy = {
+      2.0 * model_->geom_size[3 * floor_gid + 0], 2.0 * model_->geom_size[3 * floor_gid + 1]};
+    const auto water_pos = geomWorldPos(water_gid);
+    vis_bridge_->water_surface_z = water_pos[2];
+    vis_bridge_->water_surface_extent_xy = {
+      2.0 * model_->geom_size[3 * water_gid + 0], 2.0 * model_->geom_size[3 * water_gid + 1]};
+  }
+
   for (size_t i = 0; i < kThrusterNames.size(); ++i) {
     const int act_id = mj_name2id(model_, mjOBJ_ACTUATOR, kThrusterNames[i]);
     if (act_id < 0) {
@@ -283,6 +320,11 @@ hardware_interface::return_type AdhereMujocoHardware::configure(
   // subset of them without touching this header/source.
   HydroParams::applyMjModelOverrides(model_, calm_plugin_->mutableHydroParams());
   HydroParams::applyMjModelOverrides(model_, gust_plugin_->mutableHydroParams());
+  // CLAUDE.md Phase 5.0 Stage 4: same model-override hook, mirrored for the sim-injected sensor
+  // noise/bias/decimation parameters -- a no-op for rov_wall.xml today (zero regression) unless
+  // it declares any "sensor_noise_*" numeric.
+  sensor_noise_ = SensorNoiseParams{};
+  SensorNoiseParams::applyMjModelOverrides(model_, sensor_noise_);
 
   flow_mode_.store(1);
   wave_trigger_time_.store(0.0);
@@ -647,17 +689,17 @@ hardware_interface::return_type AdhereMujocoHardware::read()
   // IMU: gyro + accel evaluated AT the IMU mount site (lever-arm centripetal/tangential
   // terms, zero here since r_imu_body_ == 0 for this model, but computed generally), plus
   // slow gyro-bias random walk and small-angle-perturbed AHRS orientation.
-  gyro_bias_.x() += noise(kGyroBiasRwStd);
-  gyro_bias_.y() += noise(kGyroBiasRwStd);
-  gyro_bias_.z() += noise(kGyroBiasRwStd);
+  gyro_bias_.x() += noise(sensor_noise_.gyro_bias_rw_std);
+  gyro_bias_.y() += noise(sensor_noise_.gyro_bias_rw_std);
+  gyro_bias_.z() += noise(sensor_noise_.gyro_bias_rw_std);
   const Eigen::Vector3d gyro_meas = ang_vel_body + gyro_bias_ +
-    Eigen::Vector3d(noise(kGyroNoiseStd), noise(kGyroNoiseStd), noise(kGyroNoiseStd));
+    Eigen::Vector3d(noise(sensor_noise_.gyro_noise_std), noise(sensor_noise_.gyro_noise_std), noise(sensor_noise_.gyro_noise_std));
   const Eigen::Vector3d lever_accel = last_ang_accel_body_.cross(r_imu_body_) +
     ang_vel_body.cross(ang_vel_body.cross(r_imu_body_));
   const Eigen::Vector3d accel_meas = last_accel_body_ + lever_accel +
-    Eigen::Vector3d(noise(kAccelNoiseStd), noise(kAccelNoiseStd), noise(kAccelNoiseStd));
+    Eigen::Vector3d(noise(sensor_noise_.accel_noise_std), noise(sensor_noise_.accel_noise_std), noise(sensor_noise_.accel_noise_std));
   const Eigen::Vector3d small_angle_eps(
-    noise(kAttNoiseStd), noise(kAttNoiseStd), noise(kAttNoiseStd));
+    noise(sensor_noise_.att_noise_std), noise(sensor_noise_.att_noise_std), noise(sensor_noise_.att_noise_std));
   const Eigen::Quaterniond dq(
     1.0, 0.5 * small_angle_eps.x(), 0.5 * small_angle_eps.y(), 0.5 * small_angle_eps.z());
   const Eigen::Quaterniond quat_meas = (orientation * dq).normalized();
@@ -675,30 +717,30 @@ hardware_interface::return_type AdhereMujocoHardware::read()
 
   // Depth: 50Hz sample-and-hold (hw_states_ already holds the previous value between
   // decimation boundaries -- no separate latch member needed).
-  if (step_count_ % kDepthDecimation == 0) {
+  if (step_count_ % sensor_noise_.depth_decimation == 0) {
     const Eigen::Vector3d p_depth_world =
       Eigen::Vector3d(hw_states_[kOdom + 0], hw_states_[kOdom + 1], hw_states_[kOdom + 2]) +
       R * r_depth_body_;
-    hw_states_[kDepthNoisy] = p_depth_world.z() + noise(kDepthNoiseStd);
+    hw_states_[kDepthNoisy] = p_depth_world.z() + noise(sensor_noise_.depth_noise_std);
   }
 
   // DVL: 20Hz sample-and-hold, body-frame velocity at the DVL site INCLUDING the rigid-body
   // lever-arm term v_com + omega x r_dvl, plus acoustic wall-range (world X at the DVL site).
-  if (step_count_ % kDvlDecimation == 0) {
+  if (step_count_ % sensor_noise_.dvl_decimation == 0) {
     const Eigen::Vector3d v_dvl_body = lin_vel_body + ang_vel_body.cross(r_dvl_body_);
-    hw_states_[kDvlNoisy + 0] = v_dvl_body.x() + noise(kDvlVelNoiseStd);
-    hw_states_[kDvlNoisy + 1] = v_dvl_body.y() + noise(kDvlVelNoiseStd);
-    hw_states_[kDvlNoisy + 2] = v_dvl_body.z() + noise(kDvlVelNoiseStd);
+    hw_states_[kDvlNoisy + 0] = v_dvl_body.x() + noise(sensor_noise_.dvl_vel_noise_std);
+    hw_states_[kDvlNoisy + 1] = v_dvl_body.y() + noise(sensor_noise_.dvl_vel_noise_std);
+    hw_states_[kDvlNoisy + 2] = v_dvl_body.z() + noise(sensor_noise_.dvl_vel_noise_std);
     const Eigen::Vector3d p_dvl_world =
       Eigen::Vector3d(hw_states_[kOdom + 0], hw_states_[kOdom + 1], hw_states_[kOdom + 2]) +
       R * r_dvl_body_;
-    hw_states_[kDvlNoisy + 3] = p_dvl_world.x() + noise(kDvlRangeNoiseStd);
+    hw_states_[kDvlNoisy + 3] = p_dvl_world.x() + noise(sensor_noise_.dvl_range_noise_std);
   }
 
   // Load cells: 500Hz, unilateral compression clamp (max(0, F_true + noise)).
   for (size_t i = 0; i < kPadNames.size(); ++i) {
     hw_states_[kLoadcellNoisy + i] =
-      std::max(0.0, hw_states_[kPadContact + i] + noise(kLoadcellNoiseStd));
+      std::max(0.0, hw_states_[kPadContact + i] + noise(sensor_noise_.loadcell_noise_std));
   }
 
   // Runtime diagnostics (CLAUDE.md Phase 3.6 Stage 1.2): mirrors the physics thread's own EMA

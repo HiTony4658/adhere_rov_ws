@@ -36,7 +36,7 @@ void RovStateEstimator::predict(const Vec3 & gyro_meas, const Vec3 & accel_meas,
 void RovStateEstimator::correctAttitude(const Quat & q_meas)
 {
   const Quat q_meas_aligned = alignQuaternionHemisphere(q_hat_, q_meas);
-  q_hat_ = normalizeQuat((1.0 - kAttGain) * q_hat_ + kAttGain * q_meas_aligned);
+  q_hat_ = normalizeQuat((1.0 - gains_.att_gain) * q_hat_ + gains_.att_gain * q_meas_aligned);
 }
 
 void RovStateEstimator::correctDepth(double z_meas, const Vec3 & r_depth_body)
@@ -50,12 +50,12 @@ void RovStateEstimator::correctDepth(double z_meas, const Vec3 & r_depth_body)
   const RotMat r = quatToRotMat(q_hat_);
   const double z_pred = p_hat_world_.z() + (r * r_depth_body).z();
   const double residual = z_meas - z_pred;
-  p_hat_world_.z() += kDepthPosGain * residual;
+  p_hat_world_.z() += gains_.depth_pos_gain * residual;
 
   // Secondary vertical-velocity correction: nudge the world-Z component of the current
   // velocity estimate toward the residual rate, then re-project into body frame.
   Vec3 v_world = r * v_hat_body_;
-  v_world.z() += kDepthVelGain * residual;
+  v_world.z() += gains_.depth_vel_gain * residual;
   v_hat_body_ = r.transpose() * v_world;
 }
 
@@ -69,11 +69,11 @@ void RovStateEstimator::correctDvl(
   last_dvl_meas_ = v_dvl_meas_body;
 
   const Vec3 y_v_com = v_dvl_meas_body - omega_hat_body_.cross(r_dvl_body);
-  v_hat_body_ += kDvlVelGain * (y_v_com - v_hat_body_);
+  v_hat_body_ += gains_.dvl_vel_gain * (y_v_com - v_hat_body_);
 
   const RotMat r = quatToRotMat(q_hat_);
   const double x_pred = p_hat_world_.x() + (r * r_dvl_body).x();
-  p_hat_world_.x() += kDvlRangeGain * (range_meas - x_pred);
+  p_hat_world_.x() += gains_.dvl_range_gain * (range_meas - x_pred);
 }
 
 void RovStateEstimator::correctContact(
@@ -84,8 +84,8 @@ void RovStateEstimator::correctContact(
     have_pad_force_filtered_ = true;
   } else {
     for (int i = 0; i < 4; ++i) {
-      pad_force_filtered_[i] = (1.0 - kContactForceFilterGain) * pad_force_filtered_[i] +
-        kContactForceFilterGain * pad_force_meas[i];
+      pad_force_filtered_[i] = (1.0 - gains_.contact_force_filter_gain) * pad_force_filtered_[i] +
+        gains_.contact_force_filter_gain * pad_force_meas[i];
     }
   }
 
@@ -96,10 +96,8 @@ void RovStateEstimator::correctContact(
     return;
   }
 
-  v_hat_body_.x() = (1.0 - kContactVelGain) * v_hat_body_.x();
-  p_hat_world_.x() += kContactPosGain * (x_wall_contact - p_hat_world_.x());
+  v_hat_body_.x() = (1.0 - gains_.contact_vel_gain) * v_hat_body_.x();
+  p_hat_world_.x() += gains_.contact_pos_gain * (x_wall_contact - p_hat_world_.x());
 }
-
-Vec3 RovStateEstimator::rpy() const { return rotMatToRPY(quatToRotMat(q_hat_)); }
 
 }  // namespace adhere_controller

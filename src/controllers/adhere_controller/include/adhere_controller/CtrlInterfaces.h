@@ -9,6 +9,8 @@
 #include "hardware_interface/loaned_command_interface.hpp"
 #include "hardware_interface/loaned_state_interface.hpp"
 
+#include "adhere_controller/common/AtomicBridge.h"
+
 namespace adhere_controller
 {
 
@@ -21,10 +23,10 @@ namespace adhere_controller
 struct ControlInputs
 {
   // /rov/fsm_command (FsmCommand.msg): ONLY switches FSM states.
-  std::atomic<int> command{0};  // 0=NO_CHANGE, 1=IDLE_PASSIVE_NONE, 2=HOLD_PID_DEPTH, 3=TELEOP_OPENLOOP_6DOF, 4=HOLD_PID_6DOF
+  std::atomic<int> command{0};  // 0=NO_CHANGE, 1=IDLE_PASSIVE_NONE, 2=TELEOP_OPENLOOP_6DOF, 3=HOLD_PID_6DOF (Phase 5.0 compacted IDs, see FsmCommand.msg)
 
   // /rov/setpoint_cmd (SetpointCommand.msg): discrete numeric setpoints, orthogonal to state
-  // switching. setpoint_seq increments once per received message so StateDepthHold/StatePidHold
+  // switching. setpoint_seq increments once per received message so StatePidHold/StateAdhere*
   // can edge-detect "a new setpoint just arrived" instead of re-applying the same message every
   // tick (which would fight the Xbox left-stick continuous nudge/move integration). Phase 3.6:
   // target pose is now carried as position + unit quaternion (matching SetpointCommand.msg's
@@ -67,8 +69,6 @@ struct ActiveState
 {
   double pos_w[3] = {0.0, 0.0, 0.0};        // world-frame CoM position [x, y, z]
   double quat_w[4] = {1.0, 0.0, 0.0, 0.0};  // world-frame orientation, Hamilton (w, x, y, z) (Phase 3.6)
-  double rpy[3] = {0.0, 0.0, 0.0};          // [roll, pitch, yaw], rad -- derived from quat_w, kept
-                                             // for StateDepthHold's small-angle Euler PD damping
   double vel_body[3] = {0.0, 0.0, 0.0};     // body-frame linear velocity
   double omega_body[3] = {0.0, 0.0, 0.0};   // body-frame angular velocity
   double pad_force[4] = {0.0, 0.0, 0.0, 0.0};  // TL, TR, BL, BR normal contact force
@@ -81,10 +81,9 @@ struct ActiveState
 // worker's latest OuterLoopOutput here once per 500Hz tick (briefly under outer_worker_mutex_, on
 // the 500Hz thread only) -- FSMState::run() then reads it lock-free, same isolation discipline as
 // ActiveState above (no FSMState ever touches the worker thread/mutex directly).
-struct OuterLoopCommand
+struct OuterLoopCommand : public AtomicBridgeBase
 {
   std::array<std::atomic<double>, 8> u_star;
-  std::atomic<bool> valid{false};
 
   // std::atomic<double>'s default constructor leaves the value indeterminate pre-C++20, so each
   // array element is explicitly zeroed here rather than relying on `= {}` aggregate init.
@@ -104,21 +103,19 @@ struct OuterLoopCommand
 // at on_activate()). changed_pending is set true whenever the newly-resolved target differs from
 // the previously-active one by more than the 0.06m auto-detach threshold; each ADHERE_* state
 // clears it after resetting its own docked_/standoff_homed_ gates to force a fresh homing pass.
-struct AdhereTargetState
+struct AdhereTargetState : public AtomicBridgeBase
 {
   std::atomic<double> target_y{0.0};
   std::atomic<double> target_depth_m{1.0};
-  std::atomic<bool> valid{false};
   std::atomic<bool> changed_pending{false};
 
-  // Raw resolved-on-the-executor-thread request, same seq-counter idiom as ControlInputs::
-  // setpoint_seq above: AdhereController's /rov/adhere_target_cmd callback resolves TAG_PRESET/
-  // CUSTOM_* immediately (pure lookups against model_params_, no cross-thread state touched),
-  // but defers USE_CURRENT's active_state read to AdhereController::update() on the 500Hz
-  // thread -- the only thread ActiveState is ever safely read from -- by stashing
-  // use_current_requested here and bumping command_seq.
+  // Raw resolved-on-the-executor-thread request: AdhereController's /rov/adhere_target_cmd
+  // callback resolves TAG_PRESET/CUSTOM_* immediately (pure lookups against model_params_, no
+  // cross-thread state touched), but defers USE_CURRENT's active_state read to
+  // AdhereController::update() on the 500Hz thread -- the only thread ActiveState is ever safely
+  // read from -- by stashing use_current_requested here and bumping the inherited `seq` counter
+  // (CLAUDE.md Phase 5.0 Stage 2.5, folded from this struct's former standalone command_seq).
   std::atomic<bool> use_current_requested{false};
-  std::atomic<uint64_t> command_seq{0};
 };
 
 // Zero-copy FSM/hardware bridge, modeled after quadruped_ros2_control's CtrlInterfaces: holds

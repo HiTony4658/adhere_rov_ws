@@ -2,7 +2,9 @@
 # switches FSM state (see FsmCommand) and never carries a generic 6-DOF pose (see
 # SetpointCommand) -- scoped strictly to mutating the shared AdhereStageParams target_y/
 # target_depth_m at runtime, e.g. from a wall QR-code/AprilTag preset or a console-typed custom
-# value. Published by state_cmd_console_node on /rov/adhere_target_cmd, consumed by
+# value. Published on /rov/adhere_target_cmd via `ros2 topic pub` directly (Phase 5.0 deleted
+# the former dedicated state_cmd_console_node setpoint terminal) or by
+# adhere_apriltag_detector's measured TagDetection (Phase 5.0 Stage 6), consumed by
 # AdhereController, which resolves TAG_PRESET against robot_control.yaml's adhere_wall_tags
 # table and writes the result into CtrlInterfaces' live AdhereTargetState.
 std_msgs/Header header

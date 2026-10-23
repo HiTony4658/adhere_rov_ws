@@ -20,7 +20,8 @@
 
 | 软件包 | 职责 |
 |---|---|
-| [`adhere_keyboard_input`](adhere_keyboard_input/README.md) | 键盘遥操作与基准触发节点 |
+| [`adhere_teleop_gcs`](adhere_teleop_gcs/README.md) | 操作员输入/GCS：FSM 状态切换终端 + Xbox 手柄遥操作 |
+| [`adhere_monitor`](adhere_monitor/README.md) | 可观测性/离线评估：实时诊断 CLI + 基准对比表 |
 
 ## Phase 1 状态
 

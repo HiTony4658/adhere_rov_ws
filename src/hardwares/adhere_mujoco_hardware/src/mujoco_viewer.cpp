@@ -993,19 +993,20 @@ void MujocoViewer::drawOverlayTelemetry(mjrRect viewport)
     ? "STANDOFF_HOMING"
     : (adhere_stage_code == 2 ? "SOFT_DOCKING" : (adhere_stage_code == 3 ? "WALL_ADHERED" : "n/a"));
   // Mirrors ControllerState.msg::current_state's int32 encoding (comment in that .msg file) --
-  // a plain local UI label lookup, not a link/header dependency on adhere_controller.
-  static const char * kFsmStateNames[9] = {
-    "NONE", "IDLE_PASSIVE_NONE", "HOLD_PID_DEPTH", "TELEOP_OPENLOOP_6DOF", "HOLD_PID_6DOF",
+  // a plain local UI label lookup, not a link/header dependency on adhere_controller. Phase 5.0:
+  // HOLD_PID_DEPTH deleted and IDs compacted to 1-7.
+  static const char * kFsmStateNames[8] = {
+    "NONE", "IDLE_PASSIVE_NONE", "TELEOP_OPENLOOP_6DOF", "HOLD_PID_6DOF",
     "ADHERE_PID_WBC", "ADHERE_SMC_WBC", "ADHERE_MPPI_BASELINE", "ADHERE_MPPI_KAMR"};
   const int fsm_code = bridge_->fsm_current_state_code.load();
   const char * fsm_state_name =
-    (fsm_code >= 0 && fsm_code <= 8) ? kFsmStateNames[fsm_code] : "UNKNOWN";
+    (fsm_code >= 0 && fsm_code <= 7) ? kFsmStateNames[fsm_code] : "UNKNOWN";
 
-  // Phase 4.3: Target Pos line format is per-FSM-category, not a single universal template --
-  // IDLE_PASSIVE_NONE/TELEOP_OPENLOOP_6DOF (fsm_code 1/3) have no target at all;
-  // HOLD_PID_DEPTH (2) only controls Z; ADHERE_* (5/6/7) visually pin X to the wall plane
-  // (world X=0, matching adhere_mujoco_node.cpp's marker logic) regardless of the live
-  // standoff/approach X; HOLD_PID_6DOF (4) is the only state with a free 3D position target.
+  // Phase 4.3 (IDs compacted Phase 5.0): Target Pos line format is per-FSM-category, not a
+  // single universal template -- IDLE_PASSIVE_NONE/TELEOP_OPENLOOP_6DOF (fsm_code 1/2) have no
+  // target at all; ADHERE_* (4/5/6) visually pin X to the wall plane (world X=0, matching
+  // adhere_mujoco_node.cpp's marker logic) regardless of the live standoff/approach X;
+  // HOLD_PID_6DOF (3) is the only state with a free 3D position target.
   char target_line[128];
   const bool target_valid = bridge_->target_valid.load();
   const double target_x = bridge_->target_x.load();
@@ -1014,11 +1015,7 @@ void MujocoViewer::drawOverlayTelemetry(mjrRect viewport)
   const double target_yaw_deg = bridge_->target_yaw_deg.load();
   if (!target_valid) {
     std::snprintf(target_line, sizeof(target_line), "Target Pos: None (Passive / Open-Loop)");
-  } else if (fsm_code == 2) {
-    std::snprintf(
-      target_line, sizeof(target_line), "Target Pos: [--, --, %.3f] m (Depth: %.2f m)", target_z,
-      -target_z);
-  } else if (fsm_code >= 5 && fsm_code <= 7) {
+  } else if (fsm_code >= 4 && fsm_code <= 6) {
     std::snprintf(
       target_line, sizeof(target_line), "Target Pos: [0.000, %.3f, %.3f] m (Yaw: 0.0 deg)",
       target_y, target_z);
@@ -1166,7 +1163,7 @@ void MujocoViewer::renderFrame()
   }
 
   // Phase 4.2 (generalized Phase 4.3): green target sphere at the active state's reference
-  // pose -- shown whenever target_valid (HOLD_PID_DEPTH/HOLD_PID_6DOF/ADHERE_*), hidden for
+  // pose -- shown whenever target_valid (HOLD_PID_6DOF/ADHERE_*), hidden for
   // IDLE_PASSIVE_NONE/TELEOP_OPENLOOP_6DOF. bridge_->target_x already has the ADHERE_*
   // category's visual X=0 pin baked in by adhere_mujoco_node.cpp's subscription callback.
   if (bridge_->target_valid.load() && scn_.ngeom < scn_.maxgeom) {

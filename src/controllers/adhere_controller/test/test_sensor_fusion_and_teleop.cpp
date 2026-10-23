@@ -1,5 +1,5 @@
 // Phase 3.5 verification (CLAUDE.md Stage 3): RovStateEstimator's DVL lever-arm compensation,
-// closed-loop StateDepthHold/StatePidHold tracking driven entirely through sensor_fusion (never
+// closed-loop StatePidHold tracking driven entirely through sensor_fusion (never
 // ground truth), and the Xbox LT/RT -> pitch/roll teleop mapping used by StateOpenLoop/
 // StatePidHold. Reuses the same "fake CtrlInterfaces with LoanedStateInterface/
 // LoanedCommandInterface backed by local doubles" pattern as test_fsm_states.cpp -- no
@@ -21,7 +21,6 @@
 #include "adhere_controller/CtrlInterfaces.h"
 #include "adhere_controller/dynamics/ModelParams.h"
 #include "adhere_controller/estimator/RovStateEstimator.h"
-#include "adhere_controller/FSM/StateDepthHold.h"
 #include "adhere_controller/FSM/StateOpenLoop.h"
 #include "adhere_controller/FSM/StatePidHold.h"
 
@@ -208,12 +207,10 @@ private:
   {
     const Vec3 est_pos = estimator_.positionWorld();
     const Vec3 est_vel = estimator_.velocityBody();
-    const Vec3 est_rpy = estimator_.rpy();
     const Vec3 est_omega = estimator_.angularVelocityBody();
     const auto est_quat = estimator_.orientation();
     for (int i = 0; i < 3; ++i) {
       ci.active_state.pos_w[i] = est_pos(i);
-      ci.active_state.rpy[i] = est_rpy(i);
       ci.active_state.vel_body[i] = est_vel(i);
       ci.active_state.omega_body[i] = est_omega(i);
     }
@@ -242,31 +239,6 @@ constexpr std::array<const char *, 8> NoisySensorFusionPlant::kThrusterNames;
 constexpr double kInnerDt = 0.004;  // 250Hz inner loop
 
 }  // namespace
-
-// --- Test 2: closed-loop StateDepthHold on sensor_fusion only (CLAUDE.md Stage 3.2) ---------
-TEST(SensorFusionClosedLoop, StateDepthHoldTracksWithin15mmUsingOnlyNoisySensors)
-{
-  NoisySensorFusionPlant plant;
-  plant.setPosition(0.0, 0.0, -2.0);
-
-  adhere_controller::StateDepthHold state(plant.ci, kModelParams);
-  state.enter();
-
-  plant.ci.control_inputs_.setpoint_command_type.store(1);  // MODE_DEPTH_ONLY
-  plant.ci.control_inputs_.setpoint_target_pos_z.store(-3.00);
-  plant.ci.control_inputs_.setpoint_seq.store(1);
-
-  const rclcpp::Time t0(0, 0, RCL_ROS_TIME);
-  const rclcpp::Duration period = rclcpp::Duration::from_seconds(kInnerDt);
-
-  for (int i = 0; i < 6000; ++i) {  // 24s settling budget @ 250Hz
-    state.run(t0, period);
-    plant.writeCommands();
-    plant.stepInnerPeriod();
-  }
-
-  EXPECT_NEAR(plant.truePosition().z(), -3.00, 0.015);
-}
 
 // --- Test 3: closed-loop StatePidHold on sensor_fusion only ----------------------------------
 TEST(SensorFusionClosedLoop, StatePidHoldLocksWithin15mmUsingOnlyNoisySensors)

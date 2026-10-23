@@ -20,7 +20,6 @@
 #include "adhere_controller/common/OutputSafety.h"
 #include "adhere_controller/CtrlInterfaces.h"
 #include "adhere_controller/dynamics/ModelParams.h"
-#include "adhere_controller/FSM/StateDepthHold.h"
 #include "adhere_controller/FSM/StateOpenLoop.h"
 #include "adhere_controller/FSM/StatePidHold.h"
 
@@ -130,53 +129,6 @@ private:
 constexpr double kDt = 0.004;  // 250Hz inner loop
 
 }  // namespace
-
-TEST(FsmStates, StateDepthHoldTracksSetpointAndTeleopNudgeWithin5mm)
-{
-  // CLAUDE.md Phase 3.3 tank geometry: water surface Z=0.0m, floor Z=-10.0m, workspace_z in
-  // [-9.80, -0.15]. ROV starts at a free-drift-like depth of 2.0m (Z=-2.0).
-  FakePlant plant;
-  plant.setPosition(0.0, 0.0, -2.0);
-
-  adhere_controller::StateDepthHold state(plant.ci, kModelParams);
-  state.enter();
-
-  // Discrete setpoint: target depth 3.5m (target_z = -3.50m). command_type=1=MODE_DEPTH_ONLY.
-  plant.ci.control_inputs_.setpoint_command_type.store(1);
-  plant.ci.control_inputs_.setpoint_target_pos_z.store(-3.50);
-  plant.ci.control_inputs_.setpoint_seq.store(1);
-
-  const rclcpp::Time t0(0, 0, RCL_ROS_TIME);
-  const rclcpp::Duration period = rclcpp::Duration::from_seconds(kDt);
-  for (int i = 0; i < 4000; ++i) {  // 16s settling budget
-    state.run(t0, period);
-    plant.writeCommands();
-    plant.step(kDt);
-  }
-  EXPECT_NEAR(plant.position().z(), -3.50, 0.005);
-
-  // Xbox left-stick heave nudge: push target_z_ DOWN (deeper) by ~0.30m over 1.0s, then
-  // release. heave_z=-1.0 decreases target_z_ (away from workspace_z_max, so no clamp fires).
-  plant.ci.control_inputs_.teleop_active.store(true);
-  plant.ci.control_inputs_.teleop_heave_z.store(-1.0);
-  for (int i = 0; i < 250; ++i) {  // 1.0s at 250Hz
-    state.run(t0, period);
-    plant.writeCommands();
-    plant.step(kDt);
-  }
-  plant.ci.control_inputs_.teleop_active.store(false);
-  plant.ci.control_inputs_.teleop_heave_z.store(0.0);
-  const double target_after_nudge = state.targetPose().pos.z();
-  EXPECT_NEAR(target_after_nudge, -3.80, 0.02);
-
-  for (int i = 0; i < 4000; ++i) {  // let it settle at the new, now-frozen target
-    state.run(t0, period);
-    plant.writeCommands();
-    plant.step(kDt);
-  }
-  EXPECT_NEAR(plant.position().z(), target_after_nudge, 0.005);
-  EXPECT_NEAR(state.targetPose().pos.z(), target_after_nudge, 1e-9);  // stays latched, no drift
-}
 
 TEST(FsmStates, StateOpenLoopPureSwayProducesZeroParasiticMoment)
 {

@@ -5,8 +5,8 @@ standalone on a lightweight remote laptop, controlling either the Dell Precision
 server or the Jetson AGX Xavier over ROS 2 DDS.
 
 One-line usage:
-    ros2 launch adhere_keyboard_input teleop_gcs.launch.py
-    ros2 launch adhere_keyboard_input teleop_gcs.launch.py dev:=/dev/input/js1
+    ros2 launch adhere_teleop_gcs teleop_gcs.launch.py
+    ros2 launch adhere_teleop_gcs teleop_gcs.launch.py dev:=/dev/input/js1
 """
 import os
 import subprocess
@@ -25,8 +25,8 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    keyboard_input_share = get_package_share_directory("adhere_keyboard_input")
-    xbox_teleop_yaml = os.path.join(keyboard_input_share, "config", "xbox_teleop.yaml")
+    teleop_gcs_pkg_share = get_package_share_directory("adhere_teleop_gcs")
+    xbox_teleop_yaml = os.path.join(teleop_gcs_pkg_share, "config", "xbox_teleop.yaml")
 
     declare_dev = DeclareLaunchArgument(
         "dev", default_value="/dev/input/js0",
@@ -53,7 +53,7 @@ def generate_launch_description():
     )
 
     xbox_teleop_node = Node(
-        package="adhere_keyboard_input",
+        package="adhere_teleop_gcs",
         executable="xbox_teleop_node",
         name="xbox_teleop_node",
         output="screen",
@@ -69,12 +69,12 @@ def generate_launch_description():
             "bash", "-c",
             "if command -v gnome-terminal >/dev/null 2>&1; then "
             "gnome-terminal --wait --title='ROV FSM Console' -- "
-            "ros2 run adhere_keyboard_input fsm_console_node; "
+            "ros2 run adhere_teleop_gcs fsm_console_node; "
             "elif command -v xterm >/dev/null 2>&1; then "
             "xterm -T 'ROV FSM Console' -e "
-            "ros2 run adhere_keyboard_input fsm_console_node; "
+            "ros2 run adhere_teleop_gcs fsm_console_node; "
             "else echo 'fsm_console: neither gnome-terminal nor xterm found, run "
-            "\"ros2 run adhere_keyboard_input fsm_console_node\" manually' >&2; fi",
+            "\"ros2 run adhere_teleop_gcs fsm_console_node\" manually' >&2; fi",
         ],
         output="screen",
     )
@@ -82,25 +82,25 @@ def generate_launch_description():
     # Root-cause fix for the Ctrl+C orphan-process bug: `gnome-terminal --wait` does not run
     # fsm_console_node as a direct child of this launch's process tree -- it D-Bus-activates the
     # shared `gnome-terminal-server` daemon, which forks the actual `ros2 run
-    # adhere_keyboard_input fsm_console_node` (and its nested state_cmd_console_node child) under
-    # that daemon instead. `ros2 launch`'s own SIGINT/Shutdown propagation only reaches processes
-    # in its own tree (confirmed empirically: joy_node/xbox_teleop_node/the fsm_console
-    # ExecuteProcess wrapper all exit cleanly on SIGINT, but the gnome-terminal-server-spawned
-    # fsm_console_node/state_cmd_console_node processes survive, reparented to systemd --user).
-    # `pkill -f` matches the full command line, so it reaches that detached tree regardless of its
-    # real parent. This MUST be a synchronous `OpaqueFunction` (blocking `subprocess.call`), not
-    # an `ExecuteProcess` action: empirically verified that `ros2 launch`'s Ctrl-C path calls
-    # `LaunchService._shutdown(force_sync=True)`, which emits the `Shutdown` event synchronously
-    # and tears the asyncio loop down immediately after -- an `ExecuteProcess` queued from
-    # `on_shutdown` never actually gets scheduled/started in that window (confirmed with a
-    # minimal repro: a `LogInfo` in the same `on_shutdown` list fires, but a sibling
-    # `ExecuteProcess` never produces output), while a blocking call inside `OpaqueFunction` runs
-    # to completion before shutdown proceeds.
+    # adhere_teleop_gcs fsm_console_node` under that daemon instead. `ros2 launch`'s own
+    # SIGINT/Shutdown propagation only reaches processes in its own tree (confirmed empirically:
+    # joy_node/xbox_teleop_node/the fsm_console ExecuteProcess wrapper all exit cleanly on
+    # SIGINT, but the gnome-terminal-server-spawned fsm_console_node process survives, reparented
+    # to systemd --user). `pkill -f` matches the full command line, so it reaches that detached
+    # tree regardless of its real parent. This MUST be a synchronous `OpaqueFunction` (blocking
+    # `subprocess.call`), not an `ExecuteProcess` action: empirically verified that `ros2
+    # launch`'s Ctrl-C path calls `LaunchService._shutdown(force_sync=True)`, which emits the
+    # `Shutdown` event synchronously and tears the asyncio loop down immediately after -- an
+    # `ExecuteProcess` queued from `on_shutdown` never actually gets scheduled/started in that
+    # window (confirmed with a minimal repro: a `LogInfo` in the same `on_shutdown` list fires,
+    # but a sibling `ExecuteProcess` never produces output), while a blocking call inside
+    # `OpaqueFunction` runs to completion before shutdown proceeds. Phase 5.0 deleted
+    # fsm_console_node's nested state_cmd_console_node child (and that node entirely) along with
+    # the per-state setpoint-terminal auto-spawn feature, so only fsm_console_node itself needs
+    # this treatment now -- re-evaluated and kept because fsm_console_node is still
+    # gnome-terminal-spawned by this same launch file below.
     def _kill_orphaned_consoles(context):
-        subprocess.call(["bash", "-c",
-                          "pkill -TERM -f fsm_console_node; "
-                          "pkill -TERM -f state_cmd_console_node; "
-                          "true"])
+        subprocess.call(["bash", "-c", "pkill -TERM -f fsm_console_node; true"])
         return None
 
     kill_orphaned_consoles_on_shutdown = RegisterEventHandler(

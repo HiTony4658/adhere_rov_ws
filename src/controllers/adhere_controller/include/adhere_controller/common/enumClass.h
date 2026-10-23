@@ -4,13 +4,16 @@
 namespace adhere_controller
 {
 
-// FUNCTION_ALGORITHM_CATEGORY naming convention (CLAUDE.md, Phase 4.3); numeric FsmCommand IDs
-// (1-7 here, 8=ADHERE_MPPI_KAMR not yet implemented) are unchanged from the pre-rename names.
+// FUNCTION_ALGORITHM_CATEGORY naming convention (CLAUDE.md, Phase 4.3). Phase 5.0: HOLD_PID_
+// DEPTH deleted (redundant with HOLD_PID_6DOF) and numeric FsmCommand IDs compacted to 1-7
+// (see FsmCommand.msg). ADHERE_MPPI_KAMR (FsmCommand ID 7) remains a rename-only placeholder
+// with no concrete FSMState/enum entry yet -- commanding it is a no-op (falls through to
+// checkFsmCommandChange()'s default case), identical to the pre-5.0 behavior of commanding the
+// old ID 8.
 enum class FSMStateName
 {
   INVALID,
   IDLE_PASSIVE_NONE,
-  HOLD_PID_DEPTH,
   TELEOP_OPENLOOP_6DOF,
   HOLD_PID_6DOF,
   ADHERE_PID_WBC,

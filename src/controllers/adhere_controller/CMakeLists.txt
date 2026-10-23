@@ -57,8 +57,8 @@ find_package(CUDA REQUIRED)
 # find_package(OsqpEigen REQUIRED)
 
 # Single unified ControllerInterface plugin (CLAUDE.md Phase 3.3): FSM lifecycle management
-# (adhere_controller.cpp) + all FSMState implementations (StatePassive/StateDepthHold/
-# StateOpenLoop/StatePidHold) in one library/package -- these never build or deploy
+# (adhere_controller.cpp) + all FSMState implementations (StatePassive/StateOpenLoop/
+# StatePidHold/StateAdhere*) in one library/package -- these never build or deploy
 # independently of each other, so the former adhere_controller_common/adhere_kamr_controller
 # package split added pure linking overhead with no decoupling benefit.
 add_library(${PROJECT_NAME} SHARED
@@ -74,10 +74,10 @@ add_library(${PROJECT_NAME} SHARED
   src/dynamics/ModelParams.cpp
   src/estimator/RovStateEstimator.cpp
   src/FSM/StatePassive.cpp
+  src/FSM/StateAdhereBase.cpp
   src/FSM/StateAdherePid.cpp
   src/FSM/StateAdhereSmc.cpp
   src/FSM/StateBaselineMppi.cpp
-  src/FSM/StateDepthHold.cpp
   src/FSM/StateOpenLoop.cpp
   src/FSM/StatePidHold.cpp
 )
@@ -164,8 +164,8 @@ if(BUILD_TESTING)
   ament_target_dependencies(test_fsm_states rclcpp hardware_interface)
 
   # Phase 3.5 verification (CLAUDE.md Stage 3): RovStateEstimator's DVL lever-arm compensation,
-  # closed-loop StateDepthHold/StatePidHold tracking driven entirely through "sensor_fusion"
-  # (never ground truth), and the Xbox LT/RT -> pitch/roll teleop mapping.
+  # closed-loop StatePidHold tracking driven entirely through "sensor_fusion" (never ground
+  # truth), and the Xbox LT/RT -> pitch/roll teleop mapping.
   ament_add_gtest(test_sensor_fusion_and_teleop
     test/test_sensor_fusion_and_teleop.cpp
   )

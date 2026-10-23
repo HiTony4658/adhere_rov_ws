@@ -1,8 +1,9 @@
-// benchmark_evaluator_node: standalone offline-evaluation node (CLAUDE.md Phase 3.8 Stage 2.3)
-// that turns a rolling window of /rov/controller_state + /rov/ground_truth_odom +
+// benchmark_evaluator_node: standalone offline-evaluation node (CLAUDE.md Phase 3.8 Stage 2.3,
+// repointed to /rov/benchmark_metrics in Phase 5.0 Stage 7) that turns a rolling window of
+// /rov/controller_state + /rov/benchmark_metrics + /rov/ground_truth_odom +
 // /rov/runtime_diagnostics telemetry into a publication-ready comparison table (tracking
 // accuracy vs. ground truth, control energy/effort, smoothness/chattering, wall-adhesion
-// safety). This is the one node in adhere_keyboard_input explicitly allowed to subscribe to
+// safety). This is the one node in this package explicitly allowed to subscribe to
 // /rov/ground_truth_odom (CLAUDE.md: that topic is offline-evaluation-only, never consumed by
 // adhere_controller) -- every other node in this package stays Sim-to-Real pure. Zero
 // dependency on MuJoCo/CUDA/ros2_control: nav_msgs/Odometry is a core ROS 2 message type, so
@@ -16,6 +17,7 @@
 
 #include "rclcpp/rclcpp.hpp"
 
+#include "adhere_control_msgs/msg/benchmark_metrics.hpp"
 #include "adhere_control_msgs/msg/controller_state.hpp"
 #include "adhere_control_msgs/msg/runtime_diagnostics.hpp"
 #include "nav_msgs/msg/odometry.hpp"
@@ -52,6 +54,14 @@ double g_window_sec = 12.0;
 bool g_have_gt = false;
 double g_gt_y = 0.0, g_gt_z = 0.0;
 double g_gt_qw = 1.0, g_gt_qx = 0.0, g_gt_qy = 0.0, g_gt_qz = 0.0;
+
+// Latest BenchmarkMetrics sample (CLAUDE.md Phase 5.0 Stage 7: split off ControllerState,
+// published separately on /rov/benchmark_metrics at the 10Hz diag rate -- lower rate than
+// /rov/controller_state's 25Hz outer-loop rate, so the controller_state_sub callback below
+// reads these cached fields rather than driving Sample construction off this topic directly).
+std::mutex g_benchmark_mutex;
+bool g_have_benchmark = false;
+adhere_control_msgs::msg::BenchmarkMetrics g_latest_benchmark;
 
 double attitudeErrorDeg(
   double qw_a, double qx_a, double qy_a, double qz_a, double qw_b, double qx_b, double qy_b,
@@ -193,10 +203,27 @@ int main(int argc, char ** argv)
         // report on timing_healthy in the future without a topic-wiring change.
       });
 
+  auto benchmark_metrics_sub =
+    node->create_subscription<adhere_control_msgs::msg::BenchmarkMetrics>(
+      "/rov/benchmark_metrics", 10,
+      [](const adhere_control_msgs::msg::BenchmarkMetrics::SharedPtr msg) {
+        std::lock_guard<std::mutex> lock(g_benchmark_mutex);
+        g_latest_benchmark = *msg;
+        g_have_benchmark = true;
+      });
+
   auto controller_state_sub =
     node->create_subscription<adhere_control_msgs::msg::ControllerState>(
       "/rov/controller_state", 10,
       [node](const adhere_control_msgs::msg::ControllerState::SharedPtr msg) {
+        adhere_control_msgs::msg::BenchmarkMetrics benchmark;
+        {
+          std::lock_guard<std::mutex> lock(g_benchmark_mutex);
+          if (!g_have_benchmark) {
+            return;
+          }
+          benchmark = g_latest_benchmark;
+        }
         std::lock_guard<std::mutex> lock(g_mutex);
         if (!g_have_gt) {
           return;
@@ -211,13 +238,13 @@ int main(int argc, char ** argv)
           msg->estimated_pose.orientation.w, msg->estimated_pose.orientation.x,
           msg->estimated_pose.orientation.y, msg->estimated_pose.orientation.z, g_gt_qw, g_gt_qx,
           g_gt_qy, g_gt_qz);
-        s.cumulative_energy_l2 = msg->cumulative_energy_l2;
-        s.cumulative_impulse_l1 = msg->cumulative_impulse_l1;
-        s.thrust_power_proxy = msg->thrust_power_proxy;
-        s.thrust_slew_rate_l2 = msg->thrust_slew_rate_l2;
-        s.any_saturated = msg->saturated_thruster_count > 0;
-        s.kern_margin = msg->kern_margin;
-        s.full_contact = msg->active_contact_pad_count == 4;
+        s.cumulative_energy_l2 = benchmark.cumulative_energy_l2;
+        s.cumulative_impulse_l1 = benchmark.cumulative_impulse_l1;
+        s.thrust_power_proxy = benchmark.thrust_power_proxy;
+        s.thrust_slew_rate_l2 = benchmark.thrust_slew_rate_l2;
+        s.any_saturated = benchmark.saturated_thruster_count > 0;
+        s.kern_margin = benchmark.kern_margin;
+        s.full_contact = benchmark.active_contact_pad_count == 4;
 
         g_window.push_back(s);
         pruneWindow(s.stamp);

@@ -8,6 +8,7 @@
 #include "rclcpp/rclcpp.hpp"
 
 #include "adhere_controller/common/enumClass.h"
+#include "adhere_controller/common/FsmRegistry.h"
 #include "adhere_controller/common/mathTypes.h"
 #include "adhere_controller/CtrlInterfaces.h"
 #include "adhere_controller/dynamics/ModelParams.h"
@@ -45,43 +46,26 @@ public:
 
   virtual void exit() = 0;
 
-  // Default implementation (CLAUDE.md Phase 3.2 Stage 2.2, extended Phase 3.8): maps the live
-  // control_inputs_.command atomic (set by AdhereController's /rov/fsm_command
-  // subscription, 0=NO_CHANGE..7=ADHERE_MPPI_BASELINE) onto the requested FSMStateName, or this state's own
-  // name if no change is requested. All concrete states share this identical mapping, so each
-  // one's checkChange() override is just `return checkFsmCommandChange();` -- replaces the
-  // Phase 3.1 pattern of each state hardcoding its own `== 1`/`== 2` comparison, which does not
-  // scale cleanly to many states.
+  // Default implementation (CLAUDE.md Phase 3.2 Stage 2.2, extended Phase 3.8, IDs compacted
+  // Phase 5.0, driven by the single FsmRegistry.h table since Phase 5.0 Stage 2.1): maps the
+  // live control_inputs_.command atomic (set by AdhereController's /rov/fsm_command
+  // subscription, 0=NO_CHANGE..6=ADHERE_MPPI_BASELINE, 7=ADHERE_MPPI_KAMR unimplemented) onto
+  // the requested FSMStateName, or this state's own name if no change is requested. Every
+  // concrete state shares this identical mapping (base-class default, never overridden -- see
+  // CLAUDE.md Phase 5.0 Stage 1.5).
   FSMStateName checkFsmCommandChange() const
   {
-    switch (ctrl_interfaces_.control_inputs_.command.load()) {
-      case 1:
-        return FSMStateName::IDLE_PASSIVE_NONE;
-      case 2:
-        return FSMStateName::HOLD_PID_DEPTH;
-      case 3:
-        return FSMStateName::TELEOP_OPENLOOP_6DOF;
-      case 4:
-        return FSMStateName::HOLD_PID_6DOF;
-      case 5:
-        return FSMStateName::ADHERE_PID_WBC;
-      case 6:
-        return FSMStateName::ADHERE_SMC_WBC;
-      case 7:
-        return FSMStateName::ADHERE_MPPI_BASELINE;
-      default:
-        return state_name;
-    }
+    const FSMStateName requested = fsmIdToStateName(ctrl_interfaces_.control_inputs_.command.load());
+    return requested == FSMStateName::INVALID ? state_name : requested;
   }
 
-  virtual FSMStateName checkChange() { return checkFsmCommandChange(); }
+  FSMStateName checkChange() { return checkFsmCommandChange(); }
 
   // Live reference-pose report for /rov/controller_state (CLAUDE.md Phase 3.6's
   // ControllerState.msg::target_pose, geometry_msgs/Pose), published by AdhereController on
   // every outer-loop tick. Meaning is per-state: IDLE_PASSIVE_NONE/TELEOP_OPENLOOP_6DOF have no
-  // reference pose (default identity, targetValid()==false); StateDepthHold overrides pos.z (and,
-  // Phase 4.3, the actual x/y so the target sphere sits on the ROV's vertical axis);
-  // StatePidHold/StateAdhere* override the full 6-DOF pose (position + quaternion).
+  // reference pose (default identity, targetValid()==false); StatePidHold/StateAdhere* override
+  // the full 6-DOF pose (position + quaternion).
   virtual PoseTarget targetPose() const { return PoseTarget{}; }
 
   // Phase 4.3: whether targetPose()/ControllerState.msg::target_pose is actually meaningful for

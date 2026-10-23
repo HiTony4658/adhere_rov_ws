@@ -7,7 +7,7 @@
 `controllers/`、`commands/` 任意包内私自定义跨包共享的消息类型。这样可以保证：
 
 1. **单一事实来源**：`AdhereMujocoHardware`、`AdhereController`、
-   `adhere_keyboard_input` 三者若需要通过标准 ROS 2 话题/服务（而非进程内指针）交换
+   `adhere_teleop_gcs`/`adhere_monitor` 若需要通过标准 ROS 2 话题/服务（而非进程内指针）交换
    数据（例如遥测、FSM 切换请求），统一依赖本层生成的类型，避免类型定义漂移。
 2. **编译依赖方向清晰**：`interfaces` 不依赖任何其他本工作空间内的包，是依赖图的叶子
    节点，所有其他 5 个包都可以单向依赖它。

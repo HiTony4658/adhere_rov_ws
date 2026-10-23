@@ -97,8 +97,9 @@ launch/
 `thruster_max`）、接触垫几何（`pad_pos_xyz`）、Fossen 水动力前馈参数
 （`rho_water`/`gravity`/`vehicle_mass`/`displaced_volume`/`D_lin`/`D_quad`/...）、
 工作空间安全边界（`workspace_z_min`/`workspace_z_max`/`workspace_x_min`）以及
-各 FSM 状态增益（`depth_hold.*`/`open_loop.*`/`pid_hold.*`/`adhere_pid.*`/
-`adhere_smc.*`，后两者为 Phase 3.8 新增的贴壁 PID/SMC 基线增益）。切换到几何/质量
+各 FSM 状态增益（`open_loop.*`/`pid_hold.*`/`adhere_pid.*`/
+`adhere_smc.*`，后两者为 Phase 3.8 新增的贴壁 PID/SMC 基线增益；`depth_hold.*` 已随
+Phase 5.0 删除的 `HOLD_PID_DEPTH` 状态一并移除）。切换到几何/质量
 不同的新机型只需改这一份 YAML，`adhere_controller` 零 C++ 改动、零重新编译。
 本文件通过本包自己的 `launch/mujoco.launch.py`（CLAUDE.md Phase 3.4：模型/
 描述包拥有自己的启动文件，`adhere_mujoco_hardware`/`adhere_controller` 均为
@@ -140,3 +141,43 @@ ros2 launch simplified_v1_description mujoco.launch.py autostart_controllers:="[
 # 部署模式（默认是 ground_truth，与 Phase 2-3.4 行为完全一致）
 ros2 launch simplified_v1_description mujoco.launch.py estimation_mode:=sensor_fusion
 ```
+
+## 墙面贴壁目标站点 AprilTag 物理贴纸规格（CLAUDE.md Phase 5.0 Stage 6）
+
+真实部署时，每个贴壁目标站点（`robot_control.yaml` 的 `adhere_wall_tags_y`/
+`adhere_wall_tags_depth_m`，默认 4 个站点）在真实墙面上粘贴一张 **2x2 AprilTag
+矩阵**贴纸，由真实机器人上运行的 `apriltag_ros`（`tag36h11` 族）识别后发布
+`TagDetection` 到与仿真侧 `adhere_apriltag_detector` 完全相同的
+`/rov/tag_detection` 话题（详见 `perception/adhere_apriltag_detector/README.md`）。
+
+- **标签族**：`tag36h11`；单个标签黑色方块边长 `s = 80mm`；标签中心间距
+  （横/纵均相同）`p = 160mm`（相邻标签间 `80mm` 白边间隙）；矩阵黑色区域总
+  外廓 `240 x 240mm`；背板 `300 x 300mm`，防水**哑光**（Matte）覆膜——严禁
+  使用光面覆膜，水下点光源的镜面反光会导致识别失败。
+- **编号**：4 个站点 x 每站点 4 个标签 = ID `0`-`15`，站点 `k` 使用连续 ID
+  `4k..4k+3`，即 `station_id = min_id / 4`；矩阵几何中心 = 该站点在
+  `adhere_wall_tags_y`/`adhere_wall_tags_depth_m` 中的 `(Y, 深度)` 目标点：
+
+  | 站点 k | `adhere_wall_tags`（Y, 深度） | 左上 | 右上 | 左下 | 右下 |
+  |---|---|---|---|---|---|
+  | 0 | (0.00, 1.00) | 0 | 1 | 2 | 3 |
+  | 1 | (0.80, 1.00) | 4 | 5 | 6 | 7 |
+  | 2 | (-0.80, 1.50) | 8 | 9 | 10 | 11 |
+  | 3 | (1.20, 2.00) | 12 | 13 | 14 | 15 |
+
+- **`apriltag_ros` `tag_bundles` 局部坐标**（矩阵自身坐标系原点在中心，
+  `x` = 水平方向/世界 Y，`y` = 竖直方向/世界上方，半间距 `0.08m`，每个标签
+  `size = 0.08`）：
+
+  ```text
+  左上(4k+0): x=-0.08 y=+0.08    右上(4k+1): x=+0.08 y=+0.08
+  左下(4k+2): x=-0.08 y=-0.08    右下(4k+3): x=+0.08 y=-0.08
+  ```
+
+  检测到的矩阵原点位姿即该站点的 `(Y, 深度)` 目标，以 `TagDetection`
+  形式发布。
+- **安装**：4 个标签共面、紧贴墙面，行/列分别对齐世界 Y（水平）与 Z
+  （竖直，不旋转），矩阵中心落在站点目标点上。
+- **仿真侧说明**：`adhere_apriltag_detector`（仿真版）不需要这套 2x2 几何，
+  只用 4 个站点中心点——16 个 ID 在仿真里退化为 4 个点；该矩阵布局规格的
+  存在仅为了让真实 `apriltag_ros` 配置随时可用，不影响仿真行为。

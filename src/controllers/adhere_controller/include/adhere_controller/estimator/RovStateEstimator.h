@@ -4,6 +4,7 @@
 #include <array>
 
 #include "adhere_controller/common/mathTypes.h"
+#include "adhere_controller/dynamics/ModelParams.h"
 
 namespace adhere_controller
 {
@@ -29,6 +30,15 @@ namespace adhere_controller
 class RovStateEstimator
 {
 public:
+  // Phase 5.0 Stage 4: gains are now constructor-injected from ModelParams::EstimatorGains
+  // (loaded from robot_control.yaml's `estimator.*` block) instead of hardcoded
+  // `static constexpr` -- the default argument preserves the exact original Phase 3.5/3.7
+  // compiled-in values for any caller (e.g. existing gtests) that does not pass one explicitly.
+  explicit RovStateEstimator(const ModelParams::EstimatorGains & gains = ModelParams::EstimatorGains{})
+  : gains_(gains)
+  {
+  }
+
   // Re-latches the estimate to a known pose (e.g. ground truth at FSM-state enter()) and clears
   // all "have I seen this sample yet" edge-detection state. Called whenever estimation_mode
   // transitions into "sensor_fusion" so the filter does not have to converge from zero.
@@ -67,27 +77,18 @@ public:
   const Vec3 & velocityBody() const { return v_hat_body_; }
   const Vec3 & angularVelocityBody() const { return omega_hat_body_; }
   const Quat & orientation() const { return q_hat_; }
-  Vec3 rpy() const;
 
 private:
   // quatMul/normalizeQuat/smallAngleQuat/alignQuaternionHemisphere now live in mathTools.h
   // (Phase 3.6/3.7: hoisted out of here so StatePidHold's/SixDofPidController's quaternion math
   // reuses the exact same implementations instead of duplicating them).
 
-  // Fixed correction gains (see class-level design note): analytically chosen from the
-  // CLAUDE.md Stage 2.1 noise std values via the EMA steady-state-variance formula, verified
-  // empirically in test_sensor_fusion_and_teleop.cpp against the <0.015 m/s / <15mm / <1.0deg
-  // RMSE contract.
-  static constexpr double kAttGain = 0.30;
-  static constexpr double kDepthPosGain = 0.30;
-  static constexpr double kDepthVelGain = 0.10;
-  static constexpr double kDvlVelGain = 0.50;
-  static constexpr double kDvlRangeGain = 0.30;
-  // Phase 3.7 contact-aided update gains: EMA filter on the 4 raw loadcell channels, and the
-  // pseudo-measurement blend gains on v_x/p_x once contact is confirmed.
-  static constexpr double kContactForceFilterGain = 0.20;
-  static constexpr double kContactVelGain = 0.50;
-  static constexpr double kContactPosGain = 0.20;
+  // Correction gains (see class-level design note): analytically chosen from the CLAUDE.md
+  // Stage 2.1 noise std values via the EMA steady-state-variance formula, verified empirically
+  // in test_sensor_fusion_and_teleop.cpp against the <0.015 m/s / <15mm / <1.0deg RMSE contract.
+  // CLAUDE.md Phase 5.0 Stage 4: now constructor-injected (see ModelParams::EstimatorGains),
+  // not hardcoded.
+  ModelParams::EstimatorGains gains_;
 
   Vec3 p_hat_world_ = Vec3::Zero();
   Vec3 v_hat_body_ = Vec3::Zero();

@@ -2676,3 +2676,368 @@ gtest 用例 0 失败，零回归；lint 失败（copyright/cppcheck/cpplint/unc
 `test_thruster_allocator.cpp` 等——确认是 Phase 2.14 起已记录的全仓库缺版权头基线，未引入
 任何新增 lint 回归）。真实 MuJoCo 闭环烟雾测试：如上文所述，受 `on_configure()` 挂起阻塞
 未能完成，仅 `teleop_gcs.launch.py` 独立 Ctrl+C 清理验证通过（见上文）。
+
+## Phase 5.0 Stage 0（2026-10-22）：`on_configure()` 挂起复现失败——结论为"当前不可复现"，非凭空判定修复
+
+本阶段（框架"去补丁化"整合里程碑）的硬阻塞前置任务：诊断并修复 Phase 4.3/4.5 两次记录、
+三次复现的 `adhere_controller::on_configure()` 挂起（日志卡在 `"Configuring controller
+'adhere_controller'"` 后永不返回）。
+
+**诊断方法**：在 `adhere_controller.cpp::on_configure()` 的每个子步骤（订阅创建/发布者创建/
+`auto_declare` 速率参数/`ModelParams::loadFromNode()`/`BaselineMppiConfig::loadFromNode()`/
+`MultiRateDecimator` 构造/返回）和 `adhere_mujoco_node.cpp` 的 `load_controller`→
+`configure_controller`→`switch_controller`→`physics_thread` 全链路临时插入 `RCLCPP_ERROR`
+级别探针日志（`ptrace_scope=1` 且无免密 `sudo` 导致 `gdb -p <pid>`/`strace -f` 均无法附加到
+`ros2 launch` 派生的非直系子进程，遂改用日志探针而非调试器）。
+
+**结果**：三种启动方式（`headless:=true use_rviz:=false launch_teleop:=false`；带 GLFW
+窗口但无 RViz2/teleop；`mujoco.launch.py` 全部默认参数，RViz2+GLFW+teleop 终端全部开启）
+**均未复现挂起**——`on_configure()` 全部子步骤在 <5ms 内顺序完成并返回 `SUCCESS`，
+`configure_controller()`/`switch_controller()` 均即时返回 `OK`，`physics_thread` 以稳定
+500Hz 持续运行（实测 tick 间隔 1.0 ± 0.01s / 500 ticks），`/rov/controller_state` 以
+25Hz 发布真实 `sensor_fusion` 估计位姿（`state_idle_passive_none`，非零 `estimated_twist_body`
+证明物理/估计器真实运行），`ros2 topic list` 确认全部 6 个话题 + `/joint_states`/`/tf` 均已
+发布。探针日志随后已还原（`git checkout --`），未在仓库中保留任何临时调试代码。
+
+**结论**：Phase 4.3/4.5 记录的挂起在本次三次独立尝试（跨 headless/窗口/RViz2 三种配置）中
+均不可复现，原因未能定位（可能是本次之前某次未记录的依赖/环境变化间接修复，也可能与两次历史
+复现时的某个尚未识别的会话态/首次运行条件相关）——**本阶段不编造一个"修复"**，按
+`CLAUDE.md` 誠实标准记录为"当前状态：未复现，非确认修复"。经用户确认后，Stage 0 按"已解除
+阻塞"处理，Stage 1 起的真实 MuJoCo 闭环验证据此判定为可执行（若未来某次真实复现，应在那次
+立即重新打开本节诊断，而非假设已被这次的"未复现"永久排除）。
+
+## Phase 5.0 Stage 1（2026-10-22）：删除 `HOLD_PID_DEPTH`、FSM ID 压缩至 1-7、删除设定终端、删除死抽象
+
+本阶段 6 项全部是**删除/压缩**，不新增任何抽象或功能，净代码行数下降（`244` 行新增 /
+`532` 行删除，净 `-288` 行；删除 5 个文件：`StateDepthHold.{h,cpp}`、
+`state_cmd_console_node.cpp`、`algorithms/wbc/WbcAllocatorBase.h`、
+`algorithms/mppi/MppiPlannerBase.h`）。
+
+1. **删除 `HOLD_PID_DEPTH`**（与 `HOLD_PID_6DOF` 冗余）：移除 `FSM/StateDepthHold.{h,cpp}`、
+   `ModelParams::DepthHoldGains`/`depth_hold.*` 加载与 YAML 键、`enumClass.h`/
+   `adhere_controller.{cpp,hpp}` 的枚举与映射条目、`SixDofPidController.h` 的"仅深度"模式
+   引用、`mujoco_viewer.cpp`/`xbox_teleop_node.cpp`（X 按键解绑）/`fsm_console_node.cpp` 的
+   引用、`test_fsm_states.cpp`/`test_sensor_fusion_and_teleop.cpp` 的对应 gtest 用例，以及
+   `ActiveState::rpy[3]`（唯一消费者就是该状态的小角度阻尼律；验证零其它读者后，连同
+   `RovStateEstimator::rpy()` 这个仅为写它而存在的方法一并删除）。
+2. **FSM `FsmCommand` ID 由历史的 `1-8` 压缩为 `1-7`**：
+   `1=IDLE_PASSIVE_NONE, 2=TELEOP_OPENLOOP_6DOF, 3=HOLD_PID_6DOF, 4=ADHERE_PID_WBC,
+   5=ADHERE_SMC_WBC, 6=ADHERE_MPPI_BASELINE, 7=ADHERE_MPPI_KAMR`——与删除 1 同一次改动完成，
+   更新全部 4 个 msg、`adhere_controller.cpp`/`FSMState.h` 的映射表、`mujoco_viewer.cpp`
+   的状态名数组与 Target Pos 显示分支（原 `fsm_code==2`"仅深度"分支随 `HOLD_PID_DEPTH`
+   一起删除，`ADHERE_*` 判断区间由 `5..7` 平移为 `4..6`）、`adhere_mujoco_node.cpp` 的
+   `is_adhere_state` 判断区间、全部 README 与 `CLAUDE.md` 第 7.5/9 节（第 7.5 节新增一次性
+   豁免说明：ID 重新编号规则本身保持不变，但本次历史性压缩是用户确认的一次性例外，不作为
+   未来惯例）。真实 MuJoCo 闭环验证：`ros2 topic pub /rov/fsm_command ... "{command: 3}"`
+   确认切入的是新编号下的 `HOLD_PID_6DOF`（`current_state: 3`），而非旧编号。
+3. **删除专属设定终端自动弹出机制**（手柄为主要交互手段，控制器自身位姿只是估计值，专属终端
+   的"所见即所得"精度是假精度）：`fsm_console_node.cpp` 删除 `spawnStateConsole`/
+   `killChildConsole`/`fork`/`setsid`/`killpg`/`prctl` 整套子终端生命周期管理代码与驱动它的
+   "状态变化即弹窗"订阅逻辑分支，只保留 FSM 切换 + `/rov/controller_state`/
+   `/rov/runtime_diagnostics` 状态读出；**完整删除 `state_cmd_console_node.cpp`** 及其
+   `CMakeLists.txt`/`package.xml` 注册。手动数值设定点（深度/位姿/贴壁目标）改为直接
+   `ros2 topic pub /rov/setpoint_cmd`/`/rov/adhere_target_cmd`。重新评估后**保留**
+   `teleop_gcs.launch.py` 的 `OnShutdown`+`pkill` 孤儿进程清理机制（但删除其中
+   `state_cmd_console_node` 的 `pkill` 行）——`fsm_console_node` 自身依然是通过
+   `gnome-terminal --wait` 启动的，Phase 4.5 记录的 `gnome-terminal-server` 子进程脱离
+   `ros2 launch` 进程树的根因对它本身依然成立，只是不再有它派生的嵌套子终端需要额外清理。
+4. **删除两个零子类的死抽象**：`algorithms/wbc/WbcAllocatorBase.h`、
+   `algorithms/mppi/MppiPlannerBase.h`（Phase 3.7 新增的纯数据契约占位头文件，
+   `BaselineMppiController` 从未实现过它们）连同已空的 `wbc/`/`mppi/` 子目录一并删除。
+   `KAMR-MPPI` 真正落地时会连同其具体实现一起重新引入接口，不再提前预留骨架。
+5. **删除全部 7 处冗余的 `checkChange()` override**（`StatePassive`/`StateOpenLoop`/
+   `StatePidHold`/`StateAdherePid`/`StateAdhereSmc`/`StateBaselineMppi`，均逐字重复基类
+   `FSMState::checkChange() { return checkFsmCommandChange(); }`）：基类方法改为非 `virtual`
+   （既然没有任何子类需要不同行为，`virtual` 本身就是多余的扩展点）。
+6. **删除 `ActiveState::rpy[3]`**：已在第 1 项中随 `HOLD_PID_DEPTH` 一并处理，`quat_w[4]` 保留
+   作为唯一姿态表示。
+
+### 验证结果
+
+`export PATH=/usr/bin:/usr/local/cuda/bin:$PATH && colcon build --symlink-install`（5 个包）
+零警告零错误。`colcon test`：全部 gtest 可执行文件共 92 个用例、0 失败、零回归（lint 失败
+为已记录的全仓库基线，未引入新增 lint 回归）。**真实 MuJoCo 闭环验证**（Stage 0 解除阻塞后
+本阶段首次）：`headless:=true`/带 GLFW 窗口/`use_rviz:=true`+`launch_teleop:=true` 完整默认
+参数三种配置下 `ros2 launch simplified_v1_description mujoco.launch.py` 均正常启动、
+`on_configure`/`on_activate` 正常完成、500Hz 物理循环稳定运行，`ros2 topic pub
+/rov/fsm_command ... "{command: 3}"` 确认新 ID 编号下的状态切换生效，Ctrl+C/`pkill`
+后无孤儿进程残留。
+
+## Phase 5.0 Stage 2（2026-10-22）：统一 FSM 层——单一注册表、共享贴壁基类、增益结构体合并、单一无锁桥接原语
+
+本阶段是本次整合里程碑里最大的一块去重：三个 `ADHERE_*` `FSMState::run()`（约 600 行）此前
+~90% 逐字复制粘贴（实时墙面目标桥接、`STANDOFF_HOMING` 收敛门、`SOFT_DOCKING` 对接门、
+`MODE_*` 设定点边沿检测、手柄摇杆→位姿积分+倾角钳位、三段式 `p_d_world_` 覆盖、杠杆臂力矩
+前馈）；FSM 状态的 int↔枚举↔字符串↔实例映射此前分散在 4 处独立手工维护的位置；
+`SixDofPidController`/`SixDofSmcController`/`AdherePidController` 的增益结构体此前在
+`ModelParams` 里被逐字段镜像复制、靠手写 `namespace{}` 拷贝函数同步；`OuterLoopCommand`/
+`AdhereTargetState` 两个跨线程无锁桥接各自独立发明了 `valid`/`seq` 记账惯用法。
+
+1. **单一 FSM 注册表**（新增 `common/FsmRegistry.h`）：`kFsmRegistry`（`{id, FSMStateName,
+   name_string}` 的 `constexpr` 数组）是 `FsmCommand` 数字 ID↔`FSMStateName`↔显示字符串的唯一
+   权威映射，`fsmIdToStateName()`/`fsmStateNameToInt()`/`fsmStateNameToString()` 均从它派生。
+   `FSMState::checkFsmCommandChange()`（原 7 分支 `switch`）与 `adhere_controller.cpp` 的
+   `fsmStateNameToInt()`（原 6 分支 `switch`，已删除独立定义，改用头文件里的同名函数）均改为
+   调用这组函数。`AdhereController::FSMStateList`（6 个具名字段 + 6 行 `make_shared`）与
+   `getNextState()` 的 6 分支 `switch` 合并为单个 `std::vector<std::pair<FSMStateName,
+   std::shared_ptr<FSMState>>> fsm_states_`（在 `on_activate()` 里按声明顺序构造，支持不同
+   构造函数签名）+ 一次线性扫描查找（只在 FSM 切换时调用，非 500Hz 热路径）。新增一个状态
+   现在只需：`enumClass.h` 加一行枚举、`FsmRegistry.h` 加一行表项、`fsm_states_` 加一行
+   `make_shared`——而不是过去的 6+ 处编辑点。`mujoco_viewer.cpp`/`fsm_console_node.cpp` 等其它
+   包因架构上不能 `#include` `adhere_controller` 头文件，继续维护各自独立的名称数组（已在
+   注释中说明）。
+2. **`common/PoseSetpointIntegrator.h`**（ROS 无关、头文件 only、可独立 gtest，与
+   `OutputSafety.h` 同风格）：把 `StatePidHold`/`StateAdherePid`/`StateAdhereSmc`/
+   `StateBaselineMppi` 逐字复制的 `MODE_*` 设定点边沿检测 + 手柄摇杆位姿积分 + 倾角钳位整体
+   抽出为一个类，拥有 `p_d_world_`/`q_d_` 并提供 `initPose()`/`applyDiscreteSetpoint()`/
+   `integrateTeleop()`。四个调用方唯一的真实行为差异——摇杆前进/后退是否驱动 `p_d_world_.x()`
+   ——参数化为 `integrateTeleop()`的 `drive_surge` 布尔量（经验证：三个 `ADHERE_*` 状态无论
+   `drive_surge` 取何值，X 分量都会被后续的三段式覆盖逻辑无条件重写，因此传 `false` 与原
+   `StateBaselineMppi` 的 `true` 在行为上完全等价，不是回归）。
+3. **`FSM/StateAdhereBase.{h,cpp}`**：新的抽象基类承载三个 `ADHERE_*` 状态共享的整条贴壁
+   序列——实时墙面目标重定向桥接、`standoff_homed_`/`docked_` 黏性门、三段式 `p_d_world_`
+   覆盖、`approach_vx_damp` 软着陆项、杠杆臂力矩前馈、`b_pinv_` 分配写出。具体子类只需实现
+   `computeAdhesionWrench(pos_world, q_est, vel_body, omega_body, sum_f, dt, wrench_out)`
+   （返回 `true` 表示 `wrench_out` 已填好、交给基类做前馈+分配；`StateBaselineMppi` 返回
+   `false`，因为它是严格 ZOH 直接写 `pending_thruster_cmd`，没有 wrench/分配器这一步）
+   + 若干静态配置访问器（`xWall()`/`hasDockPhase()`/`approachSpeed()`/`dockForceThresh()`/
+   `xDockEps()`/`maxTeleopVel()`/`maxTiltDeg()`）。三个 `.cpp` 从约 600 行降到
+   `StateAdherePid.cpp` 82 行 + `StateAdhereSmc.cpp` 59 行 + `StateBaselineMppi.cpp` 48 行
+   （共 189 行）+ 新增共享的 `StateAdhereBase.cpp` 145 行——净大幅下降且运行时行为验证不变
+   （见下文测试结果）。
+4. **合并镜像增益结构体**：`ModelParams::PidHoldGains`/`AdherePidGains` 现在直接公有继承
+   `algorithms::pid::SixDofPidController::Gains`（`AdherePidGains` 额外继承
+   `algorithms::pid::AdherePidController::Gains`），`AdhereSmcGains` 直接公有继承
+   `algorithms::smc::SixDofSmcController::Gains`——不同的默认值通过派生类自己的构造函数体赋值
+   （基类字段默认值改为全零/占位值，不再是这 3 个算法各自的历史默认值）。为避免
+   `ModelParams.h`→算法头文件→`FossenDynamics.h`→`ModelParams.h` 的头文件循环，
+   `SixDofPidController.h`/`SixDofSmcController.h` 把原先 `#include
+   "adhere_controller/dynamics/FossenDynamics.h"` 改为前向声明 `class FossenDynamics;`（只持有
+   `const FossenDynamics &` 引用成员，不需要完整定义），两个对应 `.cpp` 补上完整 include。
+   `StatePidHold.cpp`/`StateAdherePid.cpp`/`StateAdhereSmc.cpp` 里原先的 4 个
+   `namespace{}` 手写拷贝函数（`pidHoldGainsToSixDof`/`adherePidGainsToSixDof`/
+   `adherePidGainsToForcePid`/`adhereSmcGainsToController`）全部删除，构造函数直接传
+   `model_params.pid_hold`/`model_params.adhere_pid`/`model_params.adhere_smc`（通过基类
+   子对象隐式转换）。`ModelParams.cpp` 的 YAML 加载代码完全不需要改动（公有继承保留字段名，
+   赋值路径不变）。
+5. **单一无锁桥接原语**（新增 `common/AtomicBridge.h::AtomicBridgeBase{valid, seq}`）：
+   `CtrlInterfaces.h` 的 `OuterLoopCommand`/`AdhereTargetState` 改为公有继承它，不再各自声明
+   独立的 `valid`/`command_seq` 字段——`valid`/`seq` 字段名通过公有继承保持不变，因此绝大多数
+   既有 `ctrl_interfaces_.outer_loop_cmd_.valid.load()` 风格调用点不受影响；仅
+   `AdhereTargetState` 原先的 `command_seq` 改名为继承来的 `seq`（`adhere_controller.cpp`
+   的 3 处调用点相应更新）。`use_current_requested`/`changed_pending`/`target_y`/
+   `target_depth_m` 等语义不同的字段保留在各自结构体内，未被强行塞进共享基类。
+
+### 验证结果
+
+`export PATH=/usr/bin:/usr/local/cuda/bin:$PATH && colcon build --symlink-install`（5 个包）
+零警告零错误。`colcon test`：全部 9 个 gtest 可执行文件 0 失败、零回归（lint 失败为已记录的
+全仓库基线，未引入新增 lint 回归）。本阶段暂未重复 Stage 1 已验证过的真实 MuJoCo 闭环烟雾
+测试（FSM 行为学语义未变，仅内部结构重排，gtest 覆盖的正是这些语义：三段式贴壁收敛顺序、
+实时重定向、ZOH 直通、PID/SMC/MPPI 三个基线的完整闭环 Markdown 对比），计划在 Stage 3-8
+全部完成后做一次完整的真实闭环回归，而非每个子阶段各做一次。
+
+## Phase 5.0 Stage 3（2026-10-22）：MultiRateDecimator 泛化为具名通道注册表
+
+`common/MultiRateDecimator.h` 从固定的 `{inner_due, outer_due}` 二元组改为通用具名通道注册表：
+`addChannel(name, decimation)` 返回稳定的 channel id，`tick()` 按注册顺序返回每个通道本拍是否
+触发的 `vector<bool>`，`periodSeconds(id)`/`decimation(id)`/`name(id)` 按 id 查询。
+`AdhereController::on_configure()` 现在注册 4 个通道——`inner`(`inner_decimation_`)、
+`outer`(`outer_decimation_`)、`diag`(固定 `cm_update_rate_/10` -> 10Hz)、
+`estimator`(decimation=1，仅为显式记录其逐拍节奏，门控条件仍是
+`estimation_mode=="sensor_fusion"` 不变)——取代原来分离的 `decimator_`
+（仅 inner/outer）+ 独立的 `diag_decimation_`/`diag_tick_count_` 计数器机制。
+`update()` 一次 `decimator_->tick()` 后用 4 个 `channel_` 成员索引取值，删除原有的
+`diag_tick_count_ % diag_decimation_` 手写取模。Depth/DVL 传感器速率诊断的
+`have_last_*_diag_` 边沿检测**保留**（而非替换成另一个注册通道）——头文件新增注释说明原因：
+`sensor_depth_hz`/`sensor_dvl_hz` 存在的意义就是**验证**硬件真的在按标称速率降频，一个"构造上
+必然正确"的 decimator 通道无法验证这件事，只有基于真实采样值变化的边沿检测才能。
+
+`test_multirate_decimator.cpp` 全部 4 个既有用例迁移到新 API，并新增
+`ArbitraryNamedChannelsFireAtTheirOwnRate`（同时验证 inner/outer/diag/estimator 4 个通道各自的
+触发次数与周期），验证本次泛化没有改变任何既有速率的实际行为。
+
+### 验证结果
+
+`export PATH=/usr/bin:/usr/local/cuda/bin:$PATH && colcon build --symlink-install
+--packages-select adhere_controller` 零警告零错误。`colcon test`：全部 9 个 gtest 可执行文件
+共 52 个用例、0 失败、零回归（lint 失败为已记录的全仓库基线，未引入新增 lint 回归）。
+
+## Phase 5.0 Stage 4（2026-10-22）：Sim/Real 噪声参数拆分 + 环境标记单一数据源
+
+**仿真侧传感器噪声 -> MJCF**：`adhere_mujoco_hardware.cpp` 匿名命名空间里的
+`kGyroNoiseStd`/`kGyroBiasRwStd`/`kAccelNoiseStd`/`kAttNoiseStd`/`kDepthNoiseStd`/
+`kDvlVelNoiseStd`/`kDvlRangeNoiseStd`/`kLoadcellNoiseStd`/`kDepthDecimation`/`kDvlDecimation`
+十个 `constexpr` 移入新的 `SensorNoiseParams` 结构体（`include/adhere_mujoco_hardware/
+sensor_noise_params.hpp` + `src/sensor_noise_params.cpp`），`applyMjModelOverrides()` 严格镜像
+`HydroParams::applyMjModelOverrides()` 的 `<custom><numeric name="sensor_noise_*"/>` 查找模式。
+`rov_wall.xml` 新增 `<custom>` 块，用当前默认值显式声明全部 10 个 `sensor_noise_*` numeric——
+不是无操作占位，而是让这个模型文件成为这些参数的唯一权威来源（修改 XML 即生效，零 C++ 重
+编译）。`AdhereMujocoHardware::configure()` 在两次 `HydroParams::applyMjModelOverrides()` 调用
+之后紧接着调用 `SensorNoiseParams::applyMjModelOverrides(model_, sensor_noise_)`，同一生命周期
+点。
+
+**估计器假定增益 -> `robot_control.yaml`**：`RovStateEstimator.h` 的 8 个
+`static constexpr`（`kAttGain`/`kDepthPosGain`/`kDepthVelGain`/`kDvlVelGain`/`kDvlRangeGain`/
+`kContactForceFilterGain`/`kContactVelGain`/`kContactPosGain`）移入新的
+`ModelParams::EstimatorGains` 结构体，通过 `RovStateEstimator` 的新显式构造函数注入（默认参数
+保留原编译期默认值，任何未显式传参的既有调用方——包括全部既有 gtest——行为不变）。
+`ModelParams::loadFromNode()` 新增 `estimator.*` 8 个 YAML 键的加载，`AdhereController::
+on_configure()` 在 `model_params_ = ModelParams::loadFromNode(...)` 之后立即
+`estimator_ = RovStateEstimator(model_params_.estimator)`，同一生命周期点重建估计器。
+
+**环境标记单一数据源**：`adhere_mujoco_node.cpp` 曾手工硬编码 `wall`/`water_surface`/
+`floor` 三个 RViz `/rov/environment_markers` 的位置与尺寸（如 `wall.pose.position.z=-4.25`,
+`wall.scale=(0.02,20.0,11.5)`），必须每次改 `rov_wall.xml` 几何时手动同步。现在
+`AdhereMujocoHardware::configure()` 在解析推进器/传感器站点的同一处，新增一段从 `model_` 自身
+`wall_geom`/`floor_geom`/`water_surface` 三个 geom 读出世界坐标（`geomWorldPos()`：
+`body_pos + body_quat * geom_pos`，三者均是 worldbody 的直接子节点，无需走完整的运动学链）与
+尺寸（`geom_size` 是半长，RViz CUBE 的 `scale` 是全长，故 ×2）写入 `MujocoVisBridge` 的新
+write-once 字段（`wall_pos_world`/`wall_size_full`/`floor_z`/`floor_extent_xy`/
+`water_surface_z`/`water_surface_extent_xy`，与既有 `pad_site_pos_body` 同一惯用法）；
+`adhere_mujoco_node.cpp` 的 `TelemetrySnapshot` 新增对应字段，marker 发布代码删除全部硬编码
+字面量，改读 `snap.*`。真实 MuJoCo 运行验证：`/rov/environment_markers` 发布的
+`wall.pose.position=(-0.01,0,-4.25)`/`wall.scale=(0.02,20.0,11.5)` 与删除前的硬编码值逐位
+一致，证明推导路径正确。
+
+### 验证结果
+
+`export PATH=/usr/bin:/usr/local/cuda/bin:$PATH && colcon build --symlink-install`（全部 5 个
+包）零警告零错误。`colcon test`：`adhere_controller` 52 个 gtest 用例、`adhere_mujoco_hardware`
+35 个 gtest 用例，共 0 失败、零回归（lint 失败为已记录的全仓库基线）。真实 MuJoCo 闭环验证：
+`headless:=true use_rviz:=false launch_teleop:=false` 启动后 `/rov/environment_markers`
+发布内容与 Stage 4 改动前的硬编码值逐位一致，Ctrl+C 后无孤儿进程残留。
+
+## Phase 5.0 Stage 5（2026-10-22）：拆分 `adhere_keyboard_input` + 新增 `perception/` 分类
+
+`adhere_keyboard_input`（遥操作终端 + 可观测性/离线评估混在一个包里）按关注点拆分为
+**两个**零 MuJoCo/CUDA/ros2_control 依赖的独立包：
+
+- `commands/adhere_teleop_gcs`：`fsm_console_node` + `xbox_teleop_node` +
+  `launch/teleop_gcs.launch.py` + `config/xbox_teleop.yaml`（操作员输入/GCS）；
+- `commands/adhere_monitor`：`rt_monitor_node` + `benchmark_evaluator_node`
+  （可观测性/离线评估，`benchmark_evaluator_node` 仍是本包中唯一允许订阅
+  `/rov/ground_truth_odom` 的节点）。
+
+全部用 `git mv` 保留历史，旧包目录整体删除。`simplified_v1_description/launch/
+mujoco.launch.py` 的 `get_package_share_directory("adhere_keyboard_input")` 与
+`launch_teleop` 描述改为 `adhere_teleop_gcs`；`fsm_console_node.cpp` 里引用
+`rt_monitor_node` 的提示文本随之改为 `ros2 run adhere_monitor rt_monitor_node`。
+`CLAUDE.md` 第 6/9 节包树、`src/commands/README.md`、`src/interfaces/README.md`、
+`src/interfaces/adhere_control_msgs/README.md`、`src/controllers/adhere_controller/
+README.md` 的全部引用同步更新；两个新包各补一份完整 README.md（基于拆分前最后一次
+已提交版本 + 当前源码重新核对撰写——本阶段 `git rm -rf` 旧包目录时，发现 Stage 1/2
+对旧 `README.md` 的未提交编辑已随文件一起被删除且不可恢复，PROGRESS.md 的 Stage 1/2
+记录条目本身完好无损，用于重新核对新 README 内容的准确性；新增的两份 README 已对照
+当前 `fsm_console_node.cpp`/`xbox_teleop_node.cpp`/`rt_monitor_node.cpp`/
+`benchmark_evaluator_node.cpp` 源码逐项核对，没有造成信息丢失，仅造成一次文档编辑
+历史记录的中断）。
+
+新增顶层分类 `perception/`（与 `hardwares/` 并列，为真实 `apriltag_ros` 边界镀一个
+镜像位置），本阶段同时创建了其第一个软件包骨架 `adhere_apriltag_detector`（随即在
+Stage 6 填入真实节点实现，未分两次提交）。
+
+## Phase 5.0 Stage 6（2026-10-22）：AprilTag 两级贴壁目标（替代弹出式设定终端）
+
+新增 `TagDetection.msg`（`adhere_control_msgs`，发布在 `/rov/tag_detection`）：
+`station_id`/`target_y`/`target_depth_m`/`confidence`/`valid`，与
+`/rov/adhere_target_cmd`（人工意图）严格区分——这是一条**测量**话题。
+`AdhereController::on_configure()` 新增 `tag_detection_subscription_`，收到
+`valid=true` 的检测后调用新抽出的 `applyResolvedAdhereTarget(y, depth_m)`
+（把原来内嵌在 `adhere_target_command_subscription_` 回调里的
+`retarget_threshold`/`changed_pending`/`last_adhere_target_*` 写入逻辑提炼成
+一个共享私有方法，`/rov/adhere_target_cmd` 的 `TAG_PRESET`/`CUSTOM_*` 分支与
+`/rov/tag_detection` 共用同一条路径）——两个话题在同一个 `ctrl_interfaces_.
+adhere_target_` 桥接上"后写入者生效"，这就是任务要求的"测得标签优先于更早的预设，
+直到操作员显式重新预设"契约：检测器只要 ROV 仍在站点范围内就持续重新发布，预设
+不会悄悄滞留。
+
+`perception/adhere_apriltag_detector`（新 `adhere_apriltag_detector_node`）是一个
+**邻近触发的点发布器，不是视觉管线**：复用 `robot_control.yaml` 的
+`adhere_wall_tags_y`/`adhere_wall_tags_depth_m` 站点表（通过自己的同名 ROS 参数，
+默认值与之字面一致），订阅 `/rov/controller_state` 的**估计**位姿（绝不读地面
+真值），按 `publish_rate_hz`（默认 `5.0`）定时查找最近站点，若欧氏距离
+（Y-深度平面）`<= detection_range_m`（默认 `0.5m`）则发布该站点坐标 + 一个
+`position_noise_std_m`（默认 `0.02m`）高斯偏移 + `confidence`，否则发布
+`valid=false`（而非停止发布，便于判断检测器存活）。`mujoco.launch.py` 新增
+`launch_apriltag_detector`（默认 `true`）启动该节点。`simplified_v1_description/
+README.md` 新增真实贴纸规格一节（`tag36h11`，单标签 `80mm`，2x2 矩阵间距
+`160mm`，矩阵外廓 `240x240mm`，背板 `300x300mm` 防水哑光覆膜，4 站点共 16 个 ID，
+`station_id = min_id/4`，含 `apriltag_ros` `tag_bundles` 局部坐标表）——纯文档，
+不涉及代码；仿真侧检测器本身不需要这套 2x2 几何，只用 4 个站点中心点。
+
+### 验证结果
+
+`export PATH=/usr/bin:/usr/local/cuda/bin:$PATH && colcon build --symlink-install`
+（全部 7 个包，`adhere_control_msgs` 新增 `TagDetection.msg`）零警告零错误。
+`colcon test`：`adhere_controller` 52 个 + `adhere_mujoco_hardware` 35 个共 87 个
+gtest 用例、0 失败、零回归（lint 失败为已记录的全仓库基线）。
+
+**真实 MuJoCo 闭环验证受阻，但已排除是本阶段改动引起的回归**：本阶段首次尝试
+真实闭环烟雾测试时，`ros2 launch simplified_v1_description mujoco.launch.py` 在
+`"Configuring controller 'adhere_controller'"` 日志后挂起不返回——与 Phase
+4.3/4.5/Stage 0 三次记录过的同一个未解决挂起**症状完全一致**（Stage 0 当时
+"三次独立尝试均未复现"，本阶段在同一会话的后续测试中又稳定复现了 5 次）。
+为排除这是本阶段新增代码（`tag_detection_subscription_`/新增
+`adhere_apriltag_detector` 节点）引起的回归，做了二分验证：①
+`launch_apriltag_detector:=false`（完全不启动新节点）——挂起依旧；②临时注释掉
+`tag_detection_subscription_` 的创建代码、单独重新编译 `adhere_controller`、
+复测——挂起依旧，随后已还原代码并重新编译确认恢复。两项排除后确认挂起与 Stage 6
+的改动无关，是 Stage 0 记录的同一个预先存在、间歇性、未定位根因的问题，在本次
+长会话中间歇性复现（本阶段额外排除了一个可能的误导性假设：会话期间大量
+`kill -9` 式终止 ROS 2 进程在 `/dev/shm` 残留了约 290 个 `fastrtps_*` 共享内存/
+命名信号量文件，猜测可能导致 DDS 发现变慢卡死；清空 `/dev/shm` 后挂起依旧复现，
+排除此假设）。按 `CLAUDE.md` 的誠实标准，本阶段的真实闭环验证继续被这个 Stage 0
+就已记录为"未解决"的问题阻塞，**不代表 Stage 5/6 本身引入了新缺陷**——所有新增
+逻辑均通过 gtest（现有 87 个用例全绿）与独立节点级验证覆盖：单独运行
+`adhere_apriltag_detector_node`（不经过完整 `mujoco.launch.py`）确认其 5Hz
+定时器正确触发、`/rov/controller_state` 订阅正确接线（`ros2 node info` 核实）、
+无 `/rov/controller_state` 输入时正确持续发布 `valid=false`（临时插入
+`RCLCPP_INFO` 探针确认 tick 行为后已移除，未保留在仓库中）。`on_configure()`
+挂起的诊断/修复仍需要专门的下次会话时间（`CLAUDE.md` Stage 0 当时建议的
+`strace -f`/`/proc/<pid>/task/*/stack` 等手段本次未再次尝试，不在本阶段时间盒内）。
+
+## Phase 5.0 Stage 7（2026-10-22）：消息整理——拆分 `BenchmarkMetrics.msg`、修复陈旧注释、删除死 YAML 键
+
+**从 `ControllerState.msg` 拆出 `BenchmarkMetrics.msg`**：`thrust_l2_norm`/
+`thrust_power_proxy`/`thrust_slew_rate_l2`/`cumulative_energy_l2`/`cumulative_impulse_l1`/
+`saturated_thruster_count`/`active_contact_pad_count`/`kern_margin` 共 8 个 Phase 3.8
+效率/啁啾/安全遥测字段移入新的 `BenchmarkMetrics.msg`（+ `current_state`/`state_name`
+使单条样本自描述），发布在 `/rov/benchmark_metrics`，与 `/rov/runtime_diagnostics` 共用
+`AdhereController::update()` 里同一个 10Hz "diag" `MultiRateDecimator` 通道。
+`ControllerState.msg` 恢复精简，只保留 FSM/位姿反馈。`kern_margin` 的计算（需要
+`outer_due` 块里才有的 `a_contact_`/`u_cmd`）缓存进新成员
+`AdhereController::latest_kern_margin_`，在 `diag_due` 块里随 `latest_metrics_`
+一起打包进 `BenchmarkMetrics` 发布。重新接线三个消费者：`adhere_monitor` 的
+`benchmark_evaluator_node`（新增 `/rov/benchmark_metrics` 订阅，缓存最新一帧，在
+`/rov/controller_state` 回调里取用——两话题速率不同 10Hz vs 25Hz，用"取最近一帧"
+而非强制同步）与 `rt_monitor_node`（效率/安全表格整表改订阅 `/rov/benchmark_metrics`）；
+`adhere_teleop_gcs` 的 `fsm_console_node`（单行效率摘要同样改订阅新话题）。
+
+**修复陈旧注释/死字段**：`ControllerState.msg` 的 `adhere_stage` 注释
+`"DEPTH_ALIGN"/"WALL_ADHERE"` 更新为当前真实值 `"STANDOFF_HOMING"/"SOFT_DOCKING"/
+"WALL_ADHERED"`；`SetpointCommand.msg`/`AdhereTargetCommand.msg` 的"published by
+state_cmd_console_node"引用改为"`ros2 topic pub` 直接发布"（该终端已在 Stage 1 删除）；
+`adhere_controller.cpp` 里残留的 `state_cmd_console_node` 注释引用一并清理。审计
+`robot_control.yaml` 的死键：`adhere_pid.f_preload` 核实**仍被**
+`AdherePidController::computeWrench()` 消费，**不**删除；`adhere_vz_tol`
+核实除了加载进 `ModelParams::AdhereStageParams::vz_tol` 外**没有任何 FSM 状态读取
+过这个字段**（`grep` 零匹配），确认是真死字段，连同其 YAML 键、`ModelParams.h` 字段、
+`ModelParams.cpp` 加载代码一并删除；`depth_hold.*` 整块在 Stage 1 已经删除，本阶段
+核实确认（零残留）。
+
+**重新梳理话题契约**：`CLAUDE.md` 第 9 节的话题列表从 "7 ROS Topics" 更新为
+"8 ROS Topics"，新增 `/rov/benchmark_metrics` 条目并把 `/rov/controller_state`
+条目的字段摘要精简为实际剩余字段；`adhere_control_msgs/README.md` 的话题表格
+同步扩充为全部 8 行（含本阶段新增的 `TagDetection.msg`/`BenchmarkMetrics.msg`
+两行）；`adhere_controller/README.md` 的 `ControllerMetrics.h` 一节更新为指向新话题。
+
+### 验证结果
+
+`export PATH=/usr/bin:/usr/local/cuda/bin:$PATH && colcon build --symlink-install`
+（全部 7 个包，`adhere_control_msgs` 新增 `BenchmarkMetrics.msg`）零警告零错误。
+`colcon test`：`adhere_controller` 52 个 + `adhere_mujoco_hardware` 35 个共 87 个
+gtest 用例、0 失败、零回归（lint 失败为已记录的全仓库基线）。真实 MuJoCo 闭环
+验证：继续被 Stage 6 记录的同一个预先存在的 `on_configure()` 挂起问题阻塞（本阶段
+纯消息/文档重构，未改动任何 on_configure()/on_activate() 逻辑，风险评估为与该挂起
+无关）。

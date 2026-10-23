@@ -9,18 +9,23 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "controller_interface/controller_interface.hpp"
 #include "visualization_msgs/msg/marker.hpp"
 
 #include "adhere_control_msgs/msg/adhere_target_command.hpp"
+#include "adhere_control_msgs/msg/benchmark_metrics.hpp"
 #include "adhere_control_msgs/msg/controller_state.hpp"
 #include "adhere_control_msgs/msg/fsm_command.hpp"
 #include "adhere_control_msgs/msg/runtime_diagnostics.hpp"
 #include "adhere_control_msgs/msg/setpoint_command.hpp"
+#include "adhere_control_msgs/msg/tag_detection.hpp"
 #include "adhere_control_msgs/msg/teleop_command.hpp"
 #include "adhere_controller/common/ControllerMetrics.h"
 #include "adhere_controller/common/enumClass.h"
+#include "adhere_controller/common/FsmRegistry.h"
 #include "adhere_controller/common/LoopProfiler.h"
 #include "adhere_controller/common/MultiRateDecimator.h"
 #include "adhere_controller/algorithms/baseline_mppi/BaselineMppiConfig.h"
@@ -32,7 +37,6 @@
 #include "adhere_controller/FSM/StateAdherePid.h"
 #include "adhere_controller/FSM/StateAdhereSmc.h"
 #include "adhere_controller/FSM/StateBaselineMppi.h"
-#include "adhere_controller/FSM/StateDepthHold.h"
 #include "adhere_controller/FSM/StateOpenLoop.h"
 #include "adhere_controller/FSM/StatePassive.h"
 #include "adhere_controller/FSM/StatePidHold.h"
@@ -51,7 +55,7 @@ namespace adhere_controller
 //
 // Future KAMR-MPPI milestones (Impedance PD + Pad-Force DOB + 12D OSQP on the inner loop, async
 // CUDA MPPI rollout on the outer-loop hook) add further FSMState subclasses to this same state
-// machine; Phase 3.1 only wires IDLE_PASSIVE_NONE and HOLD_PID_DEPTH.
+// machine.
 class AdhereController : public controller_interface::ControllerInterface
 {
 public:
@@ -95,16 +99,13 @@ public:
     const rclcpp_lifecycle::State & previous_state) override;
 
 private:
-  struct FSMStateList
-  {
-    std::shared_ptr<StatePassive> passive;
-    std::shared_ptr<StateDepthHold> depth_hold;
-    std::shared_ptr<StateOpenLoop> open_loop;
-    std::shared_ptr<StatePidHold> pid_hold;
-    std::shared_ptr<StateAdherePid> adhere_pid;
-    std::shared_ptr<StateAdhereSmc> adhere_smc;
-    std::shared_ptr<StateBaselineMppi> baseline_mppi;
-  };
+  // Single FSM instance table (CLAUDE.md Phase 5.0 Stage 2.1): replaces the former named
+  // FSMStateList struct + switch-based getNextState(). Populated once in on_activate() in the
+  // same order as common/FsmRegistry.h's kFsmRegistry; adding a state means adding one
+  // make_shared entry here plus one kFsmRegistry row, not a new named field and a new switch
+  // case. getNextState() does a short linear scan (6 entries, called only on FSM transitions --
+  // not the 500Hz hot path) instead.
+  std::vector<std::pair<FSMStateName, std::shared_ptr<FSMState>>> fsm_states_;
 
   std::shared_ptr<FSMState> getNextState(
     FSMStateName state_name) const;
@@ -112,6 +113,13 @@ private:
   // Builds and publishes RuntimeDiagnostics + the RViz2 HUD marker from the current profiler
   // state (CLAUDE.md Phase 3.6 Stage 1.2/3.2). Called from update() at a fixed 10Hz.
   void publishRuntimeDiagnostics(const rclcpp::Time & time);
+
+  // Shared resolved-target apply path (CLAUDE.md Phase 5.0 Stage 6): both
+  // adhere_target_command_subscription_'s TAG_PRESET/CUSTOM_* branches and
+  // tag_detection_subscription_'s measured detections funnel their already-resolved (y,
+  // depth_m) pair through this one retarget_threshold/changed_pending/last_adhere_target_*
+  // write path, executor-thread-only (never called from update()'s 500Hz thread).
+  void applyResolvedAdhereTarget(double new_y, double new_depth_m);
 
   CtrlInterfaces ctrl_interfaces_;
   // Runtime-loaded model-decoupled parameters (CLAUDE.md Phase 3.3 Sec.3), populated once in
@@ -121,7 +129,6 @@ private:
   ModelParams model_params_;
 
   FSMMode mode_ = FSMMode::NORMAL;
-  FSMStateList state_list_;
   std::shared_ptr<FSMState> current_state_;
   std::shared_ptr<FSMState> next_state_;
   FSMStateName next_state_name_ =
@@ -134,6 +141,10 @@ private:
     teleop_command_subscription_;
   rclcpp::Subscription<adhere_control_msgs::msg::AdhereTargetCommand>::SharedPtr
     adhere_target_command_subscription_;
+  // Phase 5.0 Stage 6: measured wall-tag detections, see applyResolvedAdhereTarget()'s doc
+  // comment.
+  rclcpp::Subscription<adhere_control_msgs::msg::TagDetection>::SharedPtr
+    tag_detection_subscription_;
   // Previously-active resolved target, tracked on the executor thread only (the subscription
   // callback), used purely to decide whether a new command crosses adhere_stage.retarget_
   // threshold -- never read by the 500Hz thread (ctrl_interfaces_.adhere_target_ is the only
@@ -148,13 +159,11 @@ private:
   rclcpp::Publisher<adhere_control_msgs::msg::ControllerState>::SharedPtr controller_state_publisher_;
 
   // Phase 3.6 Stage 1.2: real-time frequency/latency observability, published at 10Hz
-  // independently of the inner/outer decimation schedule (diag_decimation_ ticks, see
-  // on_configure()).
+  // independently of the inner/outer decimation schedule -- the "diag" channel registered on
+  // decimator_ in on_configure() (CLAUDE.md Phase 5.0 Stage 3).
   rclcpp::Publisher<adhere_control_msgs::msg::RuntimeDiagnostics>::SharedPtr
     runtime_diagnostics_publisher_;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr diagnostics_hud_publisher_;
-  int diag_decimation_ = 50;  // cm_update_rate_/10 -> 10Hz, recomputed in on_configure()
-  uint64_t diag_tick_count_ = 0;
 
   // Phase 3.5 strict ground-truth isolation (CLAUDE.md Stage 2.3): these raw hardware state
   // interfaces are PRIVATE to AdhereController -- never exposed via CtrlInterfaces, never
@@ -204,7 +213,12 @@ private:
   LoopProfiler sensor_dvl_profiler_;
   // Edge-detection state for the sample-and-hold noisy depth/DVL channels (mirrors
   // RovStateEstimator's own "has this sample actually changed" pattern) -- sensor_*_profiler_
-  // only calls tickMarker() on a genuine new sample, not every 500Hz tick.
+  // only calls tickMarker() on a genuine new sample, not every 500Hz tick. CLAUDE.md Phase 5.0
+  // Stage 3 deliberately keeps this edge-detection rather than replacing it with a registered
+  // decimator_ channel at the hardware's known 50Hz/20Hz sample-and-hold rates: the whole point
+  // of sensor_depth_hz/sensor_dvl_hz in RuntimeDiagnostics is to *prove* AdhereMujocoHardware is
+  // actually decimating those channels at the advertised rate, which a decimator channel
+  // (correct by construction, not by measurement) cannot verify.
   bool have_last_depth_diag_ = false;
   double last_depth_diag_ = 0.0;
   bool have_last_dvl_diag_ = false;
@@ -216,15 +230,23 @@ private:
   // it) so no clock-type mismatch is possible.
   static constexpr double kTeleopWatchdogSeconds = 0.25;
 
-  // Uniform integer-ratio multi-rate decimation (CLAUDE.md Phase 3.1.1 Stage 2.1): cm_update_rate_
-  // is the master controller_manager/AdhereMujocoHardware tick rate (500Hz); inner_decimation_/
+  // Uniform integer-ratio multi-rate decimation (CLAUDE.md Phase 3.1.1 Stage 2.1, generalized
+  // to a named-channel registry in Phase 5.0 Stage 3): cm_update_rate_ is the master
+  // controller_manager/AdhereMujocoHardware tick rate (500Hz); inner_decimation_/
   // outer_decimation_ are read as ROS parameters in on_configure() (defaults 2 and 20 -> 250Hz
-  // inner / 25Hz outer). decimator_ is reconstructed from them and reset to tick 0 in
-  // on_activate() so a deactivate/reactivate cycle always restarts phase-aligned.
+  // inner / 25Hz outer). decimator_ is (re)constructed in on_configure() with every channel this
+  // controller needs -- inner/outer/diag(10Hz)/estimator(every tick, registered explicitly so
+  // its cadence is documented rather than implicit) -- and reset to tick 0 in on_activate() so a
+  // deactivate/reactivate cycle always restarts phase-aligned. The returned channel ids are
+  // stable for the controller's lifetime (channels are only ever added in on_configure()).
   int cm_update_rate_ = 500;
   int inner_decimation_ = 2;
   int outer_decimation_ = 20;
   std::shared_ptr<MultiRateDecimator> decimator_;
+  int inner_channel_ = -1;
+  int outer_channel_ = -1;
+  int diag_channel_ = -1;
+  int estimator_channel_ = -1;
   // Constant inner-loop period (inner_decimation_ / cm_update_rate_ seconds) passed to every
   // FSMState::run() call -- never measured from wall-clock deltas, so it carries zero scheduling
   // jitter regardless of executor/OS timing noise.
@@ -256,6 +278,12 @@ private:
   // at the outer-loop rate; reset on every FSM state transition.
   ControllerMetricsAccumulator controller_metrics_;
   ControllerMetricsSample latest_metrics_;
+  // CLAUDE.md Phase 5.0 Stage 7: Rhombic Kern margin, computed in the outer_due block (needs
+  // a_contact_/u_cmd, only available there) and carried forward into BenchmarkMetrics' 10Hz
+  // publish in the diag_due block below.
+  double latest_kern_margin_ = 1.0;
+  rclcpp::Publisher<adhere_control_msgs::msg::BenchmarkMetrics>::SharedPtr
+    benchmark_metrics_publisher_;
 
   // Async outer-loop worker skeleton (CLAUDE.md Phase 3.6 Stage 2.2/Sec.5): non-blocking
   // hand-off to a dedicated thread, so the 500Hz update() never waits on outer-loop compute --

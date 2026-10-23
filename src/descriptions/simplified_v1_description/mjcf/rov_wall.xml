@@ -153,4 +153,23 @@
     <touch name="touch_pad_BL" site="pad_BL_site"/>
     <touch name="touch_pad_BR" site="pad_BR_site"/>
   </sensor>
+
+  <custom>
+    <!-- CLAUDE.md Phase 5.0 Stage 4: AdhereMujocoHardware::SensorNoiseParams::
+         applyMjModelOverrides() override hook for AdhereMujocoHardware's sim-injected sensor
+         noise/bias/decimation model (SystemInterface, not an rclcpp::Node -- cannot read
+         robot_control.yaml). Values below are the exact Phase 3.5 compiled-in defaults, present
+         here so this model is the single source of truth for them (not a silent duplicate --
+         changing a value here changes simulated behavior with zero C++ recompile). -->
+    <numeric name="sensor_noise_gyro_std" data="0.005"/>
+    <numeric name="sensor_noise_gyro_bias_rw_std" data="0.0005"/>
+    <numeric name="sensor_noise_accel_std" data="0.02"/>
+    <numeric name="sensor_noise_att_std" data="0.003"/>
+    <numeric name="sensor_noise_depth_std" data="0.005"/>
+    <numeric name="sensor_noise_dvl_vel_std" data="0.008"/>
+    <numeric name="sensor_noise_dvl_range_std" data="0.003"/>
+    <numeric name="sensor_noise_loadcell_std" data="0.15"/>
+    <numeric name="sensor_noise_depth_decimation" data="10"/>
+    <numeric name="sensor_noise_dvl_decimation" data="25"/>
+  </custom>
 </mujoco>

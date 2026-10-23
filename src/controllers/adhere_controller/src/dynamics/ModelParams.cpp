@@ -128,14 +128,6 @@ ModelParams ModelParams::loadFromNode(const rclcpp::Node::SharedPtr & node)
   declareVec3("dynamics.added_mass_lin", p.dynamics.added_mass_lin);
   declareVec3("dynamics.added_mass_ang", p.dynamics.added_mass_ang);
 
-  p.depth_hold.kp_z = autoDeclareDouble("depth_hold.kp_z", p.depth_hold.kp_z);
-  p.depth_hold.ki_z = autoDeclareDouble("depth_hold.ki_z", p.depth_hold.ki_z);
-  p.depth_hold.kd_z = autoDeclareDouble("depth_hold.kd_z", p.depth_hold.kd_z);
-  p.depth_hold.max_heave_vel =
-    autoDeclareDouble("depth_hold.max_heave_vel", p.depth_hold.max_heave_vel);
-  p.depth_hold.kp_att = autoDeclareDouble("depth_hold.kp_att", p.depth_hold.kp_att);
-  p.depth_hold.kd_att = autoDeclareDouble("depth_hold.kd_att", p.depth_hold.kd_att);
-
   declareDoubleArray("open_loop.max_wrench", p.open_loop.max_wrench);
 
   declareVec3("pid_hold.kp_pos", p.pid_hold.kp_pos);
@@ -193,7 +185,6 @@ ModelParams ModelParams::loadFromNode(const rclcpp::Node::SharedPtr & node)
   p.adhere_stage.standoff_x = autoDeclareDouble("adhere_standoff_x", p.adhere_stage.standoff_x);
   p.adhere_stage.depth_tol = autoDeclareDouble("adhere_depth_tol", p.adhere_stage.depth_tol);
   p.adhere_stage.y_tol = autoDeclareDouble("adhere_y_tol", p.adhere_stage.y_tol);
-  p.adhere_stage.vz_tol = autoDeclareDouble("adhere_vz_tol", p.adhere_stage.vz_tol);
   p.adhere_stage.vel_tol = autoDeclareDouble("adhere_vel_tol", p.adhere_stage.vel_tol);
   p.adhere_stage.approach_vx_damp =
     autoDeclareDouble("adhere_approach_vx_damp", p.adhere_stage.approach_vx_damp);
@@ -226,6 +217,24 @@ ModelParams ModelParams::loadFromNode(const rclcpp::Node::SharedPtr & node)
   declareVec3("sensor_mount.r_imu_xyz", p.sensor_mount.r_imu);
   declareVec3("sensor_mount.r_depth_xyz", p.sensor_mount.r_depth);
   declareVec3("sensor_mount.r_dvl_xyz", p.sensor_mount.r_dvl);
+
+  // Phase 5.0 Stage 4: RovStateEstimator's fixed correction gains, measured/tuned from a real
+  // sensor suite -- see EstimatorGains' doc comment in ModelParams.h for why this (unlike the
+  // sim-only sensor noise std, which is MJCF-sourced) belongs in YAML.
+  p.estimator.att_gain = autoDeclareDouble("estimator.att_gain", p.estimator.att_gain);
+  p.estimator.depth_pos_gain =
+    autoDeclareDouble("estimator.depth_pos_gain", p.estimator.depth_pos_gain);
+  p.estimator.depth_vel_gain =
+    autoDeclareDouble("estimator.depth_vel_gain", p.estimator.depth_vel_gain);
+  p.estimator.dvl_vel_gain = autoDeclareDouble("estimator.dvl_vel_gain", p.estimator.dvl_vel_gain);
+  p.estimator.dvl_range_gain =
+    autoDeclareDouble("estimator.dvl_range_gain", p.estimator.dvl_range_gain);
+  p.estimator.contact_force_filter_gain = autoDeclareDouble(
+    "estimator.contact_force_filter_gain", p.estimator.contact_force_filter_gain);
+  p.estimator.contact_vel_gain =
+    autoDeclareDouble("estimator.contact_vel_gain", p.estimator.contact_vel_gain);
+  p.estimator.contact_pos_gain =
+    autoDeclareDouble("estimator.contact_pos_gain", p.estimator.contact_pos_gain);
 
   return p;
 }

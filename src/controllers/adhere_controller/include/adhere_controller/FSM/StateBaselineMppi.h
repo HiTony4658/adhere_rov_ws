@@ -1,24 +1,24 @@
 #ifndef ADHERE_CONTROLLER__FSM__STATEBASELINEMPPI_H_
 #define ADHERE_CONTROLLER__FSM__STATEBASELINEMPPI_H_
 
-#include <array>
-#include <cstdint>
-
 #include "adhere_controller/algorithms/baseline_mppi/BaselineMppiController.h"
-#include "adhere_controller/common/mathTypes.h"
-#include "adhere_controller/FSM/FSMState.h"
+#include "adhere_controller/FSM/StateAdhereBase.h"
 
 namespace adhere_controller
 {
 
-// Outer-loop-only Baseline MPPI FSM state (CLAUDE.md Phase 4.1 Sec.3): unlike every other FSM
-// state, run() at 250Hz performs ZERO inner-loop control law -- it is a strict Zero-Order-Hold
-// pass-through of whatever AdhereController::outerWorkerLoop() last computed via the shared
-// baseline_mppi::BaselineMppiController (running asynchronously at the 25Hz outer-loop rate on
-// its own worker thread) and staged into ctrl_interfaces_.outer_loop_cmd_ (CtrlInterfaces.h's
-// lock-free bridge). Setpoint/teleop handling (target pose integration) is otherwise identical to
-// StatePidHold's grammar -- this state only decides WHAT to track, the CUDA planner decides HOW.
-class StateBaselineMppi final : public FSMState
+// Outer-loop-only Baseline MPPI FSM state (CLAUDE.md Phase 4.1 Sec.3): unlike StateAdherePid/
+// StateAdhereSmc, run()'s computeAdhesionWrench() hook performs ZERO inner-loop control law --
+// it is a strict Zero-Order-Hold pass-through of whatever AdhereController::outerWorkerLoop()
+// last computed via the shared baseline_mppi::BaselineMppiController (running asynchronously at
+// the 25Hz outer-loop rate) and staged into ctrl_interfaces_.outer_loop_cmd_. It therefore writes
+// ctrl_interfaces_.pending_thruster_cmd itself and returns false, telling StateAdhereBase::run()
+// to skip the lever-arm-feedforward + b_pinv_ allocation path entirely (there is no wrench here).
+// The shared STANDOFF_HOMING/WALL_ADHERED sequence (2 stages -- no separate docked_ sub-phase,
+// see hasDockPhase()) lives in StateAdhereBase (CLAUDE.md Phase 5.0 Stage 2.3). Setpoint/teleop
+// handling reuses StatePidHold's gains (gains.pid_hold.*): this state only decides WHAT pose to
+// track, the CUDA planner decides HOW.
+class StateBaselineMppi final : public StateAdhereBase
 {
 public:
   StateBaselineMppi(
@@ -27,38 +27,21 @@ public:
 
   void enter() override;
 
-  void run(const rclcpp::Time & time, const rclcpp::Duration & period) override;
-
-  void exit() override;
-
-  FSMStateName checkChange() override;
-
-  PoseTarget targetPose() const override;
-
-  bool targetValid() const override { return true; }
-
-  // Phase 4.2 (renamed/extended this phase): whether Stage 1 (STANDOFF_HOMING, now gated on
-  // both Y and Z convergence plus planar speed, not depth alone) has completed and Stage 2
-  // (WALL_ADHERED) has begun. Unlike StateAdherePid/StateAdhereSmc, there is no separate
-  // docked_/SOFT_DOCKING sub-phase here -- once standoff_homed_, the target simply moves to the
-  // wall plane and the CUDA planner's own rollout cost (wall contact penalty + preload_fx,
-  // CLAUDE.md Phase 4.1 Sec.3.1) handles the entire approach+press as one continuous process,
-  // so only 2 stages are reported.
-  bool isDepthAligned() const { return standoff_homed_; }
-
-  const char * adhereStageName() const override
+protected:
+  double xWall() const override { return planner_.xWall(); }
+  bool hasDockPhase() const override { return false; }
+  const std::array<double, 6> & maxTeleopVel() const override
   {
-    return standoff_homed_ ? "WALL_ADHERED" : "STANDOFF_HOMING";
+    return model_params_.pid_hold.max_teleop_vel;
   }
+  double maxTiltDeg() const override { return model_params_.pid_hold.max_tilt_deg; }
+
+  bool computeAdhesionWrench(
+    const Vec3 & pos_world, const Quat & q_est, const Vec3 & vel_body, const Vec3 & omega_body,
+    double sum_f, double dt, Vec6 & wrench_out) override;
 
 private:
   baseline_mppi::BaselineMppiController & planner_;
-
-  Vec3 p_d_world_ = Vec3::Zero();
-  Quat q_d_ = Quat(1.0, 0.0, 0.0, 0.0);
-
-  bool standoff_homed_ = false;
-  uint64_t last_seen_setpoint_seq_ = 0;
 };
 
 }  // namespace adhere_controller

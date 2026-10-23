@@ -26,8 +26,9 @@ namespace baseline_mppi
 // worker thread (adhere_controller.cpp::outerWorkerLoop()), never from the 500Hz physics thread.
 // Deliberately returns raw allocated thruster commands (std::array<double,8>), NOT a
 // NominalWrenchCmd -- Baseline MPPI does its own B^dagger allocation on-device (Kernel 4) and is
-// explicitly simpler than the Phase-4-KAMR WBC/OSQP pipeline (algorithms/wbc/WbcAllocatorBase.h),
-// which this class does not implement.
+// explicitly simpler than the still-unimplemented KAMR-MPPI WBC/OSQP pipeline, whose interface
+// will be introduced together with its concrete implementation, not speculatively ahead of time
+// (CLAUDE.md Phase 5.0 deleted the former placeholder-only algorithms/wbc/mppi abstract headers).
 class BaselineMppiController
 {
 public:

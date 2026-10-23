@@ -69,6 +69,7 @@ add_library(${PROJECT_NAME} SHARED
   src/fossen_hydrodynamics.cpp
   src/flow_environment_plugin.cpp
   src/mujoco_viewer.cpp
+  src/sensor_noise_params.cpp
 )
 target_include_directories(${PROJECT_NAME} PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

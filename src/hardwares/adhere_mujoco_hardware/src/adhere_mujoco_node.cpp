@@ -54,6 +54,15 @@ struct TelemetrySnapshot
   // Phase 2.10 Section A3: single source of truth, resolved once in
   // AdhereMujocoHardware::configure() -- replaces this file's former hardcoded kPadPosBody).
   std::array<std::array<double, 3>, 4> pad_site_pos_body{};
+  // CLAUDE.md Phase 5.0 Stage 4: environment marker geometry, write-once unlocked (same pattern
+  // as pad_site_pos_body above), resolved once by AdhereMujocoHardware::configure() from
+  // mjcf/rov_wall.xml's own wall_geom/floor_geom/water_surface geoms.
+  std::array<double, 3> wall_pos_world{};
+  std::array<double, 3> wall_size_full{};
+  double floor_z = 0.0;
+  std::array<double, 2> floor_extent_xy{};
+  double water_surface_z = 0.0;
+  std::array<double, 2> water_surface_extent_xy{};
   bool valid = false;
 };
 
@@ -98,6 +107,12 @@ TelemetrySnapshot readTelemetry(adhere_mujoco_hardware::AdhereMujocoHardware * h
   // pad_site_pos_body is write-once unlocked geometry (CLAUDE.md Phase 2.10 Section A3): safe
   // to read outside bridge->mtx once snap.valid has been observed true.
   snap.pad_site_pos_body = bridge->pad_site_pos_body;
+  snap.wall_pos_world = bridge->wall_pos_world;
+  snap.wall_size_full = bridge->wall_size_full;
+  snap.floor_z = bridge->floor_z;
+  snap.floor_extent_xy = bridge->floor_extent_xy;
+  snap.water_surface_z = bridge->water_surface_z;
+  snap.water_surface_extent_xy = bridge->water_surface_extent_xy;
   return snap;
 }
 }  // namespace
@@ -218,10 +233,10 @@ int main(int argc, char ** argv)
   // adhere_control_msgs, zero MuJoCo/CUDA/ros2_control coupling in the other direction
   // (CLAUDE.md Sec.3.3 governs the reverse link, not this one). Phase 4.3: the sphere/overlay
   // used to be gated on adhere_stage being non-empty (ADHERE_* only); now gated on the
-  // ControllerState::target_valid field, which is also true for HOLD_PID_DEPTH/HOLD_PID_6DOF.
-  // ADHERE_* states (FsmCommand IDs 5/6/7) still force the sphere's X onto the wall plane
-  // (world X=0) regardless of the live standoff/approach X, matching the existing visual
-  // design; every other target_valid state uses target_pose.x directly.
+  // ControllerState::target_valid field, which is also true for HOLD_PID_6DOF.
+  // ADHERE_* states (FsmCommand IDs 4/5/6, compacted Phase 5.0) still force the sphere's X onto
+  // the wall plane (world X=0) regardless of the live standoff/approach X, matching the
+  // existing visual design; every other target_valid state uses target_pose.x directly.
   static std::atomic<bool> latest_target_valid{false};
   static std::atomic<double> latest_target_x{0.0};
   static std::atomic<double> latest_target_y{0.0};
@@ -235,7 +250,7 @@ int main(int argc, char ** argv)
       const int stage_code = msg->adhere_stage == "STANDOFF_HOMING"
         ? 1
         : (msg->adhere_stage == "SOFT_DOCKING" ? 2 : (msg->adhere_stage == "WALL_ADHERED" ? 3 : 0));
-      const bool is_adhere_state = msg->current_state >= 5 && msg->current_state <= 7;
+      const bool is_adhere_state = msg->current_state >= 4 && msg->current_state <= 6;
       const double sphere_x = is_adhere_state ? 0.0 : msg->target_pose.position.x;
       latest_target_valid.store(msg->target_valid);
       latest_target_x.store(sphere_x);
@@ -315,9 +330,8 @@ int main(int argc, char ** argv)
 
       visualization_msgs::msg::MarkerArray markers;
 
-      // Wall marker (CLAUDE.md Phase 4.2 tank geometry: 20m x 11.5m, centered at Z=-4.25,
-      // spanning Y in [-10,10]m x Z in [-10,+1.5]m -- extended 1.5m above the Z=0.0 water
-      // surface to match mjcf/rov_wall.xml's wall body).
+      // Wall marker (CLAUDE.md Phase 5.0 Stage 4: pose/scale read from mjcf/rov_wall.xml's own
+      // wall_geom via AdhereMujocoHardware -- single source of truth, never hand-synced again).
       visualization_msgs::msg::Marker wall;
       wall.header.stamp = now;
       wall.header.frame_id = "world";
@@ -325,12 +339,12 @@ int main(int argc, char ** argv)
       wall.id = 0;
       wall.type = visualization_msgs::msg::Marker::CUBE;
       wall.action = visualization_msgs::msg::Marker::ADD;
-      wall.pose.position.x = -0.01;
-      wall.pose.position.y = 0.0;
-      wall.pose.position.z = -4.25;
-      wall.scale.x = 0.02;
-      wall.scale.y = 20.0;
-      wall.scale.z = 11.5;
+      wall.pose.position.x = snap.wall_pos_world[0];
+      wall.pose.position.y = snap.wall_pos_world[1];
+      wall.pose.position.z = snap.wall_pos_world[2];
+      wall.scale.x = snap.wall_size_full[0];
+      wall.scale.y = snap.wall_size_full[1];
+      wall.scale.z = snap.wall_size_full[2];
       wall.color.r = 0.25f;
       wall.color.g = 0.25f;
       wall.color.b = 0.3f;
@@ -339,7 +353,7 @@ int main(int argc, char ** argv)
 
       // Phase 4.2 (generalized Phase 4.3): green target sphere, mirrors MujocoViewer's own
       // scene-geom version -- published whenever the active FSM state reports a meaningful
-      // target_pose (HOLD_PID_DEPTH/HOLD_PID_6DOF/ADHERE_*), not just the three ADHERE_* states.
+      // target_pose (HOLD_PID_6DOF/ADHERE_*), not just the three ADHERE_* states.
       if (latest_target_valid.load()) {
         visualization_msgs::msg::Marker target_sphere;
         target_sphere.header.stamp = now;
@@ -361,8 +375,8 @@ int main(int argc, char ** argv)
         markers.markers.push_back(target_sphere);
       }
 
-      // Water surface marker at world Z=0.0 (CLAUDE.md Phase 3.3), 20m x 20m, semi-transparent
-      // cyan.
+      // Water surface marker (CLAUDE.md Phase 5.0 Stage 4: pose/scale read from
+      // mjcf/rov_wall.xml's own water_surface geom), semi-transparent cyan.
       visualization_msgs::msg::Marker water_surface;
       water_surface.header.stamp = now;
       water_surface.header.frame_id = "world";
@@ -370,9 +384,9 @@ int main(int argc, char ** argv)
       water_surface.id = 1;
       water_surface.type = visualization_msgs::msg::Marker::CUBE;
       water_surface.action = visualization_msgs::msg::Marker::ADD;
-      water_surface.pose.position.z = 0.0;
-      water_surface.scale.x = 20.0;
-      water_surface.scale.y = 20.0;
+      water_surface.pose.position.z = snap.water_surface_z;
+      water_surface.scale.x = snap.water_surface_extent_xy[0];
+      water_surface.scale.y = snap.water_surface_extent_xy[1];
       water_surface.scale.z = 0.01;
       water_surface.color.r = 0.2f;
       water_surface.color.g = 0.8f;
@@ -380,7 +394,8 @@ int main(int argc, char ** argv)
       water_surface.color.a = 0.25f;
       markers.markers.push_back(water_surface);
 
-      // Tank floor marker at world Z=-10.0 (CLAUDE.md Phase 3.3), 20m x 20m.
+      // Tank floor marker (CLAUDE.md Phase 5.0 Stage 4: pose/scale read from
+      // mjcf/rov_wall.xml's own floor_geom).
       visualization_msgs::msg::Marker floor;
       floor.header.stamp = now;
       floor.header.frame_id = "world";
@@ -388,9 +403,9 @@ int main(int argc, char ** argv)
       floor.id = 2;
       floor.type = visualization_msgs::msg::Marker::CUBE;
       floor.action = visualization_msgs::msg::Marker::ADD;
-      floor.pose.position.z = -10.0;
-      floor.scale.x = 20.0;
-      floor.scale.y = 20.0;
+      floor.pose.position.z = snap.floor_z;
+      floor.scale.x = snap.floor_extent_xy[0];
+      floor.scale.y = snap.floor_extent_xy[1];
       floor.scale.z = 0.05;
       floor.color.r = 0.4f;
       floor.color.g = 0.4f;

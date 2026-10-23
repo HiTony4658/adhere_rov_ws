@@ -2,10 +2,15 @@
 #define ADHERE_CONTROLLER__ALGORITHMS__PID__SIXDOFPIDCONTROLLER_H_
 
 #include "adhere_controller/common/mathTypes.h"
-#include "adhere_controller/dynamics/FossenDynamics.h"
 
 namespace adhere_controller
 {
+
+// Forward-declared (not included): this class only ever holds/passes a const reference to
+// FossenDynamics, never its definition. Avoids a header cycle now that ModelParams.h (Phase 5.0
+// Stage 2.4) includes this header so ModelParams::PidHoldGains/AdherePidGains can inherit Gains
+// directly instead of hand-copying fields -- FossenDynamics.h itself includes ModelParams.h.
+class FossenDynamics;
 
 // Decoupled 6-DOF position + SO(3) unit-quaternion attitude PID (CLAUDE.md Phase 3.7 Stage 1.3),
 // extracted from the error->wrench law previously inline in StatePidHold.cpp. Setpoint
@@ -18,10 +23,6 @@ namespace adhere_controller
 //   - derivative-on-measurement (kd terms multiply measured body velocity/angular-velocity
 //     error, never a differenced setpoint, so a setpoint step never causes a derivative kick);
 //   - hydrostatic buoyancy/drag feedforward via an injected FossenDynamics.
-// StateDepthHold (Phase 3.7) drives this same class in a reduced "depth-only" mode: zero
-// lateral position gains, q_d=identity, DepthHoldGains mapped onto this class's Gains struct --
-// see StateDepthHold.cpp for the exact mapping and the rationale for why that is behaviorally
-// equivalent to the pre-Phase-3.7 inline law.
 class SixDofPidController
 {
 public:
@@ -49,7 +50,7 @@ public:
 
   // integral_pos_max/integral_att_max are the same anti-windup clamp constants StatePidHold.cpp
   // already used (kIntegralPosMax=180N, kIntegralAttMax=10N*m), now parameters of this class
-  // instead of file-local constants so StateDepthHold's reduced mode can supply its own.
+  // instead of file-local constants.
   SixDofPidController(
     const Gains & gains, const FossenDynamics & dynamics, double integral_pos_max,
     double integral_att_max);

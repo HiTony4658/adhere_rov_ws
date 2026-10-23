@@ -31,7 +31,7 @@
   <!-- TODO(Phase 2): add osqp/osqp-eigen and CUDA toolkit discovery in CMakeLists.txt
        once the 12D OSQP solve and the outer_mppi_cuda rollout kernels are implemented. -->
 
-  <!-- adhere_mujoco_hardware/adhere_keyboard_input/simplified_v1_description/xacro/rviz2/
+  <!-- adhere_mujoco_hardware/adhere_teleop_gcs/simplified_v1_description/xacro/rviz2/
        robot_state_publisher were previously exec_depend here for this package's own closed-
        loop launch file; that launch file now lives in simplified_v1_description (CLAUDE.md
        Phase 3.4), which declares those deps itself. This package is discovered purely via

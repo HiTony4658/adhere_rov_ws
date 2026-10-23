@@ -2,10 +2,14 @@
 #define ADHERE_CONTROLLER__ALGORITHMS__SMC__SIXDOFSMCCONTROLLER_H_
 
 #include "adhere_controller/common/mathTypes.h"
-#include "adhere_controller/dynamics/FossenDynamics.h"
 
 namespace adhere_controller
 {
+
+// Forward-declared (not included): see SixDofPidController.h's identical comment -- avoids a
+// header cycle now that ModelParams.h includes this header for ModelParams::AdhereSmcGains'
+// inheritance from Gains (Phase 5.0 Stage 2.4).
+class FossenDynamics;
 
 // Wall-Adhesion 6-DOF Sliding Mode Control baseline (CLAUDE.md Phase 3.8 Stage 2.2.2): the
 // second classical wall-adhesion baseline, intended to show stronger disturbance rejection than

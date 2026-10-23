@@ -18,7 +18,7 @@
 - `ModelParams`（运行时从 `simplified_v1_description/config/robot_control.yaml`
   加载的模型解耦物理/增益参数）与动态 `ThrusterAllocator`（运行时从
   `ModelParams` 的推力器几何构建 `6x8` 分配矩阵 `B` 及其阻尼伪逆 `B^+`）；
-- `FSMState` 抽象基类与全部具体状态（`IDLE_PASSIVE_NONE`/`HOLD_PID_DEPTH`/
+- `FSMState` 抽象基类与全部具体状态（`IDLE_PASSIVE_NONE`/
   `TELEOP_OPENLOOP_6DOF`/`HOLD_PID_6DOF`，未来 `ADHERE_MPPI_KAMR` 状态同样加入这里）；
 - `MultiRateDecimator`（均匀整数抽取 `500Hz -> 250Hz/25Hz`）；
 - `mathTypes`/`mathTools` 通用数学工具。

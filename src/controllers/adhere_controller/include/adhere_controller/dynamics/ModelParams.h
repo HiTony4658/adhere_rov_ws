@@ -8,29 +8,22 @@
 
 #include "rclcpp/node.hpp"
 
+#include "adhere_controller/algorithms/pid/AdherePidController.h"
+#include "adhere_controller/algorithms/pid/SixDofPidController.h"
+#include "adhere_controller/algorithms/smc/SixDofSmcController.h"
 #include "adhere_controller/common/mathTypes.h"
 
 namespace adhere_controller
 {
 
 // Runtime-loaded, model-decoupled physical/control parameters (CLAUDE.md Phase 3.3 Sec.3):
-// everything here used to be a `constexpr`/`const Vec3` baked into StateDepthHold.cpp/
+// everything here used to be a `constexpr`/`const Vec3` baked into
 // StateOpenLoop.cpp/StatePidHold.cpp/ThrusterAllocator.h. Switching to a robot with different
 // thruster geometry, mass, or gains now only requires editing
 // `<pkg_description>/config/robot_control.yaml` -- zero adhere_controller C++ changes or
 // recompilation.
 struct ModelParams
 {
-  struct DepthHoldGains
-  {
-    double kp_z = 180.0;
-    double ki_z = 95.0;
-    double kd_z = 62.0;
-    double max_heave_vel = 0.30;  // m/s, Xbox left-stick full-deflection target_z_ rate
-    double kp_att = 6.0;
-    double kd_att = 4.0;
-  };
-
   struct OpenLoopGains
   {
     // [Fx, Fy, Fz, Tx, Ty, Tz] max wrench magnitude at full stick deflection (CLAUDE.md
@@ -38,14 +31,21 @@ struct ModelParams
     std::array<double, 6> max_wrench = {60.0, 50.0, 50.0, 5.0, 5.0, 8.0};
   };
 
-  struct PidHoldGains
+  // Inherits SixDofPidController::Gains directly (CLAUDE.md Phase 5.0 Stage 2.4) instead of
+  // mirroring its 6 fields + a hand-written copy function -- StatePidHold passes model_params_.
+  // pid_hold straight to the SixDofPidController constructor via the base-class subobject.
+  struct PidHoldGains : public SixDofPidController::Gains
   {
-    Vec3 kp_pos = Vec3(120.0, 120.0, 120.0);
-    Vec3 ki_pos = Vec3(10.0, 10.0, 15.0);
-    Vec3 kd_vel = Vec3(60.0, 60.0, 60.0);
-    Vec3 kp_att = Vec3(40.0, 40.0, 25.0);
-    Vec3 ki_att = Vec3(2.0, 2.0, 2.0);
-    Vec3 kd_att = Vec3(15.0, 15.0, 12.0);
+    PidHoldGains()
+    {
+      kp_pos = Vec3(120.0, 120.0, 120.0);
+      ki_pos = Vec3(10.0, 10.0, 15.0);
+      kd_vel = Vec3(60.0, 60.0, 60.0);
+      kp_att = Vec3(40.0, 40.0, 25.0);
+      ki_att = Vec3(2.0, 2.0, 2.0);
+      kd_att = Vec3(15.0, 15.0, 12.0);
+    }
+
     // [vx_max, vy_max, vz_max, omega_x_roll_max, omega_y_pitch_max, omega_z_yaw_max]
     // stick-driven setpoint-move rates (Phase 3.5: extended from 4 to 6 DOF).
     std::array<double, 6> max_teleop_vel = {0.25, 0.25, 0.25, 0.4, 0.4, 0.6};
@@ -65,26 +65,32 @@ struct ModelParams
   // AdherePidController's own wall-normal force-regulation gains (see its header for the sign
   // convention: positive magnitudes here, the minus sign that turns them into a pressing -- not
   // receding -- commanded wrench lives in code).
-  struct AdherePidGains
+  // Inherits BOTH SixDofPidController::Gains (Y/Z/attitude loop) and AdherePidController::Gains
+  // (wall-normal force PI loop) directly (CLAUDE.md Phase 5.0 Stage 2.4) instead of mirroring
+  // their fields + two hand-written copy functions -- StateAdherePid passes model_params_.
+  // adhere_pid straight to each controller's constructor via the respective base subobject.
+  struct AdherePidGains : public SixDofPidController::Gains, public AdherePidController::Gains
   {
-    Vec3 kp_pos = Vec3(120.0, 120.0, 120.0);
-    Vec3 ki_pos = Vec3(10.0, 10.0, 10.0);
-    Vec3 kd_vel = Vec3(60.0, 60.0, 60.0);
-    Vec3 kp_att = Vec3(40.0, 40.0, 25.0);
-    Vec3 ki_att = Vec3(2.0, 2.0, 2.0);
-    Vec3 kd_att = Vec3(15.0, 15.0, 12.0);
+    AdherePidGains()
+    {
+      kp_pos = Vec3(120.0, 120.0, 120.0);
+      ki_pos = Vec3(10.0, 10.0, 10.0);
+      kd_vel = Vec3(60.0, 60.0, 60.0);
+      kp_att = Vec3(40.0, 40.0, 25.0);
+      ki_att = Vec3(2.0, 2.0, 2.0);
+      kd_att = Vec3(15.0, 15.0, 12.0);
+      // AdherePidController::Gains' own defaults (kp_force=2.0, ki_force=0.5, kd_x=20.0,
+      // f_preload=30.0, integral_force_max=80.0) already match this struct's historical
+      // defaults, so they are left un-reassigned here.
+    }
+
     std::array<double, 6> max_teleop_vel = {0.25, 0.25, 0.25, 0.4, 0.4, 0.6};
     double max_tilt_deg = 30.0;
     double approach_speed = 0.15;       // m/s, x_d ramp rate toward x_wall while APPROACHing
     double dock_force_thresh = 20.0;    // N, sum F_N,i required to leave APPROACH
     double x_wall = 0.0;                // m, world X of the wall plane
     double x_dock_eps = 0.02;           // m, position tolerance for the APPROACH->ADHERED gate
-    double kp_force = 2.0;
-    double ki_force = 0.5;
-    double kd_x = 20.0;
-    double f_preload = 30.0;            // N, baseline pressing magnitude
     double f_des = 100.0;               // N, desired sum of the 4 pad normal forces
-    double integral_force_max = 80.0;   // N, anti-windup clamp on the force-loop integrator
   };
 
   // Phase 3.8 wall-adhesion SMC baseline (algorithms::smc::SixDofSmcController +
@@ -93,25 +99,31 @@ struct ModelParams
   // wall_preload_fx is a constant pressing bias (N magnitude; applied as a negative Fx wrench)
   // added only once StateAdhereSmc has docked -- see its header for why a single
   // SixDofSmcController instance drives both APPROACH and ADHERED phases.
-  struct AdhereSmcGains
+  // Inherits SixDofSmcController::Gains directly (CLAUDE.md Phase 5.0 Stage 2.4) instead of
+  // mirroring its 6 fields + a hand-written copy function.
+  struct AdhereSmcGains : public SixDofSmcController::Gains
   {
-    Vec6 lambda = (Vec6() << 2.0, 2.0, 2.0, 1.5, 1.5, 1.5).finished();
-    Vec6 kd = (Vec6() << 80.0, 80.0, 80.0, 20.0, 20.0, 20.0).finished();
-    Vec6 k_switch = (Vec6() << 40.0, 40.0, 40.0, 10.0, 10.0, 10.0).finished();
-    Vec6 phi = (Vec6() << 0.05, 0.05, 0.05, 0.05, 0.05, 0.05).finished();
-    // This phase: bounded integral-sliding-mode augmentation (s = e_nu + lambda*e_eta +
-    // ki*int(e_eta)dt), added because a pure P+switching surface has nothing to "ratchet up"
-    // against static Coulomb pad friction once wall preload is pressing -- defaults to all-zero
-    // so any other future SMC consumer is unaffected; only adhere_smc.ki in robot_control.yaml
-    // sets the Y/Z components nonzero.
-    Vec6 ki = (Vec6() << 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).finished();
+    AdhereSmcGains()
+    {
+      lambda = (Vec6() << 2.0, 2.0, 2.0, 1.5, 1.5, 1.5).finished();
+      kd = (Vec6() << 80.0, 80.0, 80.0, 20.0, 20.0, 20.0).finished();
+      k_switch = (Vec6() << 40.0, 40.0, 40.0, 10.0, 10.0, 10.0).finished();
+      phi = (Vec6() << 0.05, 0.05, 0.05, 0.05, 0.05, 0.05).finished();
+      // This phase: bounded integral-sliding-mode augmentation (s = e_nu + lambda*e_eta +
+      // ki*int(e_eta)dt), added because a pure P+switching surface has nothing to "ratchet up"
+      // against static Coulomb pad friction once wall preload is pressing -- defaults to
+      // all-zero so any other future SMC consumer is unaffected; only adhere_smc.ki in
+      // robot_control.yaml sets the Y/Z components nonzero.
+      ki = (Vec6() << 0.0, 0.0, 0.0, 0.0, 0.0, 0.0).finished();
+      wall_preload_fx = 30.0;  // N magnitude; applied as -wall_preload_fx wrench
+    }
+
     std::array<double, 6> max_teleop_vel = {0.25, 0.25, 0.25, 0.4, 0.4, 0.6};
     double max_tilt_deg = 30.0;
     double approach_speed = 0.15;
     double dock_force_thresh = 20.0;
     double x_wall = 0.0;
     double x_dock_eps = 0.02;
-    double wall_preload_fx = 30.0;       // N magnitude; applied as -wall_preload_fx wrench
   };
 
   // Phase 4.2 wall-homing/adhesion sequence (renamed/extended this phase to 3 stages), shared by
@@ -132,7 +144,6 @@ struct ModelParams
     // docking).
     double depth_tol = 0.03;      // m, |z - Z_target| gate for STANDOFF_HOMING -> SOFT_DOCKING
     double y_tol = 0.03;          // m, |y - Y_target| gate for STANDOFF_HOMING -> SOFT_DOCKING
-    double vz_tol = 0.05;         // m/s, |v_z| gate (legacy name, kept for Vz-only consumers)
     double vel_tol = 0.04;        // m/s, sqrt(vy^2+vz^2) planar-speed gate for STANDOFF_HOMING
     // Phase 4.3 soft-landing approach damping: ADHERE_PID_WBC/ADHERE_SMC_WBC subtract
     // approach_vx_damp*max(0, v_x,body) from the commanded Fx during the pre-dock SOFT_DOCKING
@@ -164,6 +175,26 @@ struct ModelParams
     Vec3 r_imu = Vec3(0.0, 0.0, 0.0);
     Vec3 r_depth = Vec3(0.0, 0.0, 0.0);
     Vec3 r_dvl = Vec3(0.0, 0.0, -0.20);
+  };
+
+  // Phase 5.0 Stage 4: RovStateEstimator's fixed correction gains, moved out of that header's
+  // `static constexpr` into YAML (CLAUDE.md rationale: unlike AdhereMujocoHardware's sim-
+  // injected sensor noise std -- a plain SystemInterface with no ROS parameter access, hence
+  // MJCF-sourced -- RovStateEstimator runs inside the adhere_controller ROS node, which CAN read
+  // robot_control.yaml; these gains are measured/tuned from a real sensor suite in a real
+  // experiment, not simulation-only). Defaults match the original Phase 3.5/3.7 compiled-in
+  // values exactly, verified unchanged against the <0.015 m/s / <15mm / <1.0deg RMSE contract in
+  // test_sensor_fusion_and_teleop.cpp.
+  struct EstimatorGains
+  {
+    double att_gain = 0.30;
+    double depth_pos_gain = 0.30;
+    double depth_vel_gain = 0.10;
+    double dvl_vel_gain = 0.50;
+    double dvl_range_gain = 0.30;
+    double contact_force_filter_gain = 0.20;
+    double contact_vel_gain = 0.50;
+    double contact_pos_gain = 0.20;
   };
 
   // Phase 3.7 nominal Fossen rigid-body + added-mass diagonal terms (dynamics::FossenDynamics):
@@ -229,7 +260,6 @@ struct ModelParams
   // pseudo-measurement fires only once all 4 filtered pad load cells exceed this threshold.
   double contact_force_thresh = 2.0;  // N
 
-  DepthHoldGains depth_hold;
   OpenLoopGains open_loop;
   PidHoldGains pid_hold;
   AdherePidGains adhere_pid;
@@ -241,6 +271,7 @@ struct ModelParams
     {0.00, 1.00}, {0.80, 1.00}, {-0.80, 1.50}, {1.20, 2.00}};
   SensorMount sensor_mount;
   DynamicsParams dynamics;
+  EstimatorGains estimator;
 
   // Phase 3.5 dual state-acquisition mode: "ground_truth" or "sensor_fusion" (CLAUDE.md
   // Stage 2.3). Read directly by AdhereController, not by any FSMState.

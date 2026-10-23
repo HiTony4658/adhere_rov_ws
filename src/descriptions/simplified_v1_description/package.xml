@@ -29,9 +29,11 @@
        directions purely from the installed package index, not from package.xml. -->
   <!-- launch/mujoco.launch.py (CLAUDE.md Phase 3.4: this package now owns the model's launch
        files, not adhere_mujoco_hardware/adhere_controller) runs adhere_mujoco_node and
-       optionally includes adhere_keyboard_input's teleop_gcs.launch.py, both referenced only
-       by package name at runtime (get_package_share_directory), never linked against: left
-       undeclared for the same build-order-cycle reason as adhere_mujoco_hardware above. -->
+       optionally includes adhere_teleop_gcs's teleop_gcs.launch.py and/or
+       adhere_apriltag_detector_node (Phase 5.0 Stage 6), all referenced only by package name at
+       runtime (get_package_share_directory / launch_ros Node(package=...)), never linked
+       against: left undeclared for the same build-order-cycle reason as
+       adhere_mujoco_hardware above. -->
 
 
   <test_depend>ament_lint_auto</test_depend>

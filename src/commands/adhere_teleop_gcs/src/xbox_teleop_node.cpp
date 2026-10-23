@@ -69,7 +69,6 @@ public:
 
     button_passive_ = declare_parameter<int>("button_passive", 0);     // A
     button_pid_hold_ = declare_parameter<int>("button_pid_hold", 1);   // B
-    button_depth_hold_ = declare_parameter<int>("button_depth_hold", 2);  // X
     button_open_loop_ = declare_parameter<int>("button_open_loop", 3);    // Y
     button_pitch_reverse_ = declare_parameter<int>("button_pitch_reverse", 4);  // LB
     button_roll_reverse_ = declare_parameter<int>("button_roll_reverse", 5);    // RB
@@ -124,8 +123,6 @@ private:
     publishFsmCommandOnRisingEdge(
       msg->buttons, button_passive_, adhere_control_msgs::msg::FsmCommand::IDLE_PASSIVE_NONE);
     publishFsmCommandOnRisingEdge(
-      msg->buttons, button_depth_hold_, adhere_control_msgs::msg::FsmCommand::HOLD_PID_DEPTH);
-    publishFsmCommandOnRisingEdge(
       msg->buttons, button_open_loop_, adhere_control_msgs::msg::FsmCommand::TELEOP_OPENLOOP_6DOF);
     publishFsmCommandOnRisingEdge(
       msg->buttons, button_pid_hold_, adhere_control_msgs::msg::FsmCommand::HOLD_PID_6DOF);
@@ -163,7 +160,6 @@ private:
   int axis_roll_trigger_ = 5;
   int button_passive_ = 0;
   int button_pid_hold_ = 1;
-  int button_depth_hold_ = 2;
   int button_open_loop_ = 3;
   int button_pitch_reverse_ = 4;
   int button_roll_reverse_ = 5;

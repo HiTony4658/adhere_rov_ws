@@ -64,6 +64,17 @@ struct MujocoVisBridge
   std::array<double, 8> thruster_ctrl_min{};
   std::array<double, 8> thruster_ctrl_max{};
 
+  // CLAUDE.md Phase 5.0 Stage 4: environment marker geometry (wall/water surface/tank floor),
+  // resolved once from model_'s own geoms by AdhereMujocoHardware::configure() -- single source
+  // of truth for adhere_mujoco_node's /rov/environment_markers (replaces that node's former
+  // hand-copied literals, which had to be kept in sync with mjcf/rov_wall.xml by hand).
+  std::array<double, 3> wall_pos_world{};          // world-frame wall_geom center, m
+  std::array<double, 3> wall_size_full{};          // full (not half) extent, m
+  double floor_z = 0.0;                            // world Z of floor_geom, m
+  std::array<double, 2> floor_extent_xy{};          // full extent, m
+  double water_surface_z = 0.0;                    // world Z of water_surface, m
+  std::array<double, 2> water_surface_extent_xy{};  // full extent, m
+
   // --- GUI -> hardware control requests (lock-free atomics) ---
   std::atomic<bool> paused{false};
   std::atomic<bool> reset_request{false};
@@ -124,8 +135,8 @@ struct MujocoVisBridge
   // lock-free-atomic-friendly;
   // human-readable names are derived locally by each consumer from these codes. target_* was
   // adhere_target_* through Phase 4.2 (adhere-only); Phase 4.3 made target_valid/target_pose
-  // universal (HOLD_PID_DEPTH/HOLD_PID_6DOF/ADHERE_*), so the fields were renamed to drop the
-  // now-inaccurate "adhere_" prefix.
+  // universal (HOLD_PID_6DOF/ADHERE_*), so the fields were renamed to drop the now-inaccurate
+  // "adhere_" prefix.
   std::atomic<int> fsm_current_state_code{0};
   std::atomic<int> adhere_stage_code{0};
   std::atomic<bool> target_valid{false};

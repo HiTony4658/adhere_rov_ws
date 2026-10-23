@@ -6,8 +6,8 @@
 `pluginlib` 插件（`adhere_controller/AdhereController`，Phase 3.3 合并自此前的
 `adhere_controller_common` + `adhere_kamr_controller` 两个包）。承载 FSM 管理、
 生命周期管理、接口装配、均匀整数抽取多速率调度、4 话题订阅/发布、Xbox 手柄
-`0.25s` 失联看门狗与状态切换，以及 `IDLE_PASSIVE_NONE`/`HOLD_PID_DEPTH`/`TELEOP_OPENLOOP_6DOF`/
-`HOLD_PID_6DOF`/`ADHERE_PID_WBC`/`ADHERE_SMC_WBC`/`ADHERE_MPPI_BASELINE` 七个 FSM 状态的完整实现，
+`0.25s` 失联看门狗与状态切换，以及 `IDLE_PASSIVE_NONE`/`TELEOP_OPENLOOP_6DOF`/
+`HOLD_PID_6DOF`/`ADHERE_PID_WBC`/`ADHERE_SMC_WBC`/`ADHERE_MPPI_BASELINE` 六个 FSM 状态的完整实现，
 外加集中式推力器效率/啁啾/安全遥测（`ControllerMetrics.h`）。`ADHERE_MPPI_BASELINE`
 （Phase 4.1）是第一个纯 CUDA 采样式规划器：`algorithms/baseline_mppi/` 下的
 `BaselineMppiController` 在既有的 25Hz 异步外环工作线程上跑完整的 MPPI
@@ -37,11 +37,6 @@ include/adhere_controller/
 │   │   └── AdherePidController.h    # 贴壁法向力 PI 调节器，覆盖 Fx 分量（Phase 3.8）
 │   ├── smc/
 │   │   └── SixDofSmcController.h    # 贴壁 6-DOF 滑模控制器（Phase 3.8）
-│   ├── wbc/
-│   │   └── WbcAllocatorBase.h     # Phase 4 12D OSQP 分配器的纯数据契约抽象基类（Phase 3.7，KAMR-MPPI 专用）
-│   ├── mppi/
-│   │   └── MppiPlannerBase.h      # Phase 4 KAMR-MPPI 外环规划器的纯数据契约抽象基类（Phase 3.7；
-│   │                              # BaselineMppiController 不实现它——直接输出 8 推力器指令）
 │   └── baseline_mppi/             # 纯 CUDA 外环 MPPI（Phase 4.1），零 Eigen/ROS 依赖的 GPU 类型独立成子目录
 │       ├── BaselineCudaTypes.h       # POD float 结构体：CudaState6Dof/CudaBaselineModelParams/CudaBaselineRuntimeConfig
 │       ├── BaselineMppiConfig.h      # host 侧超参数 + loadFromNode()（独立于 ModelParams 的解析器）
@@ -50,14 +45,13 @@ include/adhere_controller/
 ├── FSM/
 │   ├── FSMState.h               # 抽象基类（checkFsmCommandChange()/targetPose() 共享实现）
 │   ├── StatePassive.h
-│   ├── StateDepthHold.h         # 委托给 SixDofPidController 的"仅深度"简化模式（Phase 3.7）
 │   ├── StateOpenLoop.h
 │   ├── StatePidHold.h           # 仅保留设定点积分，误差->力矩律委托给 SixDofPidController（Phase 3.7）
 │   ├── StateAdherePid.h         # 三阶段贴壁 PID 基线：STANDOFF_HOMING 定位 + SOFT_DOCKING 位置保持 + WALL_ADHERED 法向力 PI（Phase 3.8）
 │   ├── StateAdhereSmc.h         # 三阶段贴壁 SMC 基线：全程单一滑模控制器（含 Y/Z 积分项）+ 贴壁后压墙偏置（Phase 3.8）
 │   └── StateBaselineMppi.h      # 250Hz 严格零阶保持直通 + StatePidHold 同构的设定点/摇杆积分（Phase 4.1）
 └── common/
-    ├── enumClass.h              # FSMStateName（IDLE_PASSIVE_NONE/HOLD_PID_DEPTH/TELEOP_OPENLOOP_6DOF/HOLD_PID_6DOF/ADHERE_PID_WBC/
+    ├── enumClass.h              # FSMStateName（IDLE_PASSIVE_NONE/TELEOP_OPENLOOP_6DOF/HOLD_PID_6DOF/ADHERE_PID_WBC/
     │                            # ADHERE_SMC_WBC/ADHERE_MPPI_BASELINE）/ FSMMode
     ├── mathTypes.h              # Eigen 类型别名（Vec3/Vec6/Vec8/Mat68/Mat86/Mat34/Mat43/Mat48/RotMat）
     ├── mathTools.h              # quatToRotMat / rpyToRotMat / rotMatToRPY / quatMul / quatInverse /
@@ -90,7 +84,6 @@ src/
 │       └── baseline_mppi_kernels.cu    # 4 个 CUDA 核函数 + stepBaselineFossen6Dof 设备端动力学（nvcc 编译）
 └── FSM/
     ├── StatePassive.cpp
-    ├── StateDepthHold.cpp
     ├── StateOpenLoop.cpp
     ├── StatePidHold.cpp
     ├── StateAdherePid.cpp
@@ -99,7 +92,7 @@ src/
 
 launch/mujoco.launch.py          # 闭环启动文件：robot_state_publisher + adhere_mujoco_node
                                   # (autostart_controllers=['adhere_controller']) + RViz2
-                                  # + launch_teleop:=true 时自动包含 adhere_keyboard_input 的
+                                  # + launch_teleop:=true 时自动包含 adhere_teleop_gcs 的
                                   # teleop_gcs.launch.py（joy_node + xbox_teleop_node + fsm_console_node）
 
 test/
@@ -139,8 +132,9 @@ test/
   cob_offset_body/z_surface/z_transition/D_lin/D_quad/D_ang_lin/D_ang_quad`
   （Fossen 水动力前馈参数）；
 - `workspace_z_min/workspace_z_max/workspace_x_min`（世界坐标安全边界）；
-- `depth_hold.*`/`open_loop.*`/`pid_hold.*`/`adhere_pid.*`/`adhere_smc.*`
-  （各 FSM 状态的增益/限幅；后两者为 Phase 3.8 新增的贴壁基线参数）；
+- `open_loop.*`/`pid_hold.*`/`adhere_pid.*`/`adhere_smc.*`
+  （各 FSM 状态的增益/限幅；后两者为 Phase 3.8 新增的贴壁基线参数；`depth_hold.*`
+  已随 Phase 5.0 删除的 `HOLD_PID_DEPTH` 状态一并移除）；
 - `adhere_target_depth_m/adhere_target_y/adhere_standoff_x/adhere_depth_tol/
   adhere_y_tol/adhere_vz_tol/adhere_vel_tol/adhere_approach_vx_damp/
   adhere_retarget_threshold`（均属 `ModelParams::adhere_stage`，`ADHERE_PID_WBC`/
@@ -168,7 +162,6 @@ test/
 struct ActiveState {
   double pos_w[3];        // 世界坐标系质心位置 [x, y, z]
   double quat_w[4];       // 世界坐标系姿态四元数 [w, x, y, z]（Phase 3.6）
-  double rpy[3];          // 由 quat_w 派生，仅供 StateDepthHold 的小角度阻尼使用
   double vel_body[3];     // 机体坐标系线速度
   double omega_body[3];   // 机体坐标系角速度
   double pad_force[4];    // TL/TR/BL/BR 法向接触力
@@ -229,17 +222,16 @@ struct CtrlInterfaces {
 地面真值改由 `adhere_mujoco_node` 单独发布在 `/rov/ground_truth_odom`
 （`nav_msgs/Odometry`），仅供离线评估参考。
 
-## 当前状态（7 态，CLAUDE.md Phase 3.2/3.3/3.5/3.8/4.1）
+## 当前状态（6 态，CLAUDE.md Phase 3.2/3.3/3.5/3.8/4.1，`HOLD_PID_DEPTH` 已于 Phase 5.0 删除并压缩 ID）
 
 | 状态 | ID | 职责 |
 |---|---|---|
 | `IDLE_PASSIVE_NONE` (`state_idle_passive_none`) | 1 | `enter()`/`run()` 均将 8 个推力器指令置零，安全默认态 |
-| `HOLD_PID_DEPTH` (`state_hold_pid_depth`) | 2 | 世界坐标系 Z 向 PID 定深叠加姿态阻尼；`target_z_` 接受 `/rov/setpoint_cmd` 离散设定（沿边应用）与 Xbox 左摇杆连续微调，钳制在 `robot_control.yaml` 的 `workspace_z_min/max` 内 |
-| `TELEOP_OPENLOOP_6DOF` (`state_teleop_openloop_6dof`) | 3 | 无记忆地把 `/rov/teleop_cmd` 的 6 维遥操作输入（含 Phase 3.5 新增的 `pitch_rate`/`roll_rate`）线性映射为机体力矩（增益来自 `open_loop.max_wrench`），用于验证 `B`/`B^+` 分配零寄生耦合 |
-| `HOLD_PID_6DOF` (`state_hold_pid_6dof`) | 4 | `enter()` 锁存当前 `(x,y,z,roll,pitch,yaw)` 为保持点；摇杆/扳机推动期间按机体对齐速度平移/旋转该设定点（增益来自 `pid_hold.*`，roll/pitch 目标钳制在 `±max_tilt_deg`），松手瞬间冻结；6-DOF PID + 浮力/科氏力/阻力前馈 |
-| `ADHERE_PID_WBC` (`state_adhere_pid_wbc`) | 5 | 贴壁 PID 基线（Phase 3.8，三阶段序列）：`enter()` 后先进入 `STANDOFF_HOMING` 阶段，Y/Z/X 分别锁定到实时目标 `CtrlInterfaces::adhere_target_`/`adhere_pid.x_wall + adhere_standoff_x`，待 `|y-Y_target|<=adhere_y_tol` 且 `|z-Z_target|<=adhere_depth_tol` 且平面速度 `<=adhere_vel_tol` 后粘滞进入 `SOFT_DOCKING`/`WALL_ADHERED`；该阶段内未贴壁时 `AdherePidController` 之外的 Y/Z/姿态+X 全部由 `SixDofPidController` 驱动，X 向设定点以 `adhere_pid.approach_speed` 匀速逼近 `adhere_pid.x_wall`；一旦 4 垫估计法向力之和超过 `adhere_pid.dock_force_thresh` 且位置进入 `adhere_pid.x_dock_eps`，粘滞切换为贴壁态：X 向改由专用 `AdherePidController` 的法向力 PI 律覆盖，Y/Z/姿态仍由 `SixDofPidController` 保持；`/rov/adhere_target_cmd` 实时改变目标且越过阈值时强制退回 `STANDOFF_HOMING` |
-| `ADHERE_SMC_WBC` (`state_adhere_smc_wbc`) | 6 | 贴壁 SMC 基线（Phase 3.8，三阶段序列）：`STANDOFF_HOMING`/`SOFT_DOCKING`/`WALL_ADHERED` 门限与 `ADHERE_PID_WBC` 完全一致；全程只用一个 `SixDofSmcController` 实例驱动全部 6DOF（不为逼近阶段单独构造位置控制器），滑模面叠加了 Y/Z 积分项（`adhere_smc.ki`）以对抗贴壁后的静摩擦，贴壁判定与 `ADHERE_PID_WBC` 相同，贴壁后额外叠加常值压墙偏置 `adhere_smc.wall_preload_fx` |
-| `ADHERE_MPPI_BASELINE` (`state_adhere_mppi_baseline`) | 7 | 纯 CUDA 外环 MPPI 基线（Phase 4.1，三阶段序列，无独立 `SOFT_DOCKING` 子阶段）：`enter()` 锁存当前位姿为目标并调用 `BaselineMppiController::warmStart()`；`STANDOFF_HOMING` 阶段同样先锁定 Y/Z/X standoff 目标（实时读取 `CtrlInterfaces::adhere_target_`），对齐后直接进入 `WALL_ADHERED` 把目标 X 改为 `BaselineMppiController::xWall()`（实际逼近/压墙由 CUDA 滚动代价里的墙面接触惩罚 + `preload_fx` 完成）；设定点/摇杆设定点积分与 `HOLD_PID_6DOF` 同构，但在 `STANDOFF_HOMING` 期间被目标覆盖 |
+| `TELEOP_OPENLOOP_6DOF` (`state_teleop_openloop_6dof`) | 2 | 无记忆地把 `/rov/teleop_cmd` 的 6 维遥操作输入（含 Phase 3.5 新增的 `pitch_rate`/`roll_rate`）线性映射为机体力矩（增益来自 `open_loop.max_wrench`），用于验证 `B`/`B^+` 分配零寄生耦合 |
+| `HOLD_PID_6DOF` (`state_hold_pid_6dof`) | 3 | `enter()` 锁存当前 `(x,y,z,roll,pitch,yaw)` 为保持点；摇杆/扳机推动期间按机体对齐速度平移/旋转该设定点（增益来自 `pid_hold.*`，roll/pitch 目标钳制在 `±max_tilt_deg`），松手瞬间冻结；6-DOF PID + 浮力/科氏力/阻力前馈 |
+| `ADHERE_PID_WBC` (`state_adhere_pid_wbc`) | 4 | 贴壁 PID 基线（Phase 3.8，三阶段序列）：`enter()` 后先进入 `STANDOFF_HOMING` 阶段，Y/Z/X 分别锁定到实时目标 `CtrlInterfaces::adhere_target_`/`adhere_pid.x_wall + adhere_standoff_x`，待 `|y-Y_target|<=adhere_y_tol` 且 `|z-Z_target|<=adhere_depth_tol` 且平面速度 `<=adhere_vel_tol` 后粘滞进入 `SOFT_DOCKING`/`WALL_ADHERED`；该阶段内未贴壁时 `AdherePidController` 之外的 Y/Z/姿态+X 全部由 `SixDofPidController` 驱动，X 向设定点以 `adhere_pid.approach_speed` 匀速逼近 `adhere_pid.x_wall`；一旦 4 垫估计法向力之和超过 `adhere_pid.dock_force_thresh` 且位置进入 `adhere_pid.x_dock_eps`，粘滞切换为贴壁态：X 向改由专用 `AdherePidController` 的法向力 PI 律覆盖，Y/Z/姿态仍由 `SixDofPidController` 保持；`/rov/adhere_target_cmd` 实时改变目标且越过阈值时强制退回 `STANDOFF_HOMING` |
+| `ADHERE_SMC_WBC` (`state_adhere_smc_wbc`) | 5 | 贴壁 SMC 基线（Phase 3.8，三阶段序列）：`STANDOFF_HOMING`/`SOFT_DOCKING`/`WALL_ADHERED` 门限与 `ADHERE_PID_WBC` 完全一致；全程只用一个 `SixDofSmcController` 实例驱动全部 6DOF（不为逼近阶段单独构造位置控制器），滑模面叠加了 Y/Z 积分项（`adhere_smc.ki`）以对抗贴壁后的静摩擦，贴壁判定与 `ADHERE_PID_WBC` 相同，贴壁后额外叠加常值压墙偏置 `adhere_smc.wall_preload_fx` |
+| `ADHERE_MPPI_BASELINE` (`state_adhere_mppi_baseline`) | 6 | 纯 CUDA 外环 MPPI 基线（Phase 4.1，三阶段序列，无独立 `SOFT_DOCKING` 子阶段）：`enter()` 锁存当前位姿为目标并调用 `BaselineMppiController::warmStart()`；`STANDOFF_HOMING` 阶段同样先锁定 Y/Z/X standoff 目标（实时读取 `CtrlInterfaces::adhere_target_`），对齐后直接进入 `WALL_ADHERED` 把目标 X 改为 `BaselineMppiController::xWall()`（实际逼近/压墙由 CUDA 滚动代价里的墙面接触惩罚 + `preload_fx` 完成）；设定点/摇杆设定点积分与 `HOLD_PID_6DOF` 同构，但在 `STANDOFF_HOMING` 期间被目标覆盖 |
 
 ### 三阶段贴壁序列（`STANDOFF_HOMING` → `SOFT_DOCKING` → `WALL_ADHERED`，Phase 4.2，重命名/扩展于本阶段）
 
@@ -298,9 +290,11 @@ on_activate()`（与各 `FSMState` 构造 `B`/`B^+` 同一时机）预计算：
   （Rhombic Kern 4 条边约束，尚未接入任何实时约束，留给 Phase 4 的 12D
   OSQP）。
 
-`a_contact_`/`c_kern_` 用于把 `/rov/controller_state` 的 `contact_forces`/
-`kern_margin` 由**已下达的推力指令**估计出来（而非直接读测量贴垫力
-传感器），与未来 KAMR-MPPI 约束用的是同一套准静态预测模型。
+`a_contact_`/`c_kern_` 用于把 `/rov/controller_state` 的 `contact_forces`
+（`kern_margin` 已于 Phase 5.0 Stage 7 随效率/安全遥测一起移至
+`/rov/benchmark_metrics`，见下文）由**已下达的推力指令**估计出来（而非
+直接读测量贴垫力传感器），与未来 KAMR-MPPI 约束用的是同一套准静态预测
+模型。
 
 ## 纯 CUDA 外环 Baseline MPPI：`algorithms/baseline_mppi/`（CLAUDE.md Phase 4.1）
 
@@ -349,8 +343,10 @@ wall_b/preload_fx/seed`）故意**不**挂在 `ModelParams` 下——它是算�
 `robot_control.yaml` 的 `baseline_mppi.*` 键，与 `ModelParams` 只保留物理
 真值的原则一致，方便未来 `algorithms/kamr_mppi/` 落地时拥有自己的一套
 配置/动力学表示而不触碰这里的任何代码。`BaselineMppiController::solve()`
-直接返回 8 维推力器指令（不经过 `MppiPlannerBase`/`WbcAllocatorBase` 这两
-个 Phase-4-KAMR 专用的纯数据契约抽象类）——Baseline MPPI 明确更简单，
+直接返回 8 维推力器指令（不经过 WBC 分配器；Phase 3.7 曾新增两个纯数据
+契约占位抽象类 `MppiPlannerBase`/`WbcAllocatorBase`，零子类，已于
+Phase 5.0 作为死代码删除——KAMR-MPPI 真正落地时会连同其具体实现一起
+重新引入接口，而不是提前预留）——Baseline MPPI 明确更简单，
 是未来 KAMR-MPPI 的消融对照基线，从不经过 WBC 分配器。
 
 ## 效率/啁啾/安全遥测：`ControllerMetrics.h`（CLAUDE.md Phase 3.8）
@@ -369,9 +365,13 @@ wall_b/preload_fx/seed`）故意**不**挂在 `ModelParams` 下——它是算�
   `>=98%`，而非硬编码额定值）、`active_contact_pad_count`（按
   `contact_force_thresh` 判定）。
 
-这 7 个字段随既有 `contact_forces`/`kern_margin` 一起发布在
-`/rov/controller_state` 上，供 `adhere_keyboard_input` 的
-`fsm_console_node`/`rt_monitor_node`/`benchmark_evaluator_node` 消费。
+这 7 个字段连同 `kern_margin` 共 8 个，发布在独立的 `/rov/benchmark_metrics`
+话题上（`BenchmarkMetrics.msg`，Phase 5.0 Stage 7 从 `ControllerState.msg`
+拆出，与 `/rov/runtime_diagnostics` 共用同一个 10Hz "diag" `MultiRateDecimator`
+通道）——`/rov/controller_state` 只保留精简的 FSM/位姿反馈，供
+`fsm_console_node`（显示效率摘要时也订阅 `/rov/benchmark_metrics`）；
+`/rov/benchmark_metrics` 本身只被 `adhere_monitor` 的
+`rt_monitor_node`/`benchmark_evaluator_node` 消费。
 
 `AdhereController` 有一个真实的异步外环工作**线程**（`outerWorkerLoop()`，
 `on_activate()` 启动、`on_deactivate()`/析构函数 `join()`），通过
@@ -463,4 +463,4 @@ ros2 launch simplified_v1_description mujoco.launch.py headless:=true use_rviz:=
 `simplified_v1_description/config/robot_control.yaml` 一并传给同一个通用
 `adhere_mujoco_node` 可执行文件；传入 `autostart_controllers:="[]"` 可还原为纯
 开环、0 个控制器加载的行为。`launch_teleop:=false` 时的上位机/下位机分布式
-部署方式见 [`adhere_keyboard_input/README.md`](../../commands/adhere_keyboard_input/README.md)。
+部署方式见 [`adhere_teleop_gcs/README.md`](../../commands/adhere_teleop_gcs/README.md)。

@@ -76,11 +76,17 @@ def generate_launch_description():
                      "used to fill FsmState::ground_truth_pose for offline evaluation).")
     declare_launch_teleop = DeclareLaunchArgument(
         "launch_teleop", default_value="true",
-        description="If true, includes adhere_keyboard_input/launch/teleop_gcs.launch.py "
+        description="If true, includes adhere_teleop_gcs/launch/teleop_gcs.launch.py "
                      "(joy_node + xbox_teleop_node + fsm_console_node) for single-workstation "
                      "convenience. Set false when a separate Upper-Computer (GCS) laptop "
                      "already runs teleop_gcs.launch.py against this server (CLAUDE.md Phase "
                      "3.2 Stage 2.5), or when autostart_controllers is empty.")
+    declare_launch_apriltag_detector = DeclareLaunchArgument(
+        "launch_apriltag_detector", default_value="true",
+        description="If true, launches adhere_apriltag_detector's simulated proximity-triggered "
+                     "point publisher (CLAUDE.md Phase 5.0 Stage 6). Set false on real hardware, "
+                     "where a real apriltag_ros node publishes the identical /rov/tag_detection "
+                     "message instead.")
 
     def _make_robot_description(context):
         # Pure-xacro decoupling (CLAUDE.md Sec.3.1): `headless` stays a plain adhere_mujoco_node
@@ -147,6 +153,14 @@ def generate_launch_description():
             )
         )
 
+        apriltag_detector = Node(
+            package="adhere_apriltag_detector",
+            executable="adhere_apriltag_detector_node",
+            name="adhere_apriltag_detector_node",
+            output="screen",
+            condition=IfCondition(LaunchConfiguration("launch_apriltag_detector")),
+        )
+
         return [
             Node(
                 package="robot_state_publisher",
@@ -158,11 +172,12 @@ def generate_launch_description():
             adhere_mujoco_node_action,
             shutdown_on_mujoco_exit,
             rviz,
+            apriltag_detector,
         ]
 
     adhere_mujoco_node = OpaqueFunction(function=_make_robot_description)
 
-    teleop_gcs_share = get_package_share_directory("adhere_keyboard_input")
+    teleop_gcs_share = get_package_share_directory("adhere_teleop_gcs")
     teleop_gcs = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(teleop_gcs_share, "launch", "teleop_gcs.launch.py")),
@@ -180,6 +195,7 @@ def generate_launch_description():
             declare_autostart_controllers,
             declare_estimation_mode,
             declare_launch_teleop,
+            declare_launch_apriltag_detector,
             adhere_mujoco_node,
             teleop_gcs,
         ]
